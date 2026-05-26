@@ -36,7 +36,6 @@ const PROJECT_ROOT = process.cwd();
 const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
 const MIGRATIONS_DIR = path.join(PROJECT_ROOT, 'src/server/migrations');
-const oauthStates = new Map<string, number>();
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
 
@@ -627,7 +626,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       return;
     }
     const state = crypto.randomBytes(16).toString('hex');
-    oauthStates.set(state, Date.now());
+    await persistence.storeOAuthState(state, Date.now());
     log.info('auth.atlassian.start');
     res.writeHead(302, { Location: buildAuthUrl(config.atlassian, state) });
     res.end();
@@ -637,11 +636,10 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
   if (url.pathname === '/auth/atlassian/callback') {
     const state = url.searchParams.get('state');
     const code = url.searchParams.get('code');
-    if (!state || !oauthStates.has(state) || !code) {
+    if (!state || !code || !(await persistence.consumeOAuthState(state))) {
       sendError(res, 400, 'Invalid OAuth callback.');
       return;
     }
-    oauthStates.delete(state);
     const token = await exchangeCode(config.atlassian, code);
     const resources = await getAccessibleResources(token.access_token);
     const resource = choosePrimaryResource(resources);

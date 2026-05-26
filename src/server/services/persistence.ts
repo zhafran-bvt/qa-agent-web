@@ -60,6 +60,8 @@ interface StoredPushRunInput {
 export interface Persistence {
   initialize(): Promise<void>;
   ping(): Promise<{ ok: boolean; database: boolean; mode: 'postgres' | 'file+memory-fallback'; error?: string }>;
+  storeOAuthState(state: string, createdAt: number): Promise<void>;
+  consumeOAuthState(state: string): Promise<boolean>;
   getSession(sid: string): Promise<SessionRecord | null>;
   setSession(sid: string, session: SessionRecord): Promise<void>;
   deleteSession(sid: string): Promise<void>;
@@ -101,6 +103,14 @@ class ResilientPersistence implements Persistence {
 
   ping(): Promise<{ ok: boolean; database: boolean; mode: 'postgres' | 'file+memory-fallback'; error?: string }> {
     return this.active.ping();
+  }
+
+  storeOAuthState(state: string, createdAt: number): Promise<void> {
+    return this.active.storeOAuthState(state, createdAt);
+  }
+
+  consumeOAuthState(state: string): Promise<boolean> {
+    return this.active.consumeOAuthState(state);
   }
 
   getSession(sid: string): Promise<SessionRecord | null> {
@@ -150,6 +160,7 @@ class ResilientPersistence implements Persistence {
 
 class FileBackedPersistence implements Persistence {
   private readonly sessions = new Map<string, SessionRecord>();
+  private readonly oauthStates = new Map<string, number>();
 
   constructor(private readonly auditFile: string, private readonly logger: Logger) {}
 
@@ -161,6 +172,17 @@ class FileBackedPersistence implements Persistence {
       database: false,
       mode: 'file+memory-fallback',
     };
+  }
+
+  async storeOAuthState(state: string, createdAt: number): Promise<void> {
+    this.oauthStates.set(state, createdAt);
+  }
+
+  async consumeOAuthState(state: string): Promise<boolean> {
+    const createdAt = this.oauthStates.get(state);
+    if (!createdAt) return false;
+    this.oauthStates.delete(state);
+    return true;
   }
 
   async getSession(sid: string): Promise<SessionRecord | null> {
@@ -286,6 +308,32 @@ class PostgresPersistence implements Persistence {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  async storeOAuthState(state: string, createdAt: number): Promise<void> {
+    await this.pool.query(
+      `
+        INSERT INTO oauth_states (state, created_at)
+        VALUES ($1, to_timestamp($2 / 1000.0))
+        ON CONFLICT (state)
+        DO UPDATE SET created_at = EXCLUDED.created_at
+      `,
+      [state, createdAt]
+    );
+  }
+
+  async consumeOAuthState(state: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        DELETE FROM oauth_states
+        WHERE state = $1
+          AND created_at >= NOW() - INTERVAL '15 minutes'
+        RETURNING state
+      `,
+      [state]
+    );
+    await this.pool.query(`DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '15 minutes'`);
+    return Boolean(result.rowCount);
   }
 
   async getSession(sid: string): Promise<SessionRecord | null> {

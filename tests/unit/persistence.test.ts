@@ -41,3 +41,19 @@ test('file-backed persistence health ping reports fallback mode', async () => {
     mode: 'file+memory-fallback',
   });
 });
+
+test('file-backed persistence stores and consumes oauth state', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-agent-web-'));
+  const auditFile = path.join(tempDir, 'audit-log.jsonl');
+  const persistence = createPersistence({
+    databaseUrl: '',
+    auditFile,
+    logger,
+  });
+
+  await persistence.initialize();
+  await persistence.storeOAuthState('state-123', Date.now());
+
+  assert.equal(await persistence.consumeOAuthState('state-123'), true);
+  assert.equal(await persistence.consumeOAuthState('state-123'), false);
+});
