@@ -815,7 +815,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     scopedSectionCriteria,
     mainIssue,
     scopeConfluenceSection,
-    [...storyDescriptionResult.ignoredMetadataLabels, ...storyRenderedDescriptionResult.ignoredMetadataLabels]
+    [...new Set([...storyDescriptionResult.ignoredMetadataLabels, ...storyRenderedDescriptionResult.ignoredMetadataLabels])]
   );
   log?.info('context.scope_selection', {
     jiraKey: mainIssue.key,
