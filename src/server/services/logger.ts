@@ -1,4 +1,10 @@
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+interface RecentIssueEntry {
+  timestamp: string;
+  level: 'warn' | 'error';
+  message: string;
+  fields?: Record<string, unknown>;
+}
 
 const LOG_LEVELS: Record<LogLevel, number> = {
   debug: 10,
@@ -47,6 +53,12 @@ export interface Logger {
   error(message: string, fields?: Record<string, unknown>): void;
 }
 
+const recentIssues: RecentIssueEntry[] = [];
+
+export function getRecentIssues(limit = 20): RecentIssueEntry[] {
+  return recentIssues.slice(-limit).reverse();
+}
+
 class JsonLogger implements Logger {
   constructor(private readonly bindings: Record<string, unknown> = {}) {}
 
@@ -74,13 +86,18 @@ class JsonLogger implements Logger {
     if (!shouldLog(level)) return;
     const sanitizedBindings = sanitize(this.bindings) as Record<string, unknown>;
     const sanitizedFields = (fields ? sanitize(fields) : {}) as Record<string, unknown>;
+    const timestamp = new Date().toISOString();
     const payload = {
-      timestamp: new Date().toISOString(),
+      timestamp,
       level,
       message,
       ...sanitizedBindings,
       ...sanitizedFields,
     };
+    if (level === 'warn' || level === 'error') {
+      recentIssues.push({ timestamp, level, message, fields: sanitizedFields });
+      if (recentIssues.length > 100) recentIssues.splice(0, recentIssues.length - 100);
+    }
     const line = `${JSON.stringify(payload)}\n`;
     if (level === 'error' || level === 'warn') {
       process.stderr.write(line);

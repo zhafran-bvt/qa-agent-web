@@ -1,10 +1,34 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { analyzeContext, generateCases, loadConfig, logout, pushCases, validateCases } from './api';
+import {
+  analyzeContext,
+  generateCases,
+  loadConfig,
+  loadDiagnostics,
+  loadHistoryRun,
+  loadHistoryRuns,
+  logout,
+  pushCases,
+  validateCases,
+} from './api';
 import { AnalyzePanel } from './components/AnalyzePanel';
 import { ApprovalPanel } from './components/ApprovalPanel';
 import { ContextPanel } from './components/ContextPanel';
+import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { HistoryPanel } from './components/HistoryPanel';
+import { RegenerateDiffPanel } from './components/RegenerateDiffPanel';
 import { ReviewPanel } from './components/ReviewPanel';
-import type { AnalyzeRequest, ConfigResponse, CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../shared/contracts';
+import type {
+  AnalyzeRequest,
+  ConfigResponse,
+  CoverageSummary,
+  DiagnosticsResponse,
+  GenerateResponse,
+  GeneratedTestCase,
+  QaContext,
+  ValidationEntry,
+  WorkflowHistoryDetail,
+  WorkflowHistorySummary,
+} from '../shared/contracts';
 
 const initialForm: AnalyzeRequest = {
   jiraKey: '',
@@ -13,6 +37,8 @@ const initialForm: AnalyzeRequest = {
   includeComments: true,
   notes: '',
 };
+
+type PendingGeneration = GenerateResponse;
 
 export default function App() {
   const [config, setConfig] = useState<ConfigResponse | null>(null);
@@ -33,13 +59,30 @@ export default function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [pushing, setPushing] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyRuns, setHistoryRuns] = useState<WorkflowHistorySummary[]>([]);
+  const [selectedHistoryRun, setSelectedHistoryRun] = useState<WorkflowHistoryDetail | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
+  const [generatedRunId, setGeneratedRunId] = useState<string>('');
+  const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration | null>(null);
   const skipNextValidation = useRef(false);
+
+  async function refreshAuxiliaryData() {
+    try {
+      const [history, diag] = await Promise.all([loadHistoryRuns(), loadDiagnostics()]);
+      setHistoryRuns(history.runs);
+      setDiagnostics(diag);
+    } catch (loadError) {
+      setError((loadError as Error).message);
+    }
+  }
 
   useEffect(() => {
     loadConfig()
-      .then((response) => {
+      .then(async (response) => {
         setConfig(response);
         setSectionId(response.defaults.testrailSectionId || '');
+        if (response.authenticated) await refreshAuxiliaryData();
       })
       .catch((loadError) => setError((loadError as Error).message))
       .finally(() => setLoadingConfig(false));
@@ -93,11 +136,25 @@ export default function App() {
       setOverrideReason('');
       setApproved(false);
       setPushResults('');
+      setGeneratedRunId('');
+      setPendingGeneration(null);
     } catch (analyzeError) {
       setError((analyzeError as Error).message);
     } finally {
       setAnalyzing(false);
     }
+  }
+
+  function applyGeneration(response: GenerateResponse) {
+    skipNextValidation.current = true;
+    setTestCases(response.testCases);
+    setValidation(response.validation);
+    setCoverage(response.coverage);
+    setCoverageEnforced(response.coverageEnforced !== false);
+    setManualScopeOverride(Boolean(response.manualScopeOverride));
+    setApproved(false);
+    setPushResults(`Generated with ${response.provider} / ${response.model}`);
+    setGeneratedRunId(response.runId || '');
   }
 
   async function handleGenerate() {
@@ -110,14 +167,13 @@ export default function App() {
         confidencePermissionApproved: confidenceApproved,
         manualScopeOverrideReason: overrideReason,
       });
-      skipNextValidation.current = true;
-      setTestCases(response.testCases);
-      setValidation(response.validation);
-      setCoverage(response.coverage);
-      setCoverageEnforced(response.coverageEnforced !== false);
-      setManualScopeOverride(Boolean(response.manualScopeOverride));
-      setApproved(false);
-      setPushResults(`Generated with ${response.provider} / ${response.model}`);
+      if (testCases.length > 0) {
+        setPendingGeneration(response);
+        setPushResults(`Candidate generated with ${response.provider} / ${response.model}. Review diff before replace.`);
+      } else {
+        applyGeneration(response);
+      }
+      await refreshAuxiliaryData();
     } catch (generateError) {
       setError((generateError as Error).message);
     } finally {
@@ -133,6 +189,7 @@ export default function App() {
       const response = await pushCases({
         approved,
         sectionId,
+        generatedRunId,
         jiraKey: context.ticketKey,
         epic: context.epic,
         feOnly: context.constraints.feOnly,
@@ -141,6 +198,7 @@ export default function App() {
         testCases,
       });
       setPushResults(JSON.stringify(response, null, 2));
+      await refreshAuxiliaryData();
     } catch (pushError) {
       setPushResults((pushError as Error).message);
     } finally {
@@ -159,15 +217,25 @@ export default function App() {
     window.location.reload();
   }
 
+  async function handleOpenHistoryRun(id: string) {
+    setHistoryLoading(true);
+    try {
+      const response = await loadHistoryRun(id);
+      setSelectedHistoryRun(response.run);
+    } catch (historyError) {
+      setError((historyError as Error).message);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <header className="hero">
         <div>
           <div className="eyebrow">QA Agent</div>
           <h1>BDD generation from Jira, Story scope, and PRD context</h1>
-          <p>
-            Analyze the implementation chain, review typed test cases, validate AC coverage, and push approved cases to TestRail.
-          </p>
+          <p>Analyze the implementation chain, review typed test cases, validate AC coverage, and push approved cases to TestRail.</p>
         </div>
 
         <div className="hero-actions">
@@ -176,6 +244,7 @@ export default function App() {
             <div className="auth-value">
               {loadingConfig ? 'Checking...' : config?.authenticated ? `Logged in as ${config.user}` : 'Not logged in'}
             </div>
+            {config?.session?.expiresAt ? <div className="muted">Session expiry: {new Date(config.session.expiresAt).toLocaleString()}</div> : null}
             {config?.authenticated ? (
               <button className="button button-secondary" type="button" onClick={handleLogout}>
                 Logout
@@ -206,6 +275,18 @@ export default function App() {
             />
           </div>
 
+          {pendingGeneration ? (
+            <RegenerateDiffPanel
+              currentCases={testCases}
+              candidate={pendingGeneration}
+              onReplace={() => {
+                applyGeneration(pendingGeneration);
+                setPendingGeneration(null);
+              }}
+              onCancel={() => setPendingGeneration(null)}
+            />
+          ) : null}
+
           <ReviewPanel
             context={context}
             testCases={testCases}
@@ -215,6 +296,9 @@ export default function App() {
             manualScopeOverride={manualScopeOverride}
             onCaseChange={handleCaseChange}
           />
+
+          <HistoryPanel runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
+          <DiagnosticsPanel diagnostics={diagnostics} />
         </div>
 
         <ApprovalPanel

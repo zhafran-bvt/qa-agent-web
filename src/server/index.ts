@@ -3,15 +3,30 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { AtlassianClient, buildAuthUrl, exchangeCode, getAccessibleResources, type AccessibleResource } from './services/atlassian';
+import {
+  AtlassianClient,
+  buildAuthUrl,
+  exchangeCode,
+  getAccessibleResources,
+  refreshAccessToken,
+  type AccessibleResource,
+} from './services/atlassian';
 import { buildQaContext } from './services/context-builder';
 import { generateTestCases } from './services/llm';
 import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
-import { logger } from './services/logger';
+import { getRecentIssues, logger } from './services/logger';
 import { createPersistence, type SessionRecord } from './services/persistence';
-import type { AnalyzeRequest, ConfigResponse, GenerateRequest, PushRequest, QaContext, ValidateRequest } from '../shared/contracts';
+import type {
+  AnalyzeRequest,
+  ConfigResponse,
+  DiagnosticsResponse,
+  GenerateRequest,
+  PushRequest,
+  QaContext,
+  ValidateRequest,
+} from '../shared/contracts';
 
 const PORT = Number(process.env.PORT || process.env.QA_AGENT_PORT || 5174);
 const DEFAULT_BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`;
@@ -20,6 +35,7 @@ const IS_HTTPS = APP_BASE_URL.startsWith('https://');
 const PROJECT_ROOT = process.cwd();
 const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
+const MIGRATIONS_DIR = path.join(PROJECT_ROOT, 'src/server/migrations');
 const oauthStates = new Map<string, number>();
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
@@ -60,6 +76,8 @@ const persistence = createPersistence({
   databaseUrl: process.env.DATABASE_URL || '',
   auditFile: AUDIT_FILE,
   logger,
+  migrationsDir: MIGRATIONS_DIR,
+  allowFallbackOnInitError: !process.env.RAILWAY_PUBLIC_DOMAIN && process.env.NODE_ENV !== 'production',
 });
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -102,18 +120,27 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
   );
 }
 
+function getSessionId(req: IncomingMessage): string | null {
+  return parseCookies(req).qa_sid || null;
+}
+
 async function getSession(req: IncomingMessage) {
-  const sid = parseCookies(req).qa_sid;
+  const sid = getSessionId(req);
   return sid ? persistence.getSession(sid) : null;
 }
 
 async function requireSession(req: IncomingMessage, res: ServerResponse) {
-  const session = await getSession(req);
+  const sid = getSessionId(req);
+  if (!sid) {
+    sendError(res, 401, 'Atlassian login required.');
+    return null;
+  }
+  const session = await persistence.getSession(sid);
   if (!session) {
     sendError(res, 401, 'Atlassian login required.');
     return null;
   }
-  return session;
+  return { sid, session };
 }
 
 async function readBody<T>(req: IncomingMessage): Promise<T> {
@@ -153,11 +180,40 @@ async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise
   }
 }
 
-function createClient(session: SessionRecord, log = logger): AtlassianClient {
+async function refreshSessionToken(sid: string, session: SessionRecord, log = logger): Promise<SessionRecord> {
+  const current = (await persistence.getSession(sid)) || session;
+  if (!current.refreshToken) {
+    throw new Error('Atlassian session cannot be refreshed because no refresh token is stored.');
+  }
+  const refreshed = await refreshAccessToken(config.atlassian, current.refreshToken);
+  const resources = await getAccessibleResources(refreshed.access_token);
+  const selectedResource = choosePrimaryResource(resources) || current.selectedResource || null;
+  const updated: SessionRecord = {
+    ...current,
+    accessToken: refreshed.access_token,
+    refreshToken: refreshed.refresh_token || current.refreshToken,
+    cloudId: selectedResource?.id || current.cloudId,
+    resources,
+    selectedResource,
+    expiresAt: refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : current.expiresAt || null,
+  };
+  await persistence.setSession(sid, updated);
+  log.info('auth.atlassian.token_refreshed', {
+    cloudId: updated.cloudId,
+    user: updated.user,
+    expiresAt: updated.expiresAt,
+  });
+  return updated;
+}
+
+function createClient(sid: string, session: SessionRecord, log = logger): AtlassianClient {
   return new AtlassianClient({
     accessToken: session.accessToken,
     cloudId: session.cloudId,
     resources: session.resources || [],
+    expiresAt: session.expiresAt || null,
+    selectedResource: session.selectedResource || null,
+    refreshSession: () => refreshSessionToken(sid, session, log),
     logger: log,
   });
 }
@@ -223,10 +279,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const body: ConfigResponse = {
       authenticated: Boolean(session),
       user: session?.user || null,
+      session: session
+        ? {
+            expiresAt: session.expiresAt || null,
+            selectedResource: session.selectedResource
+              ? {
+                  cloudId: session.selectedResource.id,
+                  url: session.selectedResource.url || null,
+                  name: session.selectedResource.name || null,
+                }
+              : null,
+          }
+        : undefined,
       ready: {
         atlassian: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
         llm: config.llm.providers.some((provider) => Boolean(provider.apiKey)),
         testrail: Boolean(config.testrail.baseUrl && config.testrail.user && config.testrail.apiKey),
+        database: persistence.isDatabaseBacked(),
       },
       defaults: {
         testrailSectionId: process.env.TESTRAIL_SECTION_ID || '',
@@ -241,8 +310,68 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/healthz') {
+    const health = await persistence.ping();
+    sendJson(res, health.ok ? 200 : 503, {
+      ok: health.ok,
+      database: health.database,
+      persistenceMode: health.mode,
+      timestamp: new Date().toISOString(),
+      ...(health.error ? { error: health.error } : {}),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/diagnostics') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { session } = sessionEnvelope;
+    const body: DiagnosticsResponse = {
+      auth: {
+        configured: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
+        selectedResource: session?.selectedResource
+          ? {
+              cloudId: session.selectedResource.id,
+              url: session.selectedResource.url || null,
+              name: session.selectedResource.name || null,
+            }
+          : null,
+        sessionExpiresAt: session?.expiresAt || null,
+      },
+      persistence: persistence.getDiagnostics(),
+      readiness: {
+        atlassian: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
+        llm: config.llm.providers.some((provider) => Boolean(provider.apiKey)),
+        testrail: Boolean(config.testrail.baseUrl && config.testrail.user && config.testrail.apiKey),
+        database: persistence.isDatabaseBacked(),
+      },
+      recentIssues: getRecentIssues(),
+    };
+    sendJson(res, 200, body);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/history/runs') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    sendJson(res, 200, { runs: await persistence.listHistoryRuns(100) });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname.startsWith('/api/history/runs/')) {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const run = await persistence.getHistoryRun(decodeURIComponent(url.pathname.slice('/api/history/runs/'.length)));
+    if (!run) {
+      sendError(res, 404, 'History run not found.');
+      return;
+    }
+    sendJson(res, 200, { run });
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/logout') {
-    const sid = parseCookies(req).qa_sid;
+    const sid = getSessionId(req);
     if (sid) await persistence.deleteSession(sid);
     res.writeHead(204, { 'Set-Cookie': buildSessionCookie('', 0) });
     res.end();
@@ -250,8 +379,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   }
 
   if (req.method === 'POST' && url.pathname === '/api/analyze') {
-    const session = await requireSession(req, res);
-    if (!session) return;
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { sid, session } = sessionEnvelope;
     const body = await readBody<AnalyzeRequest>(req);
     const jiraKey = String(body.jiraKey || '').trim().toUpperCase();
     if (!jiraKey) {
@@ -265,13 +395,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
     });
-    const context = await buildQaContext(createClient(session, log), jiraKey, {
+    const context = await buildQaContext(createClient(sid, session, log), jiraKey, {
       feOnly: body.feOnly !== false,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
       notes: body.notes || '',
       logger: log,
     });
+    const analysisRunId = await persistence.createAnalysisRun({ jiraKey, user: session.user, context });
+    if (analysisRunId) context.analysisRunId = analysisRunId;
     log.info('api.analyze.complete', {
       jiraKey,
       user: session.user,
@@ -286,8 +418,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   }
 
   if (req.method === 'POST' && url.pathname === '/api/generate') {
-    const session = await requireSession(req, res);
-    if (!session) return;
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { session } = sessionEnvelope;
     if (!config.llm.providers.some((provider) => provider.apiKey)) {
       sendError(res, 400, 'No LLM provider API key is configured.');
       return;
@@ -329,6 +462,20 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const coverage = buildCoverage(testCases, body.context.acceptanceCriteria, {
       enforceAcceptanceCriteria: coverageEnforced,
     });
+    const runId = body.context.analysisRunId
+      ? await persistence.createGeneratedRun({
+          analysisRunId: body.context.analysisRunId,
+          jiraKey: body.context.ticketKey,
+          user: session.user,
+          provider: generation.provider,
+          model: generation.model,
+          testCases,
+          validation,
+          coverage,
+          coverageEnforced,
+          manualScopeOverride: generationContext.manualScopeOverride,
+        })
+      : null;
     log.info('api.generate.complete', {
       jiraKey: body.context.ticketKey,
       user: session.user,
@@ -352,6 +499,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       coverageEnforced,
     });
     sendJson(res, 200, {
+      runId,
       testCases,
       validation,
       coverage,
@@ -359,6 +507,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       manualScopeOverride: generationContext.manualScopeOverride,
       provider: generation.provider,
       model: generation.model,
+      pendingReplacement: false,
     });
     return;
   }
@@ -391,8 +540,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   }
 
   if (req.method === 'POST' && url.pathname === '/api/push') {
-    const session = await requireSession(req, res);
-    if (!session) return;
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { session } = sessionEnvelope;
     if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
       sendError(res, 400, 'TestRail configuration is incomplete.');
       return;
@@ -428,12 +578,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       return;
     }
     const results = await pushCases(config.testrail, sectionId, body.testCases || []);
+    const summary = summarizeResults(results);
+    if (body.generatedRunId) {
+      await persistence.createPushRun({
+        generatedRunId: body.generatedRunId,
+        jiraKey: body.jiraKey,
+        user: session.user,
+        sectionId,
+        approved: body.approved,
+        results,
+        summary,
+      });
+    }
     log.info('api.push.complete', {
       jiraKey: body.jiraKey,
       user: session.user,
       sectionId,
-      pushed: results.filter((item) => item.ok).length,
-      failed: results.filter((item) => !item.ok).length,
+      pushed: summary.pushed,
+      failed: summary.failed,
     });
     await appendAudit({
       type: 'push',
@@ -442,7 +604,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sectionId,
       results,
     });
-    sendJson(res, 200, { results, summary: summarizeResults(results) });
+    sendJson(res, 200, { results, summary });
     return;
   }
 
@@ -504,8 +666,10 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       refreshToken: token.refresh_token,
       cloudId: resource.id,
       resources,
+      selectedResource: resource,
       user: resource.name || resource.url || resource.id,
       createdAt: Date.now(),
+      expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : null,
     };
     await persistence.setSession(sid, sessionRecord);
     log.info('auth.atlassian.complete', {
@@ -561,14 +725,17 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function startServer() {
+  validateStartupConfig();
   await persistence.initialize();
   server.listen(PORT, '0.0.0.0', () => {
+    const persistenceDiagnostics = persistence.getDiagnostics();
     logger.info('server.start', {
       appBaseUrl: APP_BASE_URL,
       host: '0.0.0.0',
       port: PORT,
       logLevel: process.env.LOG_LEVEL || 'info',
-      persistence: persistence.isDatabaseBacked() ? 'postgres' : 'file+memory-fallback',
+      persistence: persistenceDiagnostics.mode,
+      migrationVersion: persistenceDiagnostics.currentVersion,
     });
   });
 }
@@ -592,5 +759,21 @@ function loadEnv(envPath: string): void {
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function validateStartupConfig(): void {
+  if (!config.atlassian.clientId || !config.atlassian.clientSecret) {
+    logger.warn('startup.config.atlassian_missing');
+  }
+  if (!config.llm.providers.some((provider) => provider.apiKey)) {
+    logger.warn('startup.config.llm_missing');
+  }
+  if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+    logger.warn('startup.config.testrail_missing');
+  }
+  const hosted = Boolean(process.env.RAILWAY_PUBLIC_DOMAIN || process.env.NODE_ENV === 'production');
+  if (hosted && !process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is required for hosted Phase 2 deployments.');
   }
 }

@@ -7,10 +7,19 @@ export interface LlmProviderStatus {
 export interface ConfigResponse {
   authenticated: boolean;
   user?: string | null;
+  session?: {
+    expiresAt?: number | null;
+    selectedResource?: {
+      cloudId: string;
+      url?: string | null;
+      name?: string | null;
+    } | null;
+  };
   ready: {
     atlassian: boolean;
     llm: boolean;
     testrail: boolean;
+    database: boolean;
   };
   defaults: {
     testrailSectionId: string;
@@ -116,6 +125,7 @@ export interface AcceptanceCriteriaDiagnostics {
 }
 
 export interface QaContext {
+  analysisRunId?: string;
   ticketKey: string;
   epic: string;
   mainIssue: MainIssueSummary;
@@ -201,6 +211,7 @@ export interface GenerateRequest {
 }
 
 export interface GenerateResponse {
+  runId?: string;
   testCases: GeneratedTestCase[];
   validation: ValidationEntry[];
   coverage: CoverageSummary;
@@ -208,6 +219,7 @@ export interface GenerateResponse {
   manualScopeOverride: boolean;
   provider: string;
   model: string;
+  pendingReplacement: boolean;
 }
 
 export interface ValidateRequest {
@@ -230,6 +242,7 @@ export interface ValidateResponse {
 export interface PushRequest extends ValidateRequest {
   approved: boolean;
   sectionId: string;
+  generatedRunId?: string;
 }
 
 export interface PushCaseResult {
@@ -246,4 +259,79 @@ export interface PushResponse {
     failed: number;
     total: number;
   };
+}
+
+export interface WorkflowHistorySummary {
+  id: string;
+  entryType: 'analysis' | 'generation' | 'push';
+  jiraKey: string;
+  user: string;
+  createdAt: string;
+  provider?: string;
+  model?: string;
+  caseCount?: number;
+  pushed?: number;
+  failed?: number;
+  status: 'completed' | 'pushed';
+}
+
+export interface WorkflowHistoryDetail {
+  id: string;
+  entryType: 'analysis' | 'generation' | 'push';
+  jiraKey: string;
+  user: string;
+  createdAt: string;
+  context: QaContext | null;
+  testCases: GeneratedTestCase[];
+  validation: ValidationEntry[];
+  coverage: CoverageSummary | null;
+  provider?: string;
+  model?: string;
+  push?: {
+    sectionId: string;
+    summary: {
+      pushed: number;
+      failed: number;
+      total: number;
+    };
+    results: PushCaseResult[];
+    createdAt: string;
+  } | null;
+}
+
+export interface WorkflowHistoryListResponse {
+  runs: WorkflowHistorySummary[];
+}
+
+export interface WorkflowHistoryDetailResponse {
+  run: WorkflowHistoryDetail;
+}
+
+export interface DiagnosticsResponse {
+  auth: {
+    configured: boolean;
+    selectedResource: {
+      cloudId: string;
+      url?: string | null;
+      name?: string | null;
+    } | null;
+    sessionExpiresAt?: number | null;
+  };
+  persistence: {
+    mode: 'postgres' | 'file+memory-fallback';
+    migrationsEnabled: boolean;
+    currentVersion: string | null;
+  };
+  readiness: {
+    atlassian: boolean;
+    llm: boolean;
+    testrail: boolean;
+    database: boolean;
+  };
+  recentIssues: Array<{
+    timestamp: string;
+    level: 'warn' | 'error';
+    message: string;
+    fields?: Record<string, unknown>;
+  }>;
 }

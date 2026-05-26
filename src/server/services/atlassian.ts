@@ -16,6 +16,7 @@ interface RequestOptions {
 interface AtlassianTokenResponse {
   access_token: string;
   refresh_token?: string;
+  expires_in?: number;
 }
 
 export interface AccessibleResource {
@@ -80,7 +81,11 @@ function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknow
             return;
           }
           const errorBody = parsedBody as { error_description?: string; error?: string };
-          reject(new Error(errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`));
+          const error = new Error(errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`) as Error & {
+            statusCode?: number;
+          };
+          error.statusCode = res.statusCode;
+          reject(error);
         });
       }
     );
@@ -116,6 +121,19 @@ export async function exchangeCode(config: AtlassianAuthConfig, code: string): P
       client_secret: config.clientSecret,
       code,
       redirect_uri: config.redirectUri,
+    }
+  );
+}
+
+export async function refreshAccessToken(config: AtlassianAuthConfig, refreshToken: string): Promise<AtlassianTokenResponse> {
+  return requestJson<AtlassianTokenResponse>(
+    ATLASSIAN_TOKEN_URL,
+    { method: 'POST' },
+    {
+      grant_type: 'refresh_token',
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: refreshToken,
     }
   );
 }
@@ -201,22 +219,48 @@ export class AtlassianClient {
   private accessToken: string;
   private cloudId: string;
   private resources: AccessibleResource[];
+  private expiresAt: number | null;
+  private selectedResource: AccessibleResource | null;
   private logger?: Logger;
+  private readonly refreshSession?: () => Promise<{
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: number | null;
+    cloudId: string;
+    resources: AccessibleResource[];
+    selectedResource?: AccessibleResource | null;
+  }>;
 
   constructor({
     accessToken,
     cloudId,
     resources = [],
+    expiresAt = null,
+    selectedResource = null,
+    refreshSession,
     logger,
   }: {
     accessToken: string;
     cloudId: string;
     resources?: AccessibleResource[];
+    expiresAt?: number | null;
+    selectedResource?: AccessibleResource | null;
+    refreshSession?: () => Promise<{
+      accessToken: string;
+      refreshToken?: string;
+      expiresAt?: number | null;
+      cloudId: string;
+      resources: AccessibleResource[];
+      selectedResource?: AccessibleResource | null;
+    }>;
     logger?: Logger;
   }) {
     this.accessToken = accessToken;
     this.cloudId = cloudId;
     this.resources = resources;
+    this.expiresAt = expiresAt;
+    this.selectedResource = selectedResource;
+    this.refreshSession = refreshSession;
     this.logger = logger;
   }
 
@@ -236,6 +280,40 @@ export class AtlassianClient {
     return `${ATLASSIAN_API_BASE}/ex/confluence/${cloudId}/wiki/api/v2${requestPath}`;
   }
 
+  private async ensureFreshToken(): Promise<void> {
+    if (!this.refreshSession || !this.expiresAt) return;
+    if (Date.now() < this.expiresAt - 60_000) return;
+    await this.refreshAuthState();
+  }
+
+  private async refreshAuthState(): Promise<void> {
+    if (!this.refreshSession) return;
+    const refreshed = await this.refreshSession();
+    this.accessToken = refreshed.accessToken;
+    this.cloudId = refreshed.cloudId;
+    this.resources = refreshed.resources || [];
+    this.expiresAt = refreshed.expiresAt || null;
+    this.selectedResource = refreshed.selectedResource || null;
+    if (this.selectedResource?.id) this.cloudId = this.selectedResource.id;
+  }
+
+  private async requestWithRefresh<T>(request: () => Promise<T>): Promise<T> {
+    await this.ensureFreshToken();
+    try {
+      return await request();
+    } catch (error) {
+      const typedError = error as Error & { statusCode?: number };
+      if (typedError.statusCode === 401 && this.refreshSession) {
+        this.logger?.warn('atlassian.request.unauthorized_refresh_retry', {
+          errorMessage: typedError.message,
+        });
+        await this.refreshAuthState();
+        return request();
+      }
+      throw error;
+    }
+  }
+
   async getIssue(issueKey: string): Promise<SimplifiedIssue> {
     const fields = [
       'summary',
@@ -253,17 +331,20 @@ export class AtlassianClient {
       'assignee',
       'reporter',
     ].join(',');
-    const issue = await requestJson<Record<string, unknown>>(
-      this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}?fields=${fields}&expand=renderedFields`),
-      { headers: this.headers() }
+    const issue = await this.requestWithRefresh(() =>
+      requestJson<Record<string, unknown>>(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}?fields=${fields}&expand=renderedFields`), {
+        headers: this.headers(),
+      })
     );
     return simplifyIssue(issue);
   }
 
   async getRemoteLinks(issueKey: string): Promise<Array<Record<string, unknown>>> {
-    return requestJson<Array<Record<string, unknown>>>(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}/remotelink`), {
-      headers: this.headers(),
-    });
+    return this.requestWithRefresh(() =>
+      requestJson<Array<Record<string, unknown>>>(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}/remotelink`), {
+        headers: this.headers(),
+      })
+    );
   }
 
   async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string }> {
@@ -277,9 +358,11 @@ export class AtlassianClient {
     let lastError: Error | null = null;
     for (const candidateCloudId of candidates) {
       try {
-        const page = await requestJson<Record<string, any>>(this.confluenceUrlFor(candidateCloudId, `/pages/${pageId}?body-format=atlas_doc_format`), {
-          headers: this.headers(),
-        });
+        const page = await this.requestWithRefresh(() =>
+          requestJson<Record<string, any>>(this.confluenceUrlFor(candidateCloudId, `/pages/${pageId}?body-format=atlas_doc_format`), {
+            headers: this.headers(),
+          })
+        );
         if (candidateCloudId !== this.cloudId) {
           this.logger?.info('atlassian.confluence.resource_fallback_success', {
             pageId,
@@ -287,6 +370,7 @@ export class AtlassianClient {
             resolvedCloudId: candidateCloudId,
           });
           this.cloudId = candidateCloudId;
+          this.selectedResource = this.resources.find((resource) => resource.id === candidateCloudId) || this.selectedResource;
         }
         return {
           id: String(page.id),
@@ -310,9 +394,11 @@ export class AtlassianClient {
 
   async getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>> {
     try {
-      const comments = await requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}/footer-comments?limit=50`), {
-        headers: this.headers(),
-      });
+      const comments = await this.requestWithRefresh(() =>
+        requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}/footer-comments?limit=50`), {
+          headers: this.headers(),
+        })
+      );
       return (comments.results || []).map((comment: Record<string, any>) => ({
         id: String(comment.id),
         body: extractText(comment.body && comment.body.atlas_doc_format && comment.body.atlas_doc_format.value),

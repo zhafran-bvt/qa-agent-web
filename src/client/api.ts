@@ -2,12 +2,15 @@ import type {
   AnalyzeRequest,
   AnalyzeResponse,
   ConfigResponse,
+  DiagnosticsResponse,
   GenerateRequest,
   GenerateResponse,
   PushRequest,
   PushResponse,
   ValidateRequest,
   ValidateResponse,
+  WorkflowHistoryDetailResponse,
+  WorkflowHistoryListResponse,
 } from '../shared/contracts';
 
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -55,6 +58,18 @@ export function pushCases(payload: PushRequest): Promise<PushResponse> {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function loadHistoryRuns(): Promise<WorkflowHistoryListResponse> {
+  return requestJson<WorkflowHistoryListResponse>('/api/history/runs');
+}
+
+export function loadHistoryRun(id: string): Promise<WorkflowHistoryDetailResponse> {
+  return requestJson<WorkflowHistoryDetailResponse>(`/api/history/runs/${encodeURIComponent(id)}`);
+}
+
+export function loadDiagnostics(): Promise<DiagnosticsResponse> {
+  return requestJson<DiagnosticsResponse>('/api/diagnostics');
 }
 
 export async function logout(): Promise<void> {

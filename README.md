@@ -26,7 +26,7 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
 5. Set the callback URL to:
 
    ```text
-   http://localhost:5174/auth/atlassian/callback
+   http://localhost:5180/auth/atlassian/callback
    ```
 
 6. Fill these environment variables:
@@ -34,6 +34,7 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
    ```text
    ATLASSIAN_CLIENT_ID=
    ATLASSIAN_CLIENT_SECRET=
+   DATABASE_URL=
    OPENAI_API_KEY=
    DEEPSEEK_API_KEY=
    TESTRAIL_BASE_URL=
@@ -56,7 +57,7 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
 9. Open:
 
    ```text
-   http://localhost:5174
+   http://localhost:5180
    ```
 
    When running `npm run dev`, the React app is available at:
@@ -81,7 +82,8 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
    ATLASSIAN_CLIENT_ID=
    ATLASSIAN_CLIENT_SECRET=
    ATLASSIAN_REDIRECT_URI=https://<your-railway-domain>/auth/atlassian/callback
-   ATLASSIAN_SCOPES=read:jira-work read:confluence-content.all read:confluence-space.summary offline_access
+   ATLASSIAN_SCOPES=read:jira-work read:page:confluence read:confluence-content.all read:confluence-space.summary offline_access
+   DATABASE_URL=
    OPENAI_API_KEY=
    OPENAI_MODEL=gpt-5.4-mini
    DEEPSEEK_API_KEY=
@@ -100,9 +102,12 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
 
 5. Deploy and open the Railway public URL.
 
-Notes for this MVP:
-- Sessions are stored in memory. Users must log in again after restart or redeploy.
-- `audit-log.jsonl` is written to local service storage and may be lost on Railway redeploys or restarts.
+Phase 2 notes:
+- Railway deployments require `DATABASE_URL`.
+- Local development may use the Railway public Postgres proxy host in `.env`.
+- If local Postgres connection fails during `npm run dev`, the app falls back to file-and-memory mode so the API still starts.
+- Sessions, audit events, workflow history, and push history persist in Postgres when `DATABASE_URL` is configured.
+- Atlassian access tokens are refreshed automatically from stored refresh tokens when possible.
 
 ## Workflow
 
@@ -111,9 +116,21 @@ Notes for this MVP:
 3. Analyze Jira and linked Confluence context.
 4. Generate BDD test cases with the configured AI model.
 5. Review and edit the cases.
-6. Approve the cases.
-7. Enter TestRail section ID.
-8. Push to TestRail.
+6. If regenerating, review the before/after diff before replacing the current draft.
+7. Approve the cases.
+8. Enter TestRail section ID.
+9. Push to TestRail.
+10. Browse persisted history and diagnostics in the app.
+
+## Keepalive
+
+If your Railway plan does not allow disabling sleep, use an external monitor or cron to hit:
+
+```text
+GET /api/healthz
+```
+
+This endpoint is public and lightweight. When Postgres is active, it also performs a simple DB query so the request wakes both the app service and the database.
 
 ## Safety Rules
 

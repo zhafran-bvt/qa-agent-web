@@ -337,6 +337,70 @@ textarea {
   background: var(--warn-soft);
 }
 
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.history-list {
+  display: grid;
+  gap: 10px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.history-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+}
+
+.history-item span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.diff-list {
+  display: grid;
+  gap: 10px;
+}
+
+.diff-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.diff-added {
+  border-color: #b7e0c4;
+  background: #f2fbf5;
+}
+
+.diff-removed {
+  border-color: #f0b5ad;
+  background: #fff6f4;
+}
+
+.diff-changed {
+  border-color: #c7d4f7;
+  background: #f4f7ff;
+}
+
+.diff-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .case-list {
   display: grid;
   gap: 16px;
@@ -477,7 +541,8 @@ textarea {
 
 @media (max-width: 1280px) {
   .main-grid,
-  .top-grid {
+  .top-grid,
+  .history-grid {
     grid-template-columns: 1fr;
   }
 
