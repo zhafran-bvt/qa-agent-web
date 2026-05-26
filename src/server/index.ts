@@ -10,6 +10,7 @@ import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { logger } from './services/logger';
+import { createPersistence, type SessionRecord } from './services/persistence';
 import type { AnalyzeRequest, ConfigResponse, GenerateRequest, PushRequest, QaContext, ValidateRequest } from '../shared/contracts';
 
 const PORT = Number(process.env.PORT || process.env.QA_AGENT_PORT || 5174);
@@ -19,16 +20,6 @@ const IS_HTTPS = APP_BASE_URL.startsWith('https://');
 const PROJECT_ROOT = process.cwd();
 const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
-interface SessionRecord {
-  accessToken: string;
-  refreshToken?: string;
-  cloudId: string;
-  resources: AccessibleResource[];
-  user: string;
-  createdAt: number;
-}
-
-const sessions = new Map<string, SessionRecord>();
 const oauthStates = new Map<string, number>();
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
@@ -64,6 +55,12 @@ const config = {
     apiKey: process.env.TESTRAIL_API_KEY || '',
   },
 };
+
+const persistence = createPersistence({
+  databaseUrl: process.env.DATABASE_URL || '',
+  auditFile: AUDIT_FILE,
+  logger,
+});
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -105,13 +102,13 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
   );
 }
 
-function getSession(req: IncomingMessage) {
+async function getSession(req: IncomingMessage) {
   const sid = parseCookies(req).qa_sid;
-  return sid ? sessions.get(sid) : null;
+  return sid ? persistence.getSession(sid) : null;
 }
 
-function requireSession(req: IncomingMessage, res: ServerResponse) {
-  const session = getSession(req);
+async function requireSession(req: IncomingMessage, res: ServerResponse) {
+  const session = await getSession(req);
   if (!session) {
     sendError(res, 401, 'Atlassian login required.');
     return null;
@@ -156,7 +153,7 @@ async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise
   }
 }
 
-function createClient(session: NonNullable<ReturnType<typeof getSession>>, log = logger): AtlassianClient {
+function createClient(session: SessionRecord, log = logger): AtlassianClient {
   return new AtlassianClient({
     accessToken: session.accessToken,
     cloudId: session.cloudId,
@@ -215,14 +212,14 @@ function shouldEnforceAcceptanceCriteria(context: QaContext | null, confidencePe
 }
 
 async function appendAudit(event: Record<string, unknown>): Promise<void> {
-  await fsPromises.appendFile(AUDIT_FILE, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
+  await persistence.appendAudit(event);
 }
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger): Promise<void> {
   const url = new URL(req.url || '/', APP_BASE_URL);
 
   if (req.method === 'GET' && url.pathname === '/api/config') {
-    const session = getSession(req);
+    const session = await getSession(req);
     const body: ConfigResponse = {
       authenticated: Boolean(session),
       user: session?.user || null,
@@ -246,14 +243,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
 
   if (req.method === 'POST' && url.pathname === '/api/logout') {
     const sid = parseCookies(req).qa_sid;
-    if (sid) sessions.delete(sid);
+    if (sid) await persistence.deleteSession(sid);
     res.writeHead(204, { 'Set-Cookie': buildSessionCookie('', 0) });
     res.end();
     return;
   }
 
   if (req.method === 'POST' && url.pathname === '/api/analyze') {
-    const session = requireSession(req, res);
+    const session = await requireSession(req, res);
     if (!session) return;
     const body = await readBody<AnalyzeRequest>(req);
     const jiraKey = String(body.jiraKey || '').trim().toUpperCase();
@@ -289,7 +286,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   }
 
   if (req.method === 'POST' && url.pathname === '/api/generate') {
-    const session = requireSession(req, res);
+    const session = await requireSession(req, res);
     if (!session) return;
     if (!config.llm.providers.some((provider) => provider.apiKey)) {
       sendError(res, 400, 'No LLM provider API key is configured.');
@@ -394,7 +391,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   }
 
   if (req.method === 'POST' && url.pathname === '/api/push') {
-    const session = requireSession(req, res);
+    const session = await requireSession(req, res);
     if (!session) return;
     if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
       sendError(res, 400, 'TestRail configuration is incomplete.');
@@ -502,14 +499,15 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       })),
     });
     const sid = crypto.randomBytes(24).toString('hex');
-    sessions.set(sid, {
+    const sessionRecord: SessionRecord = {
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
       cloudId: resource.id,
       resources,
       user: resource.name || resource.url || resource.id,
       createdAt: Date.now(),
-    });
+    };
+    await persistence.setSession(sid, sessionRecord);
     log.info('auth.atlassian.complete', {
       cloudId: resource.id,
       user: resource.name || resource.url || resource.id,
@@ -562,13 +560,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  logger.info('server.start', {
-    appBaseUrl: APP_BASE_URL,
-    host: '0.0.0.0',
-    port: PORT,
-    logLevel: process.env.LOG_LEVEL || 'info',
+async function startServer() {
+  await persistence.initialize();
+  server.listen(PORT, '0.0.0.0', () => {
+    logger.info('server.start', {
+      appBaseUrl: APP_BASE_URL,
+      host: '0.0.0.0',
+      port: PORT,
+      logLevel: process.env.LOG_LEVEL || 'info',
+      persistence: persistence.isDatabaseBacked() ? 'postgres' : 'file+memory-fallback',
+    });
   });
+}
+
+void startServer().catch((error) => {
+  logger.error('server.start_failed', errorDetails(error));
+  process.exit(1);
 });
 
 function loadEnv(envPath: string): void {
