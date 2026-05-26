@@ -1,4 +1,5 @@
 import https from 'node:https';
+import type { Logger } from './logger';
 
 interface AtlassianAuthConfig {
   clientId: string;
@@ -17,7 +18,7 @@ interface AtlassianTokenResponse {
   refresh_token?: string;
 }
 
-interface AccessibleResource {
+export interface AccessibleResource {
   id: string;
   name?: string;
   url?: string;
@@ -199,10 +200,24 @@ export function extractPageId(url: string): string | null {
 export class AtlassianClient {
   private accessToken: string;
   private cloudId: string;
+  private resources: AccessibleResource[];
+  private logger?: Logger;
 
-  constructor({ accessToken, cloudId }: { accessToken: string; cloudId: string }) {
+  constructor({
+    accessToken,
+    cloudId,
+    resources = [],
+    logger,
+  }: {
+    accessToken: string;
+    cloudId: string;
+    resources?: AccessibleResource[];
+    logger?: Logger;
+  }) {
     this.accessToken = accessToken;
     this.cloudId = cloudId;
+    this.resources = resources;
+    this.logger = logger;
   }
 
   private headers(): Record<string, string> {
@@ -215,6 +230,10 @@ export class AtlassianClient {
 
   private confluenceUrl(requestPath: string): string {
     return `${ATLASSIAN_API_BASE}/ex/confluence/${this.cloudId}/wiki/api/v2${requestPath}`;
+  }
+
+  private confluenceUrlFor(cloudId: string, requestPath: string): string {
+    return `${ATLASSIAN_API_BASE}/ex/confluence/${cloudId}/wiki/api/v2${requestPath}`;
   }
 
   async getIssue(issueKey: string): Promise<SimplifiedIssue> {
@@ -248,16 +267,45 @@ export class AtlassianClient {
   }
 
   async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string }> {
-    const page = await requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}?body-format=atlas_doc_format`), {
-      headers: this.headers(),
+    const tried = new Set<string>();
+    const candidates = [this.cloudId, ...this.resources.map((resource) => resource.id)].filter((id) => {
+      if (!id || tried.has(id)) return false;
+      tried.add(id);
+      return true;
     });
-    return {
-      id: String(page.id),
-      title: page.title,
-      status: page.status,
-      webUrl: page._links && page._links.webui ? page._links.webui : null,
-      body: extractText(page.body && page.body.atlas_doc_format && page.body.atlas_doc_format.value),
-    };
+
+    let lastError: Error | null = null;
+    for (const candidateCloudId of candidates) {
+      try {
+        const page = await requestJson<Record<string, any>>(this.confluenceUrlFor(candidateCloudId, `/pages/${pageId}?body-format=atlas_doc_format`), {
+          headers: this.headers(),
+        });
+        if (candidateCloudId !== this.cloudId) {
+          this.logger?.info('atlassian.confluence.resource_fallback_success', {
+            pageId,
+            previousCloudId: this.cloudId,
+            resolvedCloudId: candidateCloudId,
+          });
+          this.cloudId = candidateCloudId;
+        }
+        return {
+          id: String(page.id),
+          title: page.title,
+          status: page.status,
+          webUrl: page._links && page._links.webui ? page._links.webui : null,
+          body: extractText(page.body && page.body.atlas_doc_format && page.body.atlas_doc_format.value),
+        };
+      } catch (error) {
+        lastError = error as Error;
+        this.logger?.warn('atlassian.confluence.resource_attempt_failed', {
+          pageId,
+          attemptedCloudId: candidateCloudId,
+          errorMessage: lastError.message,
+        });
+      }
+    }
+
+    throw lastError || new Error('Unable to resolve a Confluence resource for the requested page.');
   }
 
   async getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>> {

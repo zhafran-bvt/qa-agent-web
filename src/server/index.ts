@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { AtlassianClient, buildAuthUrl, exchangeCode, getAccessibleResources } from './services/atlassian';
+import { AtlassianClient, buildAuthUrl, exchangeCode, getAccessibleResources, type AccessibleResource } from './services/atlassian';
 import { buildQaContext } from './services/context-builder';
 import { generateTestCases } from './services/llm';
 import { pushCases } from './services/testrail';
@@ -19,7 +19,16 @@ const IS_HTTPS = APP_BASE_URL.startsWith('https://');
 const PROJECT_ROOT = process.cwd();
 const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
-const sessions = new Map<string, { accessToken: string; refreshToken?: string; cloudId: string; user: string; createdAt: number }>();
+interface SessionRecord {
+  accessToken: string;
+  refreshToken?: string;
+  cloudId: string;
+  resources: AccessibleResource[];
+  user: string;
+  createdAt: number;
+}
+
+const sessions = new Map<string, SessionRecord>();
 const oauthStates = new Map<string, number>();
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
@@ -147,8 +156,56 @@ async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise
   }
 }
 
-function createClient(session: NonNullable<ReturnType<typeof getSession>>): AtlassianClient {
-  return new AtlassianClient({ accessToken: session.accessToken, cloudId: session.cloudId });
+function createClient(session: NonNullable<ReturnType<typeof getSession>>, log = logger): AtlassianClient {
+  return new AtlassianClient({
+    accessToken: session.accessToken,
+    cloudId: session.cloudId,
+    resources: session.resources || [],
+    logger: log,
+  });
+}
+
+function choosePrimaryResource(resources: AccessibleResource[]): AccessibleResource | null {
+  if (!resources.length) return null;
+  const preferredHost = String(process.env.ATLASSIAN_SITE_HOST || '').trim().toLowerCase();
+  if (preferredHost) {
+    const matched = resources.find((resource) => {
+      try {
+        return new URL(resource.url || '').hostname.toLowerCase() === preferredHost;
+      } catch {
+        return false;
+      }
+    });
+    if (matched) return matched;
+  }
+
+  const preferredUrl = String(process.env.ATLASSIAN_SITE_URL || '').trim();
+  if (preferredUrl) {
+    try {
+      const preferredHostname = new URL(preferredUrl).hostname.toLowerCase();
+      const matched = resources.find((resource) => {
+        try {
+          return new URL(resource.url || '').hostname.toLowerCase() === preferredHostname;
+        } catch {
+          return false;
+        }
+      });
+      if (matched) return matched;
+    } catch {
+      // ignore invalid configured URL
+    }
+  }
+
+  const bvartaMatch = resources.find((resource) => {
+    try {
+      return /bvarta-project\.atlassian\.net$/i.test(new URL(resource.url || '').hostname);
+    } catch {
+      return false;
+    }
+  });
+  if (bvartaMatch) return bvartaMatch;
+
+  return resources[0];
 }
 
 function shouldEnforceAcceptanceCriteria(context: QaContext | null, confidencePermissionApproved: boolean): boolean {
@@ -211,7 +268,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
     });
-    const context = await buildQaContext(createClient(session), jiraKey, {
+    const context = await buildQaContext(createClient(session, log), jiraKey, {
       feOnly: body.feOnly !== false,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
@@ -428,16 +485,28 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
     oauthStates.delete(state);
     const token = await exchangeCode(config.atlassian, code);
     const resources = await getAccessibleResources(token.access_token);
-    const resource = resources[0];
+    const resource = choosePrimaryResource(resources);
     if (!resource) {
       sendError(res, 400, 'No Atlassian cloud resource is available for this account.');
       return;
     }
+    log.info('auth.atlassian.resources_resolved', {
+      selectedCloudId: resource.id,
+      selectedUrl: resource.url || '',
+      selectedName: resource.name || '',
+      resourceCount: resources.length,
+      resources: resources.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name || '',
+        url: candidate.url || '',
+      })),
+    });
     const sid = crypto.randomBytes(24).toString('hex');
     sessions.set(sid, {
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
       cloudId: resource.id,
+      resources,
       user: resource.name || resource.url || resource.id,
       createdAt: Date.now(),
     });
