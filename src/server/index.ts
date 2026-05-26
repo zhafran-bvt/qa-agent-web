@@ -260,6 +260,23 @@ function choosePrimaryResource(resources: AccessibleResource[]): AccessibleResou
   return resources[0];
 }
 
+function shouldLogRequestAtInfo(pathname: string, statusCode: number): boolean {
+  if (statusCode >= 400) return true;
+  if (pathname.startsWith('/auth/')) return true;
+  if (
+    pathname === '/api/analyze' ||
+    pathname === '/api/generate' ||
+    pathname === '/api/validate' ||
+    pathname === '/api/push' ||
+    pathname === '/api/diagnostics' ||
+    pathname === '/api/history/runs' ||
+    pathname.startsWith('/api/history/runs/')
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function shouldEnforceAcceptanceCriteria(context: QaContext | null, confidencePermissionApproved: boolean): boolean {
   if (!context) return false;
   if (context.requiresConfidencePermission && confidencePermissionApproved) return false;
@@ -640,8 +657,18 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       sendError(res, 400, 'Invalid OAuth callback.');
       return;
     }
+    log.info('auth.atlassian.callback.accepted');
+    log.debug('auth.atlassian.exchange_code.start');
     const token = await exchangeCode(config.atlassian, code);
+    log.info('auth.atlassian.exchange_code.complete', {
+      hasRefreshToken: Boolean(token.refresh_token),
+      expiresInSeconds: token.expires_in || null,
+    });
+    log.debug('auth.atlassian.accessible_resources.start');
     const resources = await getAccessibleResources(token.access_token);
+    log.info('auth.atlassian.accessible_resources.complete', {
+      resourceCount: resources.length,
+    });
     const resource = choosePrimaryResource(resources);
     if (!resource) {
       sendError(res, 400, 'No Atlassian cloud resource is available for this account.');
@@ -701,10 +728,15 @@ const server = http.createServer(async (req, res) => {
     return originalWriteHead(status, ...args);
   }) as typeof res.writeHead;
   res.on('finish', () => {
-    log.info('http.request.complete', {
+    const fields = {
       statusCode,
       durationMs: Date.now() - startedAt,
-    });
+    };
+    if (shouldLogRequestAtInfo(url.pathname, statusCode)) {
+      log.info('http.request.complete', fields);
+      return;
+    }
+    log.debug('http.request.complete', fields);
   });
   try {
     if ((req.url || '').startsWith('/api/')) {
@@ -723,11 +755,15 @@ const server = http.createServer(async (req, res) => {
 });
 
 async function startServer() {
+  logger.info('app.boot.begin', {
+    nodeEnv: process.env.NODE_ENV || 'development',
+    hosted: Boolean(process.env.RAILWAY_PUBLIC_DOMAIN || process.env.NODE_ENV === 'production'),
+  });
   validateStartupConfig();
   await persistence.initialize();
   server.listen(PORT, '0.0.0.0', () => {
     const persistenceDiagnostics = persistence.getDiagnostics();
-    logger.info('server.start', {
+    logger.info('app.boot.ready', {
       appBaseUrl: APP_BASE_URL,
       host: '0.0.0.0',
       port: PORT,
@@ -739,7 +775,7 @@ async function startServer() {
 }
 
 void startServer().catch((error) => {
-  logger.error('server.start_failed', errorDetails(error));
+  logger.error('app.boot.failed', errorDetails(error));
   process.exit(1);
 });
 
