@@ -1,4 +1,6 @@
 .env
 node_modules/
+dist/
+client-dist/
 audit-log.jsonl
 .DS_Store

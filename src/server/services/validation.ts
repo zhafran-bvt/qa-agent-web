@@ -1,8 +1,45 @@
-function normalizeText(value) {
+interface ValidationOptions {
+  jiraKey?: string;
+  epic?: string;
+  feOnly?: boolean;
+  allowNonMainRefs?: boolean;
+  acceptanceCriteria?: Array<{ id: string; text: string }>;
+  enforceAcceptanceCriteria?: boolean;
+}
+
+interface GeneratedLikeCase {
+  id?: string;
+  title?: string;
+  type?: string;
+  jiraReference?: string;
+  refs?: string;
+  preconditions?: string;
+  custom_preconds?: string;
+  bddScenario?: string;
+  coversAcceptanceCriteria?: string[] | string;
+  sourceScope?: string[] | string;
+  evidence?: {
+    coverageNote?: string;
+  };
+}
+
+function normalizeText(value: unknown): string {
   return String(value || '').trim();
 }
 
-function normalizeAcceptanceCriteriaId(value) {
+function extractFeOnlyValidationText(testCase: GeneratedLikeCase): string {
+  const preconditions = normalizeText(testCase.preconditions || testCase.custom_preconds);
+  const bdd = normalizeText(testCase.bddScenario);
+  const bddBehaviorLines = bdd
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^(Given|When|Then|And)\b/i.test(line))
+    .join(' ');
+
+  return ` ${preconditions} ${bddBehaviorLines} `.toLowerCase();
+}
+
+export function normalizeAcceptanceCriteriaId(value: unknown): string {
   const text = normalizeText(value)
     .toUpperCase()
     .replace(/[.:;]+$/, '')
@@ -12,7 +49,7 @@ function normalizeAcceptanceCriteriaId(value) {
   return text;
 }
 
-function normalizeList(value) {
+export function normalizeList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map((item) => normalizeText(item)).filter(Boolean);
   }
@@ -22,8 +59,9 @@ function normalizeList(value) {
     .filter(Boolean);
 }
 
-function validateCase(testCase, options = {}) {
-  const errors = [];
+export function validateCase(testCase: GeneratedLikeCase, options: ValidationOptions = {}) {
+  const errors: string[] = [];
+  const warnings: string[] = [];
   const jiraKey = normalizeText(options.jiraKey).toUpperCase();
   const epic = normalizeText(options.epic);
   const feOnly = Boolean(options.feOnly);
@@ -40,6 +78,7 @@ function validateCase(testCase, options = {}) {
   const type = normalizeText(testCase.type);
   const coversAcceptanceCriteria = normalizeList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
   const sourceScope = normalizeList(testCase.sourceScope);
+  const coverageNote = normalizeText(testCase.evidence?.coverageNote);
 
   if (!title) errors.push('Title is required.');
   if (!refs) errors.push('Jira reference is required.');
@@ -49,8 +88,7 @@ function validateCase(testCase, options = {}) {
     errors.push('Test case must map to at least one acceptance criterion.');
   }
 
-  const expectedTitlePattern = /^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/;
-  if (title && !expectedTitlePattern.test(title)) {
+  if (title && !/^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/.test(title)) {
     errors.push('Title must match [Web][{Epic}][Ticket ID] Title.');
   }
 
@@ -82,16 +120,21 @@ function validateCase(testCase, options = {}) {
   }
 
   if (feOnly) {
-    const lower = `${title} ${preconditions} ${bdd}`.toLowerCase();
+    const lower = extractFeOnlyValidationText(testCase);
     const apiTerms = [' api ', ' endpoint ', ' request body ', ' response body ', ' post /', ' get /', ' put /', ' delete /'];
     if (apiTerms.some((term) => lower.includes(term))) {
       errors.push('FE-only scope cannot include backend/API test coverage.');
     }
   }
 
+  if (!coverageNote) {
+    warnings.push('Evidence coverage note is missing.');
+  }
+
   return {
     valid: errors.length === 0,
     errors,
+    warnings,
     normalized: {
       coversAcceptanceCriteria,
       sourceScope,
@@ -99,7 +142,7 @@ function validateCase(testCase, options = {}) {
   };
 }
 
-function validateCases(testCases, options = {}) {
+export function validateCases(testCases: GeneratedLikeCase[], options: ValidationOptions = {}) {
   return (Array.isArray(testCases) ? testCases : []).map((testCase, index) => ({
     index,
     id: testCase.id || `TC-${String(index + 1).padStart(2, '0')}`,
@@ -107,7 +150,11 @@ function validateCases(testCases, options = {}) {
   }));
 }
 
-function buildCoverage(testCases, acceptanceCriteria, options = {}) {
+export function buildCoverage(
+  testCases: GeneratedLikeCase[],
+  acceptanceCriteria: Array<{ id: string; text: string; source?: string }>,
+  options: { enforceAcceptanceCriteria?: boolean } = {}
+) {
   const criteria = Array.isArray(acceptanceCriteria) ? acceptanceCriteria : [];
   const enforceAcceptanceCriteria = options.enforceAcceptanceCriteria !== false;
   const caseList = Array.isArray(testCases) ? testCases : [];
@@ -115,10 +162,10 @@ function buildCoverage(testCases, acceptanceCriteria, options = {}) {
     id: criterion.id,
     text: criterion.text,
     source: criterion.source,
-    coveredBy: [],
+    coveredBy: [] as string[],
   }));
   const entryById = new Map(entries.map((entry) => [entry.id, entry]));
-  const unmappedCases = [];
+  const unmappedCases: string[] = [];
 
   for (let index = 0; index < caseList.length; index += 1) {
     const testCase = caseList[index];
@@ -145,11 +192,3 @@ function buildCoverage(testCases, acceptanceCriteria, options = {}) {
     unmappedCases,
   };
 }
-
-module.exports = {
-  buildCoverage,
-  normalizeAcceptanceCriteriaId,
-  normalizeList,
-  validateCase,
-  validateCases,
-};

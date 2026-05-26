@@ -4,7 +4,28 @@
   "private": true,
   "description": "Internal QA Agent web app for Jira/Confluence BDD generation and TestRail push",
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test *.test.js"
+    "dev": "QA_AGENT_PORT=5180 QA_AGENT_BASE_URL=http://localhost:5180 ATLASSIAN_REDIRECT_URI=http://localhost:5180/auth/atlassian/callback concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "build": "npm run build:server && npm run build:client",
+    "build:server": "tsc -p tsconfig.server.json",
+    "build:client": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.app.json",
+    "start": "npm run build && node dist/src/server/index.js",
+    "test": "tsx --test tests/unit/*.test.ts"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "concurrently": "^9.2.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.0"
   }
 }

@@ -1,10 +1,17 @@
-const https = require('https');
+import https from 'node:https';
+import type { GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
 
-function delay(ms) {
+interface TestRailConfig {
+  baseUrl: string;
+  user: string;
+  apiKey: string;
+}
+
+function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function addCase(config, sectionId, testCase) {
+function addCase(config: TestRailConfig, sectionId: string, testCase: GeneratedTestCase): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const baseUrl = config.baseUrl.replace(/\/$/, '');
     const url = new URL(`/index.php?/api/v2/add_case/${sectionId}`, baseUrl);
@@ -12,11 +19,11 @@ function addCase(config, sectionId, testCase) {
     const payload = JSON.stringify({
       title: testCase.title,
       template_id: 4,
-      type_id: testCase.type_id || mapType(testCase.type),
-      priority_id: testCase.priority_id || 2,
-      refs: testCase.jiraReference || testCase.refs,
-      custom_preconds: testCase.preconditions || testCase.custom_preconds,
-      custom_testrail_bdd_scenario: [{ content: testCase.bddScenario || testCase.custom_testrail_bdd_scenario }],
+      type_id: mapType(testCase.type),
+      priority_id: 2,
+      refs: testCase.jiraReference,
+      custom_preconds: testCase.preconditions,
+      custom_testrail_bdd_scenario: [{ content: testCase.bddScenario }],
     });
 
     const req = https.request(
@@ -36,18 +43,18 @@ function addCase(config, sectionId, testCase) {
           body += chunk;
         });
         res.on('end', () => {
-          let parsed;
+          let parsed: Record<string, unknown>;
           try {
             parsed = body ? JSON.parse(body) : {};
-          } catch (error) {
+          } catch {
             reject(new Error(`Invalid JSON response (${res.statusCode}): ${body}`));
             return;
           }
-          if (res.statusCode >= 200 && res.statusCode < 300) {
+          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
             resolve(parsed);
             return;
           }
-          reject(new Error(parsed.error || `HTTP ${res.statusCode}`));
+          reject(new Error(String(parsed.error || `HTTP ${res.statusCode}`)));
         });
       }
     );
@@ -57,28 +64,23 @@ function addCase(config, sectionId, testCase) {
   });
 }
 
-function mapType(type) {
+export function mapType(type: string): number {
   const normalized = String(type || '').toLowerCase();
   if (normalized.includes('negative')) return 2;
   if (normalized.includes('edge')) return 5;
   return 1;
 }
 
-async function pushCases(config, sectionId, testCases) {
-  const results = [];
+export async function pushCases(config: TestRailConfig, sectionId: string, testCases: GeneratedTestCase[]): Promise<PushCaseResult[]> {
+  const results: PushCaseResult[] = [];
   for (const testCase of testCases) {
     try {
       const result = await addCase(config, sectionId, testCase);
-      results.push({ ok: true, title: testCase.title, caseId: result.id });
+      results.push({ ok: true, title: testCase.title, caseId: result.id as number | string });
     } catch (error) {
-      results.push({ ok: false, title: testCase.title, error: error.message });
+      results.push({ ok: false, title: testCase.title, error: (error as Error).message });
     }
     await delay(250);
   }
   return results;
 }
-
-module.exports = {
-  pushCases,
-  mapType,
-};

@@ -1,6 +1,6 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const {
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
   anchorToHeading,
   buildQaContext,
   classifyLinkedIssue,
@@ -8,7 +8,7 @@ const {
   extractConfluencePageRefsFromText,
   isolateStorySection,
   parseConfluenceReference,
-} = require('./context-builder');
+} from '../../src/server/services/context-builder';
 
 test('extracts Confluence page links from Jira text', () => {
   const refs = extractConfluencePageRefsFromText(
@@ -34,8 +34,8 @@ test('normalizes anchor fragments into heading text', () => {
 });
 
 test('classifies parent story relation correctly', () => {
-  assert.equal(classifyLinkedIssue({ linkRelation: 'is child of', issueType: 'Story' }), 'parent story');
-  assert.equal(classifyLinkedIssue({ linkRelation: 'is blocked by', issueType: 'Task' }), 'blocking dependency');
+  assert.equal(classifyLinkedIssue({ key: 'ORB-1', linkRelation: 'is child of', issueType: 'Story' }), 'parent story');
+  assert.equal(classifyLinkedIssue({ key: 'ORB-2', linkRelation: 'is blocked by', issueType: 'Task' }), 'blocking dependency');
 });
 
 test('extracts acceptance criteria from shorthand AC section', () => {
@@ -51,6 +51,109 @@ test('extracts acceptance criteria from shorthand AC section', () => {
     { text: 'Adm Area filter is required before Add Dataset button enabled', source: 'ORB-3118 description' },
     { text: 'Adm Area filter follows Global Area Filter sync', source: 'ORB-3118 description' },
   ]);
+});
+
+test('extracts wrapped multiline acceptance criteria without dropping later items', () => {
+  const criteria = extractAcceptanceCriteriaFromText(
+    `AC:
+
+1. Adm Area filter is a required filter like any other BVT datasets before user can add the dataset i.e. Add
+Dataset button is disabled
+2. Adm Area filter follows the existing Global Area Filter sync`,
+    'ORB-3118 description'
+  );
+
+  assert.deepEqual(criteria, [
+    {
+      text: 'Adm Area filter is a required filter like any other BVT datasets before user can add the dataset i.e. Add Dataset button is disabled',
+      source: 'ORB-3118 description',
+    },
+    {
+      text: 'Adm Area filter follows the existing Global Area Filter sync',
+      source: 'ORB-3118 description',
+    },
+  ]);
+});
+
+test('extracts requirements from a non-AC heading', () => {
+  const criteria = extractAcceptanceCriteriaFromText(
+    `Requirements:
+
+1. Adm Area filter is required before the user can add a dataset
+2. Adm Area filter follows the existing Global Area Filter sync`,
+    'ORB-3118 description'
+  );
+
+  assert.deepEqual(criteria, [
+    {
+      text: 'Adm Area filter is required before the user can add a dataset',
+      source: 'ORB-3118 description',
+    },
+    {
+      text: 'Adm Area filter follows the existing Global Area Filter sync',
+      source: 'ORB-3118 description',
+    },
+  ]);
+});
+
+test('extracts numbered requirement-like items without any explicit AC heading', () => {
+  const criteria = extractAcceptanceCriteriaFromText(
+    `Feature details
+
+1. Adm Area filter is required before Add Dataset button becomes enabled
+2. Adm Area filter follows the existing Global Area Filter sync
+3. Dataset list is shown in the side panel`,
+    'ORB-3118 description'
+  );
+
+  assert.deepEqual(criteria, [
+    {
+      text: 'Adm Area filter is required before Add Dataset button becomes enabled',
+      source: 'ORB-3118 description',
+    },
+    {
+      text: 'Adm Area filter follows the existing Global Area Filter sync',
+      source: 'ORB-3118 description',
+    },
+    {
+      text: 'Dataset list is shown in the side panel',
+      source: 'ORB-3118 description',
+    },
+  ]);
+});
+
+test('dedupes acceptance criteria between plain text and rendered HTML list markup', async () => {
+  const issues = {
+    'ORB-3118': {
+      key: 'ORB-3118',
+      summary: '[FE] Integrate API - Filter Line Dataset by Admin Area',
+      description:
+        'AC:\n\n1. Adm Area filter is a required filter like any other BVT datasets before user can add the dataset i.e. Add Dataset button is disabled\n2. Adm Area filter follows the existing Global Area Filter sync',
+      renderedDescription:
+        '<p>AC:</p><ol><li>Adm Area filter is a required filter like any other BVT datasets before user can add the dataset i.e. Add Dataset button is disabled</li><li>Adm Area filter follows the existing Global Area Filter sync</li></ol>',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+    },
+  };
+
+  const client = {
+    getIssue: async () => issues['ORB-3118'] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({ id: '1', title: 'unused', body: '' }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3118', { includeComments: true });
+
+  assert.deepEqual(
+    context.acceptanceCriteria.map((criterion) => criterion.text),
+    [
+      'Adm Area filter is a required filter like any other BVT datasets before user can add the dataset i.e. Add Dataset button is disabled',
+      'Adm Area filter follows the existing Global Area Filter sync',
+    ]
+  );
 });
 
 test('isolates only the targeted story section from a multi-story PRD page', () => {
@@ -133,8 +236,8 @@ test('builds context with parent story precedence and scoped PRD section', async
   };
 
   const client = {
-    getIssue: async (key) => issues[key],
-    getRemoteLinks: async (key) => {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async (key: string) => {
       if (key === 'ORB-2870') {
         return [
           {
@@ -159,7 +262,7 @@ test('builds context with parent story precedence and scoped PRD section', async
       }
       return [];
     },
-    getConfluencePage: async (pageId) => ({
+    getConfluencePage: async (pageId: string) => ({
       id: pageId,
       title: pageId === '897351682' ? 'Handling Administrative Area Filter' : 'Multiple Administrative Area Per-Row in Dataset',
       body:
@@ -179,14 +282,14 @@ Acceptance Criteria
     getConfluenceComments: async () => [],
   };
 
-  const context = await buildQaContext(client, 'ORB-3118', { includeComments: true });
+  const context = await buildQaContext(client as any, 'ORB-3118', { includeComments: true });
 
-  assert.equal(context.scopeParentIssue.key, 'ORB-2870');
+  assert.equal(context.scopeParentIssue?.key, 'ORB-2870');
   assert.equal(context.scopeParentRelation, 'is child of');
-  assert.equal(context.scopeConfluenceSection.pageId, '897351682');
-  assert.equal(context.scopeConfluenceSection.matched, true);
-  assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-2870').classification, 'parent story');
-  assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-2999').classification, 'blocking dependency');
+  assert.equal(context.scopeConfluenceSection?.pageId, '897351682');
+  assert.equal(context.scopeConfluenceSection?.matched, true);
+  assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-2870')?.classification, 'parent story');
+  assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-2999')?.classification, 'blocking dependency');
   assert.equal(context.confidenceLevel, 'high');
   assert.equal(context.requiresConfidencePermission, false);
   assert.equal(context.acceptanceCriteriaSource, 'combined');
@@ -201,6 +304,6 @@ test('parses page id and anchor from story PRD links', () => {
     'story-description'
   );
 
-  assert.equal(ref.pageId, '897351682');
-  assert.equal(ref.anchor, '5.-As-a-PM,-I-want-the-filter-function');
+  assert.equal(ref?.pageId, '897351682');
+  assert.equal(ref?.anchor, '5.-As-a-PM,-I-want-the-filter-function');
 });

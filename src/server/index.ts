@@ -1,25 +1,27 @@
-const http = require('http');
-const fs = require('fs/promises');
-const path = require('path');
-const crypto = require('crypto');
-const { AtlassianClient, buildAuthUrl, exchangeCode, getAccessibleResources } = require('./atlassian');
-const { buildQaContext } = require('./context-builder');
-const { generateTestCases } = require('./llm');
-const { pushCases } = require('./testrail');
-const { buildCoverage, validateCases } = require('./validation');
-
-loadEnv(path.join(__dirname, '.env'));
+import http, { type IncomingMessage, type ServerResponse } from 'node:http';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { AtlassianClient, buildAuthUrl, exchangeCode, getAccessibleResources } from './services/atlassian';
+import { buildQaContext } from './services/context-builder';
+import { generateTestCases } from './services/llm';
+import { pushCases } from './services/testrail';
+import { buildCoverage, validateCases } from './services/validation';
+import { hydrateTestCasesWithEvidence } from './services/evidence';
+import type { AnalyzeRequest, ConfigResponse, GenerateRequest, PushRequest, QaContext, ValidateRequest } from '../shared/contracts';
 
 const PORT = Number(process.env.PORT || process.env.QA_AGENT_PORT || 5174);
-const DEFAULT_BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
-  ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
-  : `http://localhost:${PORT}`;
+const DEFAULT_BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://localhost:${PORT}`;
 const APP_BASE_URL = process.env.QA_AGENT_BASE_URL || DEFAULT_BASE_URL;
 const IS_HTTPS = APP_BASE_URL.startsWith('https://');
-const PUBLIC_DIR = path.join(__dirname, 'public');
-const AUDIT_FILE = path.join(__dirname, 'audit-log.jsonl');
-const sessions = new Map();
-const oauthStates = new Map();
+const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
+const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
+const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
+const sessions = new Map<string, { accessToken: string; refreshToken?: string; cloudId: string; user: string; createdAt: number }>();
+const oauthStates = new Map<string, number>();
+
+loadEnv(path.join(PROJECT_ROOT, '.env'));
 
 const config = {
   atlassian: {
@@ -53,7 +55,7 @@ const config = {
   },
 };
 
-function sendJson(res, status, body) {
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'Content-Type': 'application/json',
@@ -62,18 +64,18 @@ function sendJson(res, status, body) {
   res.end(payload);
 }
 
-function sendError(res, status, message) {
+function sendError(res: ServerResponse, status: number, message: string): void {
   sendJson(res, status, { error: message });
 }
 
-function buildSessionCookie(value, maxAge) {
+function buildSessionCookie(value: string, maxAge?: number): string {
   const parts = [`qa_sid=${encodeURIComponent(value || '')}`, 'HttpOnly', 'Path=/', 'SameSite=Lax'];
   if (typeof maxAge === 'number') parts.push(`Max-Age=${maxAge}`);
   if (IS_HTTPS) parts.push('Secure');
   return parts.join('; ');
 }
 
-function parseCookies(req) {
+function parseCookies(req: IncomingMessage): Record<string, string> {
   return Object.fromEntries(
     String(req.headers.cookie || '')
       .split(';')
@@ -86,12 +88,12 @@ function parseCookies(req) {
   );
 }
 
-function getSession(req) {
+function getSession(req: IncomingMessage) {
   const sid = parseCookies(req).qa_sid;
   return sid ? sessions.get(sid) : null;
 }
 
-function requireSession(req, res) {
+function requireSession(req: IncomingMessage, res: ServerResponse) {
   const session = getSession(req);
   if (!session) {
     sendError(res, 401, 'Atlassian login required.');
@@ -100,52 +102,65 @@ function requireSession(req, res) {
   return session;
 }
 
-async function readBody(req) {
+async function readBody<T>(req: IncomingMessage): Promise<T> {
   let body = '';
   for await (const chunk of req) body += chunk;
-  return body ? JSON.parse(body) : {};
+  return (body ? JSON.parse(body) : {}) as T;
 }
 
-async function serveStatic(req, res) {
-  const url = new URL(req.url, APP_BASE_URL);
-  const filePath = url.pathname === '/' ? path.join(PUBLIC_DIR, 'index.html') : path.join(PUBLIC_DIR, url.pathname);
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+function contentTypeFor(filePath: string): string {
+  const ext = path.extname(filePath);
+  if (ext === '.js') return 'text/javascript';
+  if (ext === '.css') return 'text/css';
+  if (ext === '.json') return 'application/json';
+  if (ext === '.svg') return 'image/svg+xml';
+  return 'text/html';
+}
+
+async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', APP_BASE_URL);
+  const requestedPath = url.pathname === '/' ? 'index.html' : url.pathname.replace(/^\/+/, '');
+  const assetPath = path.join(CLIENT_DIST_DIR, requestedPath);
+  const normalizedClientDir = path.resolve(CLIENT_DIST_DIR);
+  const normalizedAssetPath = path.resolve(assetPath);
+
+  if (!normalizedAssetPath.startsWith(normalizedClientDir)) {
     sendError(res, 403, 'Forbidden');
     return;
   }
+
   try {
-    const data = await fs.readFile(filePath);
-    const ext = path.extname(filePath);
-    const type = ext === '.js' ? 'text/javascript' : ext === '.css' ? 'text/css' : 'text/html';
-    res.writeHead(200, { 'Content-Type': type });
+    const targetPath = fs.existsSync(normalizedAssetPath) && fs.statSync(normalizedAssetPath).isFile() ? normalizedAssetPath : path.join(CLIENT_DIST_DIR, 'index.html');
+    const data = await fsPromises.readFile(targetPath);
+    res.writeHead(200, { 'Content-Type': contentTypeFor(targetPath) });
     res.end(data);
-  } catch (error) {
-    sendError(res, 404, 'Not found');
+  } catch {
+    sendError(res, 404, 'Frontend build not found. Run npm start or npm run build first.');
   }
 }
 
-function createClient(session) {
+function createClient(session: NonNullable<ReturnType<typeof getSession>>): AtlassianClient {
   return new AtlassianClient({ accessToken: session.accessToken, cloudId: session.cloudId });
 }
 
-function shouldEnforceAcceptanceCriteria(context, confidencePermissionApproved) {
+function shouldEnforceAcceptanceCriteria(context: QaContext | null, confidencePermissionApproved: boolean): boolean {
   if (!context) return false;
   if (context.requiresConfidencePermission && confidencePermissionApproved) return false;
   return context.confidenceLevel === 'high' && Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
 }
 
-async function appendAudit(event) {
-  await fs.appendFile(AUDIT_FILE, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
+async function appendAudit(event: Record<string, unknown>): Promise<void> {
+  await fsPromises.appendFile(AUDIT_FILE, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
 }
 
-async function handleApi(req, res) {
-  const url = new URL(req.url, APP_BASE_URL);
+async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', APP_BASE_URL);
 
   if (req.method === 'GET' && url.pathname === '/api/config') {
     const session = getSession(req);
-    sendJson(res, 200, {
+    const body: ConfigResponse = {
       authenticated: Boolean(session),
-      user: session && session.user,
+      user: session?.user || null,
       ready: {
         atlassian: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
         llm: config.llm.providers.some((provider) => Boolean(provider.apiKey)),
@@ -159,7 +174,8 @@ async function handleApi(req, res) {
           configured: Boolean(provider.apiKey),
         })),
       },
-    });
+    };
+    sendJson(res, 200, body);
     return;
   }
 
@@ -174,7 +190,7 @@ async function handleApi(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/analyze') {
     const session = requireSession(req, res);
     if (!session) return;
-    const body = await readBody(req);
+    const body = await readBody<AnalyzeRequest>(req);
     const jiraKey = String(body.jiraKey || '').trim().toUpperCase();
     if (!jiraKey) {
       sendError(res, 400, 'Jira key is required.');
@@ -198,7 +214,7 @@ async function handleApi(req, res) {
       sendError(res, 400, 'No LLM provider API key is configured.');
       return;
     }
-    const body = await readBody(req);
+    const body = await readBody<GenerateRequest>(req);
     if (!body.context) {
       sendError(res, 400, 'Context is required.');
       return;
@@ -216,14 +232,15 @@ async function handleApi(req, res) {
       manualScopeOverrideReason: body.manualScopeOverrideReason || '',
     };
     const generation = await generateTestCases(config.llm, generationContext);
-    const validation = validateCases(generation.testCases, {
+    const testCases = hydrateTestCasesWithEvidence(generation.testCases, body.context);
+    const validation = validateCases(testCases, {
       jiraKey: body.context.ticketKey,
       epic: body.context.epic,
       feOnly: body.context.constraints && body.context.constraints.feOnly,
       acceptanceCriteria: body.context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
     });
-    const coverage = buildCoverage(generation.testCases, body.context.acceptanceCriteria, {
+    const coverage = buildCoverage(testCases, body.context.acceptanceCriteria, {
       enforceAcceptanceCriteria: coverageEnforced,
     });
     await appendAudit({
@@ -236,7 +253,7 @@ async function handleApi(req, res) {
       coverageEnforced,
     });
     sendJson(res, 200, {
-      testCases: generation.testCases,
+      testCases,
       validation,
       coverage,
       coverageEnforced,
@@ -248,8 +265,9 @@ async function handleApi(req, res) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/validate') {
-    const body = await readBody(req);
-    const validation = validateCases(body.testCases || [], {
+    const body = await readBody<ValidateRequest>(req);
+    const testCases = body.context ? hydrateTestCasesWithEvidence(body.testCases || [], body.context) : body.testCases || [];
+    const validation = validateCases(testCases, {
       jiraKey: body.jiraKey,
       epic: body.epic,
       feOnly: body.feOnly,
@@ -258,8 +276,9 @@ async function handleApi(req, res) {
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
     });
     sendJson(res, 200, {
+      testCases,
       validation,
-      coverage: buildCoverage(body.testCases || [], body.acceptanceCriteria, {
+      coverage: buildCoverage(testCases, body.acceptanceCriteria, {
         enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
       }),
     });
@@ -273,7 +292,7 @@ async function handleApi(req, res) {
       sendError(res, 400, 'TestRail configuration is incomplete.');
       return;
     }
-    const body = await readBody(req);
+    const body = await readBody<PushRequest>(req);
     if (!body.approved) {
       sendError(res, 400, 'QA approval is required before pushing to TestRail.');
       return;
@@ -318,7 +337,7 @@ async function handleApi(req, res) {
   sendError(res, 404, 'API route not found.');
 }
 
-function summarizeResults(results) {
+function summarizeResults(results: Array<{ ok: boolean }>) {
   return {
     pushed: results.filter((item) => item.ok).length,
     failed: results.filter((item) => !item.ok).length,
@@ -326,8 +345,8 @@ function summarizeResults(results) {
   };
 }
 
-async function handleAuth(req, res) {
-  const url = new URL(req.url, APP_BASE_URL);
+async function handleAuth(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const url = new URL(req.url || '/', APP_BASE_URL);
   if (url.pathname === '/auth/atlassian') {
     if (!config.atlassian.clientId || !config.atlassian.clientSecret) {
       sendError(res, 400, 'Atlassian OAuth is not configured.');
@@ -360,7 +379,7 @@ async function handleAuth(req, res) {
       accessToken: token.access_token,
       refreshToken: token.refresh_token,
       cloudId: resource.id,
-      user: resource.name || resource.url,
+      user: resource.name || resource.url || resource.id,
       createdAt: Date.now(),
     });
     res.writeHead(302, {
@@ -376,17 +395,17 @@ async function handleAuth(req, res) {
 
 const server = http.createServer(async (req, res) => {
   try {
-    if (req.url.startsWith('/api/')) {
+    if ((req.url || '').startsWith('/api/')) {
       await handleApi(req, res);
       return;
     }
-    if (req.url.startsWith('/auth/')) {
+    if ((req.url || '').startsWith('/auth/')) {
       await handleAuth(req, res);
       return;
     }
-    await serveStatic(req, res);
+    await serveFrontend(req, res);
   } catch (error) {
-    sendError(res, 500, error.message);
+    sendError(res, 500, (error as Error).message);
   }
 });
 
@@ -394,9 +413,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`QA Agent Web App running at ${APP_BASE_URL} on 0.0.0.0:${PORT}`);
 });
 
-async function loadEnv(envPath) {
+function loadEnv(envPath: string): void {
   try {
-    const content = require('fs').readFileSync(envPath, 'utf8');
+    const content = fs.readFileSync(envPath, 'utf8');
     for (const line of content.split(/\r?\n/)) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('#')) continue;
@@ -407,6 +426,6 @@ async function loadEnv(envPath) {
       if (key && process.env[key] === undefined) process.env[key] = value;
     }
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
 }

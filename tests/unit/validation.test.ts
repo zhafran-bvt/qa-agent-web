@@ -1,6 +1,6 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const { buildCoverage, normalizeAcceptanceCriteriaId, validateCase } = require('./validation');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildCoverage, normalizeAcceptanceCriteriaId, validateCase } from '../../src/server/services/validation';
 
 const acceptanceCriteria = [
   { id: 'AC-1', text: 'Adm Area filter is required before Add Dataset button enabled' },
@@ -13,6 +13,11 @@ const validCase = {
   jiraReference: 'ORB-3077',
   coversAcceptanceCriteria: ['AC-1'],
   preconditions: 'User is logged in and feature flag is enabled.',
+  evidence: {
+    prdSectionTitle: '5. Story title',
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Adm Area filter is required before Add Dataset button enabled' }],
+    coverageNote: 'This case validates the happy-path flow against the selected acceptance criterion.',
+  },
   bddScenario: `Feature: Save project
   Scenario: Save project
     Given the user has selected BVT polygon datasets
@@ -24,6 +29,7 @@ test('validates a correct BDD test case', () => {
   const result = validateCase(validCase, { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria });
   assert.equal(result.valid, true);
   assert.deepEqual(result.errors, []);
+  assert.deepEqual(result.warnings, []);
 });
 
 test('rejects title/ref Jira mismatch', () => {
@@ -49,6 +55,24 @@ test('rejects backend terms for FE-only scope', () => {
   );
   assert.equal(result.valid, false);
   assert.match(result.errors.join('\n'), /FE-only/);
+});
+
+test('does not reject FE-only scope when API appears only in title or feature label', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[Web][Spatial Analysis][ORB-3118] Enable Add Dataset after Adm Area filter is selected',
+      jiraReference: 'ORB-3118',
+      bddScenario: `Feature: Integrate API - Filter Line Dataset by Admin Area
+Scenario: Add Dataset becomes enabled after a valid Adm Area selection
+Given the user opens the Add Dataset flow for a line dataset
+When the user selects a valid Adm Area value
+Then the Add Dataset button becomes enabled`,
+    },
+    { jiraKey: 'ORB-3118', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria }
+  );
+  assert.equal(result.valid, true);
+  assert.doesNotMatch(result.errors.join('\n'), /FE-only/);
 });
 
 test('rejects missing acceptance criteria mapping when criteria exist', () => {
@@ -86,6 +110,15 @@ test('does not enforce acceptance criteria mapping in override mode', () => {
     { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', acceptanceCriteria, enforceAcceptanceCriteria: false }
   );
   assert.equal(result.valid, true);
+});
+
+test('missing evidence note warns but does not fail validation', () => {
+  const result = validateCase(
+    { ...validCase, evidence: { ...validCase.evidence, coverageNote: '' } },
+    { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', acceptanceCriteria }
+  );
+  assert.equal(result.valid, true);
+  assert.match(result.warnings.join('\n'), /Evidence coverage note is missing/);
 });
 
 test('builds coverage and flags uncovered criteria', () => {

@@ -1,10 +1,52 @@
-const https = require('https');
+import https from 'node:https';
 
-const ATLASSIAN_AUTH_URL = 'https://auth.atlassian.com/authorize';
-const ATLASSIAN_TOKEN_URL = 'https://auth.atlassian.com/oauth/token';
-const ATLASSIAN_API_BASE = 'https://api.atlassian.com';
+interface AtlassianAuthConfig {
+  clientId: string;
+  clientSecret: string;
+  redirectUri: string;
+  scopes: string;
+}
 
-function requestJson(url, options = {}, body) {
+interface RequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+}
+
+interface AtlassianTokenResponse {
+  access_token: string;
+  refresh_token?: string;
+}
+
+interface AccessibleResource {
+  id: string;
+  name?: string;
+  url?: string;
+}
+
+export interface SimplifiedIssue {
+  key: string;
+  id?: string;
+  webUrl?: string;
+  summary?: string;
+  issueType?: string;
+  status?: string;
+  parent?: {
+    key?: string;
+    summary?: string;
+    issueType?: string;
+  } | null;
+  description: string;
+  renderedDescription: string;
+  comments: string[];
+  subtasks: Array<{ key: string; summary?: string; status?: string }>;
+  linkedIssues: Array<{ key: string; relation?: string; summary?: string; status?: string; issueType?: string }>;
+  labels: string[];
+  components: string[];
+  priority?: string;
+  assignee?: string;
+}
+
+function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<T> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const payload = body ? JSON.stringify(body) : null;
@@ -25,18 +67,19 @@ function requestJson(url, options = {}, body) {
           data += chunk;
         });
         res.on('end', () => {
-          let parsedBody = {};
+          let parsedBody: unknown = {};
           try {
             parsedBody = data ? JSON.parse(data) : {};
-          } catch (error) {
+          } catch {
             reject(new Error(`Invalid JSON from ${url}: ${data.slice(0, 500)}`));
             return;
           }
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(parsedBody);
+          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
+            resolve(parsedBody as T);
             return;
           }
-          reject(new Error(parsedBody.error_description || parsedBody.error || `HTTP ${res.statusCode}`));
+          const errorBody = parsedBody as { error_description?: string; error?: string };
+          reject(new Error(errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`));
         });
       }
     );
@@ -46,7 +89,11 @@ function requestJson(url, options = {}, body) {
   });
 }
 
-function buildAuthUrl(config, state) {
+const ATLASSIAN_AUTH_URL = 'https://auth.atlassian.com/authorize';
+const ATLASSIAN_TOKEN_URL = 'https://auth.atlassian.com/oauth/token';
+const ATLASSIAN_API_BASE = 'https://api.atlassian.com';
+
+export function buildAuthUrl(config: AtlassianAuthConfig, state: string): string {
   const url = new URL(ATLASSIAN_AUTH_URL);
   url.searchParams.set('audience', 'api.atlassian.com');
   url.searchParams.set('client_id', config.clientId);
@@ -58,8 +105,8 @@ function buildAuthUrl(config, state) {
   return url.toString();
 }
 
-async function exchangeCode(config, code) {
-  return requestJson(
+export async function exchangeCode(config: AtlassianAuthConfig, code: string): Promise<AtlassianTokenResponse> {
+  return requestJson<AtlassianTokenResponse>(
     ATLASSIAN_TOKEN_URL,
     { method: 'POST' },
     {
@@ -72,49 +119,53 @@ async function exchangeCode(config, code) {
   );
 }
 
-async function getAccessibleResources(accessToken) {
-  return requestJson(`${ATLASSIAN_API_BASE}/oauth/token/accessible-resources`, {
+export async function getAccessibleResources(accessToken: string): Promise<AccessibleResource[]> {
+  return requestJson<AccessibleResource[]>(`${ATLASSIAN_API_BASE}/oauth/token/accessible-resources`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
 }
 
-function extractText(value) {
+function extractText(value: unknown): string {
   if (!value) return '';
   if (typeof value === 'string') return value;
   if (Array.isArray(value)) return value.map(extractText).filter(Boolean).join('\n');
   if (typeof value !== 'object') return String(value);
 
-  const parts = [];
-  if (value.text) parts.push(value.text);
-  if (value.content) parts.push(extractText(value.content));
-  if (value.value) parts.push(extractText(value.value));
+  const record = value as Record<string, unknown>;
+  const parts: string[] = [];
+  if (record.text) parts.push(String(record.text));
+  if (record.content) parts.push(extractText(record.content));
+  if (record.value) parts.push(extractText(record.value));
   return parts.filter(Boolean).join('\n');
 }
 
-function extractPageId(url) {
+export function extractPageId(url: string): string | null {
   const match = String(url || '').match(/pages\/(\d+)|pageId=(\d+)/);
   return match ? match[1] || match[2] : null;
 }
 
-class AtlassianClient {
-  constructor({ accessToken, cloudId }) {
+export class AtlassianClient {
+  private accessToken: string;
+  private cloudId: string;
+
+  constructor({ accessToken, cloudId }: { accessToken: string; cloudId: string }) {
     this.accessToken = accessToken;
     this.cloudId = cloudId;
   }
 
-  headers() {
+  private headers(): Record<string, string> {
     return { Authorization: `Bearer ${this.accessToken}` };
   }
 
-  jiraUrl(path) {
-    return `${ATLASSIAN_API_BASE}/ex/jira/${this.cloudId}/rest/api/3${path}`;
+  private jiraUrl(requestPath: string): string {
+    return `${ATLASSIAN_API_BASE}/ex/jira/${this.cloudId}/rest/api/3${requestPath}`;
   }
 
-  confluenceUrl(path) {
-    return `${ATLASSIAN_API_BASE}/ex/confluence/${this.cloudId}/wiki/api/v2${path}`;
+  private confluenceUrl(requestPath: string): string {
+    return `${ATLASSIAN_API_BASE}/ex/confluence/${this.cloudId}/wiki/api/v2${requestPath}`;
   }
 
-  async getIssue(issueKey) {
+  async getIssue(issueKey: string): Promise<SimplifiedIssue> {
     const fields = [
       'summary',
       'description',
@@ -131,24 +182,25 @@ class AtlassianClient {
       'assignee',
       'reporter',
     ].join(',');
-    const issue = await requestJson(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}?fields=${fields}&expand=renderedFields`), {
-      headers: this.headers(),
-    });
+    const issue = await requestJson<Record<string, unknown>>(
+      this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}?fields=${fields}&expand=renderedFields`),
+      { headers: this.headers() }
+    );
     return simplifyIssue(issue);
   }
 
-  async getRemoteLinks(issueKey) {
-    return requestJson(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}/remotelink`), {
+  async getRemoteLinks(issueKey: string): Promise<Array<Record<string, unknown>>> {
+    return requestJson<Array<Record<string, unknown>>>(this.jiraUrl(`/issue/${encodeURIComponent(issueKey)}/remotelink`), {
       headers: this.headers(),
     });
   }
 
-  async getConfluencePage(pageId) {
-    const page = await requestJson(this.confluenceUrl(`/pages/${pageId}?body-format=atlas_doc_format`), {
+  async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string }> {
+    const page = await requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}?body-format=atlas_doc_format`), {
       headers: this.headers(),
     });
     return {
-      id: page.id,
+      id: String(page.id),
       title: page.title,
       status: page.status,
       webUrl: page._links && page._links.webui ? page._links.webui : null,
@@ -156,26 +208,26 @@ class AtlassianClient {
     };
   }
 
-  async getConfluenceComments(pageId) {
+  async getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>> {
     try {
-      const comments = await requestJson(this.confluenceUrl(`/pages/${pageId}/footer-comments?limit=50`), {
+      const comments = await requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}/footer-comments?limit=50`), {
         headers: this.headers(),
       });
-      return (comments.results || []).map((comment) => ({
-        id: comment.id,
+      return (comments.results || []).map((comment: Record<string, any>) => ({
+        id: String(comment.id),
         body: extractText(comment.body && comment.body.atlas_doc_format && comment.body.atlas_doc_format.value),
       }));
-    } catch (error) {
+    } catch {
       return [];
     }
   }
 }
 
-function simplifyIssue(issue) {
+function simplifyIssue(issue: Record<string, any>): SimplifiedIssue {
   const fields = issue.fields || {};
   const descriptionText = extractText(fields.description);
   const renderedDescription = (issue.renderedFields && issue.renderedFields.description) || '';
-  const linkedIssues = (fields.issuelinks || []).map((link) => {
+  const linkedIssues = (fields.issuelinks || []).map((link: Record<string, any>) => {
     const linked = link.inwardIssue || link.outwardIssue || {};
     return {
       key: linked.key,
@@ -202,24 +254,16 @@ function simplifyIssue(issue) {
       : null,
     description: descriptionText || renderedDescription,
     renderedDescription,
-    comments: fields.comment && fields.comment.comments ? fields.comment.comments.map((comment) => extractText(comment.body)) : [],
-    subtasks: (fields.subtasks || []).map((subtask) => ({
+    comments: fields.comment && fields.comment.comments ? fields.comment.comments.map((comment: Record<string, unknown>) => extractText(comment.body)) : [],
+    subtasks: (fields.subtasks || []).map((subtask: Record<string, any>) => ({
       key: subtask.key,
       summary: subtask.fields && subtask.fields.summary,
       status: subtask.fields && subtask.fields.status && subtask.fields.status.name,
     })),
     linkedIssues,
     labels: fields.labels || [],
-    components: (fields.components || []).map((component) => component.name),
+    components: (fields.components || []).map((component: Record<string, string>) => component.name),
     priority: fields.priority && fields.priority.name,
     assignee: fields.assignee && fields.assignee.displayName,
   };
 }
-
-module.exports = {
-  AtlassianClient,
-  buildAuthUrl,
-  exchangeCode,
-  getAccessibleResources,
-  extractPageId,
-};

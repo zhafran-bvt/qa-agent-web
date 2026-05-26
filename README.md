@@ -47,10 +47,22 @@ Internal QA workflow app for generating BDD test cases from Jira and Confluence 
    npm start
    ```
 
-8. Open:
+8. For local UI development with Vite plus the Node API server:
+
+   ```bash
+   npm run dev
+   ```
+
+9. Open:
 
    ```text
    http://localhost:5174
+   ```
+
+   When running `npm run dev`, the React app is available at:
+
+   ```text
+   http://localhost:5173
    ```
 
 ## Railway Deployment
@@ -115,8 +127,14 @@ Notes for this MVP:
 
 ## Tests
 
-Run validation tests:
+Run the test suite:
 
 ```bash
 npm test
+```
+
+Run typechecking:
+
+```bash
+npm run typecheck
 ```
