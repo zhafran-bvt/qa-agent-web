@@ -9,6 +9,7 @@ import { generateTestCases } from './services/llm';
 import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
+import { logger } from './services/logger';
 import type { AnalyzeRequest, ConfigResponse, GenerateRequest, PushRequest, QaContext, ValidateRequest } from '../shared/contracts';
 
 const PORT = Number(process.env.PORT || process.env.QA_AGENT_PORT || 5174);
@@ -66,6 +67,13 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function sendError(res: ServerResponse, status: number, message: string): void {
   sendJson(res, status, { error: message });
+}
+
+function errorDetails(error: unknown) {
+  return {
+    errorName: error instanceof Error ? error.name : 'Error',
+    errorMessage: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function buildSessionCookie(value: string, maxAge?: number): string {
@@ -153,7 +161,7 @@ async function appendAudit(event: Record<string, unknown>): Promise<void> {
   await fsPromises.appendFile(AUDIT_FILE, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
 }
 
-async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger): Promise<void> {
   const url = new URL(req.url || '/', APP_BASE_URL);
 
   if (req.method === 'GET' && url.pathname === '/api/config') {
@@ -196,11 +204,27 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       sendError(res, 400, 'Jira key is required.');
       return;
     }
+    log.info('api.analyze.start', {
+      jiraKey,
+      user: session.user,
+      feOnly: body.feOnly !== false,
+      beAlreadyTested: Boolean(body.beAlreadyTested),
+      includeComments: body.includeComments !== false,
+    });
     const context = await buildQaContext(createClient(session), jiraKey, {
       feOnly: body.feOnly !== false,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
       notes: body.notes || '',
+      logger: log,
+    });
+    log.info('api.analyze.complete', {
+      jiraKey,
+      user: session.user,
+      acceptanceCriteriaSource: context.acceptanceCriteriaSource,
+      acceptanceCriteriaCount: context.acceptanceCriteria.length,
+      userStoryCount: context.userStories.length,
+      confidenceLevel: context.confidenceLevel,
     });
     await appendAudit({ type: 'analyze', user: session.user, jiraKey, linkedIssueCount: context.linkedIssues.length });
     sendJson(res, 200, { context });
@@ -231,6 +255,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       manualScopeOverride: Boolean(body.context.requiresConfidencePermission && confidencePermissionApproved),
       manualScopeOverrideReason: body.manualScopeOverrideReason || '',
     };
+    log.info('api.generate.start', {
+      jiraKey: body.context.ticketKey,
+      user: session.user,
+      providerCandidates: config.llm.providers.filter((provider) => provider.apiKey).map((provider) => provider.name),
+      coverageEnforced,
+      acceptanceCriteriaCount: body.context.acceptanceCriteria.length,
+      manualScopeOverride: generationContext.manualScopeOverride,
+    });
     const generation = await generateTestCases(config.llm, generationContext);
     const testCases = hydrateTestCasesWithEvidence(generation.testCases, body.context);
     const validation = validateCases(testCases, {
@@ -242,6 +274,19 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
     });
     const coverage = buildCoverage(testCases, body.context.acceptanceCriteria, {
       enforceAcceptanceCriteria: coverageEnforced,
+    });
+    log.info('api.generate.complete', {
+      jiraKey: body.context.ticketKey,
+      user: session.user,
+      provider: generation.provider,
+      model: generation.model,
+      generatedCaseCount: generation.testCases.length,
+      hydratedCaseCount: testCases.length,
+      coverageEnforced,
+      coveredCriteria: coverage.coveredCriteria,
+      totalCriteria: coverage.totalCriteria,
+      uncoveredCriteria: coverage.uncoveredCriteria,
+      invalidCases: validation.filter((item) => !item.valid).map((item) => item.id),
     });
     await appendAudit({
       type: 'generate',
@@ -281,6 +326,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       coverage: buildCoverage(testCases, body.acceptanceCriteria, {
         enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
       }),
+    });
+    log.info('api.validate.complete', {
+      jiraKey: body.jiraKey,
+      caseCount: testCases.length,
+      invalidCases: validation.filter((item) => !item.valid).map((item) => item.id),
+      warnings: validation.reduce((count, item) => count + item.warnings.length, 0),
     });
     return;
   }
@@ -323,6 +374,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse): Promise<voi
       return;
     }
     const results = await pushCases(config.testrail, sectionId, body.testCases || []);
+    log.info('api.push.complete', {
+      jiraKey: body.jiraKey,
+      user: session.user,
+      sectionId,
+      pushed: results.filter((item) => item.ok).length,
+      failed: results.filter((item) => !item.ok).length,
+    });
     await appendAudit({
       type: 'push',
       user: session.user,
@@ -345,7 +403,7 @@ function summarizeResults(results: Array<{ ok: boolean }>) {
   };
 }
 
-async function handleAuth(req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logger): Promise<void> {
   const url = new URL(req.url || '/', APP_BASE_URL);
   if (url.pathname === '/auth/atlassian') {
     if (!config.atlassian.clientId || !config.atlassian.clientSecret) {
@@ -354,6 +412,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse): Promise<vo
     }
     const state = crypto.randomBytes(16).toString('hex');
     oauthStates.set(state, Date.now());
+    log.info('auth.atlassian.start');
     res.writeHead(302, { Location: buildAuthUrl(config.atlassian, state) });
     res.end();
     return;
@@ -382,6 +441,10 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse): Promise<vo
       user: resource.name || resource.url || resource.id,
       createdAt: Date.now(),
     });
+    log.info('auth.atlassian.complete', {
+      cloudId: resource.id,
+      user: resource.name || resource.url || resource.id,
+    });
     res.writeHead(302, {
       Location: '/',
       'Set-Cookie': buildSessionCookie(sid),
@@ -394,23 +457,49 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse): Promise<vo
 }
 
 const server = http.createServer(async (req, res) => {
+  const requestId = crypto.randomUUID();
+  const startedAt = Date.now();
+  const url = new URL(req.url || '/', APP_BASE_URL);
+  const log = logger.child({
+    requestId,
+    method: req.method || 'GET',
+    path: url.pathname,
+  });
+  let statusCode = 200;
+  const originalWriteHead = res.writeHead.bind(res);
+  res.writeHead = ((status: number, ...args: any[]) => {
+    statusCode = status;
+    return originalWriteHead(status, ...args);
+  }) as typeof res.writeHead;
+  res.on('finish', () => {
+    log.info('http.request.complete', {
+      statusCode,
+      durationMs: Date.now() - startedAt,
+    });
+  });
   try {
     if ((req.url || '').startsWith('/api/')) {
-      await handleApi(req, res);
+      await handleApi(req, res, log);
       return;
     }
     if ((req.url || '').startsWith('/auth/')) {
-      await handleAuth(req, res);
+      await handleAuth(req, res, log);
       return;
     }
     await serveFrontend(req, res);
   } catch (error) {
+    log.error('http.request.error', errorDetails(error));
     sendError(res, 500, (error as Error).message);
   }
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`QA Agent Web App running at ${APP_BASE_URL} on 0.0.0.0:${PORT}`);
+  logger.info('server.start', {
+    appBaseUrl: APP_BASE_URL,
+    host: '0.0.0.0',
+    port: PORT,
+    logLevel: process.env.LOG_LEVEL || 'info',
+  });
 });
 
 function loadEnv(envPath: string): void {

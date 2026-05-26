@@ -292,9 +292,181 @@ Acceptance Criteria
   assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-2999')?.classification, 'blocking dependency');
   assert.equal(context.confidenceLevel, 'high');
   assert.equal(context.requiresConfidencePermission, false);
-  assert.equal(context.acceptanceCriteriaSource, 'combined');
+  assert.equal(context.acceptanceCriteriaSource, 'main_jira');
   assert.equal(context.acceptanceCriteria.some((criterion) => /Add Dataset button is disabled/.test(criterion.text)), true);
-  assert.equal(context.acceptanceCriteria.some((criterion) => /^Matching:/.test(criterion.text)), true);
+  assert.equal(context.acceptanceCriteria.some((criterion) => /^Matching:/.test(criterion.text)), false);
+  assert.equal(context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaSource, 'main_jira');
+  assert.equal(context.acceptanceCriteriaDiagnostics.ignoredSources?.includes('parent_story_confluence_section'), true);
+});
+
+test('prefers main Jira AC over parent story feature flag metadata for ORB-3077-style tickets', async () => {
+  const issues = {
+    'ORB-3077': {
+      key: 'ORB-3077',
+      summary: '[FE] Integration – Open/Save Project with BVT Polygon Catchment Datasets',
+      description: `AC:
+
+1. Create migration from dataset to datasets to spatial settings
+2. Save project with BVT Data Polygon Catchment Datasets
+3. Open Project with BVT Data Polygon Catchment Datasets
+4. Fixing Global Filter with BVT Data POI Catchment Datasets at Save Project
+5. Fixing Global Filter with BVT Data POI Catchment Datasets at Open Project`,
+      renderedDescription: '',
+      linkedIssues: [
+        {
+          key: 'ORB-2873',
+          relation: 'is child of',
+          summary: 'As User, I want to select spatial input based on BVT Data',
+          issueType: 'Story',
+        },
+      ],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+    },
+    'ORB-2873': {
+      key: 'ORB-2873',
+      summary: 'As User, I want to select spatial input based on BVT Data',
+      description: `PRD: https://bvarta-project.atlassian.net/wiki/pages/viewpage.action?pageId=1228177422#3.-As-User,-I-want-to-select-spatial-input-based-on-BVT-Data
+FF: VITE_FEATURE_FLAG_IS_BVT_DATA_FOR_CATCHMENT_ENABLED`,
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Story',
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({
+      id: '1228177422',
+      title: 'BVT Data PRD',
+      body: `
+3. As User, I want to select spatial input based on BVT Data
+Acceptance Criteria
+1. Broad story criterion
+`,
+    }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3077', { includeComments: true });
+
+  assert.equal(context.acceptanceCriteriaSource, 'main_jira');
+  assert.equal(context.acceptanceCriteria.length, 5);
+  assert.equal(context.acceptanceCriteria.some((criterion) => /VITE_FEATURE_FLAG_IS_BVT_DATA_FOR_CATCHMENT_ENABLED/.test(criterion.text)), false);
+  assert.equal(context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.includes('FF'), true);
+  assert.equal(context.confidenceLevel, 'high');
+});
+
+test('does not promote story metadata blocks into acceptance criteria during context build', async () => {
+  const issues = {
+    'ORB-5000': {
+      key: 'ORB-5000',
+      summary: '[FE] Empty task ticket',
+      description: '',
+      renderedDescription: '',
+      linkedIssues: [
+        {
+          key: 'ORB-5001',
+          relation: 'is child of',
+          summary: 'As a User, I want scoped PRD fallback',
+          issueType: 'Story',
+        },
+      ],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+    },
+    'ORB-5001': {
+      key: 'ORB-5001',
+      summary: 'As a User, I want scoped PRD fallback',
+      description: `FF: VITE_FEATURE_FLAG_IS_BVT_DATA_FOR_CATCHMENT_ENABLED
+PRD: https://bvarta-project.atlassian.net/wiki/pages/viewpage.action?pageId=5001#1.-As-a-User,-I-want-scoped-PRD-fallback
+Figma: https://example.com/figma`,
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Story',
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({
+      id: '5001',
+      title: 'Fallback PRD',
+      body: `
+1. As a User, I want scoped PRD fallback
+Acceptance Criteria
+1. The user can open the modal
+`,
+    }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-5000', { includeComments: true });
+
+  assert.equal(context.acceptanceCriteria.some((criterion) => /VITE_FEATURE_FLAG_IS_BVT_DATA_FOR_CATCHMENT_ENABLED/.test(criterion.text)), false);
+  assert.equal(context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.includes('FF'), true);
+});
+
+test('falls back to scoped PRD criteria when main ticket description is empty', async () => {
+  const issues = {
+    'ORB-4000': {
+      key: 'ORB-4000',
+      summary: '[FE] Empty task ticket',
+      description: '',
+      renderedDescription: '',
+      linkedIssues: [
+        {
+          key: 'ORB-4001',
+          relation: 'is child of',
+          summary: 'As a User, I want scoped PRD fallback',
+          issueType: 'Story',
+        },
+      ],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+    },
+    'ORB-4001': {
+      key: 'ORB-4001',
+      summary: 'As a User, I want scoped PRD fallback',
+      description: 'PRD: https://bvarta-project.atlassian.net/wiki/pages/viewpage.action?pageId=5000#1.-As-a-User,-I-want-scoped-PRD-fallback',
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Story',
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({
+      id: '5000',
+      title: 'Fallback PRD',
+      body: `
+1. As a User, I want scoped PRD fallback
+Acceptance Criteria
+1. The user can open the modal
+2. The modal shows the saved selection
+`,
+    }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-4000', { includeComments: true });
+
+  assert.equal(context.acceptanceCriteriaSource, 'parent_story_confluence_section');
+  assert.equal(context.acceptanceCriteria.length, 2);
+  assert.equal(context.confidenceLevel, 'high');
 });
 
 test('parses page id and anchor from story PRD links', () => {

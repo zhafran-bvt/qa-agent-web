@@ -1,4 +1,5 @@
 import { extractPageId, type SimplifiedIssue } from './atlassian';
+import type { Logger } from './logger';
 import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
 
 interface QaContextOptions {
@@ -6,6 +7,7 @@ interface QaContextOptions {
   beAlreadyTested?: boolean;
   includeComments?: boolean;
   notes?: string;
+  logger?: Logger;
 }
 
 interface PageRefSource {
@@ -38,10 +40,19 @@ interface StorySection {
   reason: string;
 }
 
-interface ScopedGroup {
-  key: string;
-  items: Array<{ text: string; source?: string }>;
-  source?: string;
+type CriteriaExtractionMode = 'main' | 'story' | 'scoped';
+
+interface CriteriaExtractionResult {
+  items: Array<{ text: string; source: string }>;
+  ignoredMetadataLabels: string[];
+}
+
+interface CriteriaSelectionResult {
+  acceptanceCriteria: ScopedItem[];
+  acceptanceCriteriaSource: string;
+  selectionReason: string;
+  ignoredSources: string[];
+  ignoredMetadataLabels: string[];
 }
 
 interface QaClient {
@@ -109,6 +120,17 @@ function cleanListLine(line: string): string {
   );
 }
 
+function metadataLabelForLine(line: string): string | null {
+  const match = normalizeInlineText(line).match(/^([A-Za-z][A-Za-z /_-]{0,40}|FF)\s*:/);
+  if (!match) return null;
+  return normalizeInlineText(match[1]).toUpperCase() || null;
+}
+
+function isIgnoredStoryMetadataLabel(label: string | null): boolean {
+  if (!label) return false;
+  return /^(FF|FEATURE FLAG|PRD|FIGMA|DESIGN|TECH DESIGN|WIKI|COMMENT|COMMENTS|LINK|LINKS|NOTE|NOTES)$/i.test(label);
+}
+
 function isLikelyHeading(line: string): boolean {
   const text = normalizeInlineText(line).replace(/:$/, '');
   if (!text) return false;
@@ -132,7 +154,7 @@ function shouldEndCriteriaSection(line: string): boolean {
 }
 
 function isExplicitRequirementHeading(line: string): boolean {
-  return /^(acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules|notes)[:]?$/i.test(
+  return /^(acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)[:]?$/i.test(
     normalizeInlineText(line)
   );
 }
@@ -169,16 +191,55 @@ function extractListBlockCriteria(lines: string[], source: string): Array<{ text
   return criteria;
 }
 
-export function extractAcceptanceCriteriaFromText(text: string, source: string): Array<{ text: string; source: string }> {
-  const lines = normalizeMultilineText(text)
+function expandInlineRequirementLines(lines: string[]): string[] {
+  const expanded: string[] = [];
+
+  for (const rawLine of lines) {
+    let line = String(rawLine || '').trim();
+    if (!line) continue;
+
+    const explicitHeadingMatch = line.match(/^((?:acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)[:]?)(\s+.+)$/i);
+    if (explicitHeadingMatch && /(?:^|\s)\d+[\.)]\s+/.test(explicitHeadingMatch[2])) {
+      expanded.push(normalizeInlineText(explicitHeadingMatch[1]));
+      line = explicitHeadingMatch[2].trim();
+    }
+
+    if (/^\d+[\.)]\s+/.test(line)) {
+      const pieces = line.split(/(?=\s+\d+[\.)]\s+)/).map((piece) => normalizeInlineText(piece));
+      expanded.push(...pieces.filter(Boolean));
+      continue;
+    }
+
+    expanded.push(line);
+  }
+
+  return expanded;
+}
+
+function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtractionMode): CriteriaExtractionResult {
+  const lines = expandInlineRequirementLines(
+    normalizeMultilineText(text)
     .split('\n')
     .map((line) => line.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+  );
   const criteria: Array<{ text: string; source: string }> = [];
+  const ignoredMetadataLabels = new Set<string>();
   let inCriteriaSection = false;
   let currentItem = '';
 
   for (const line of lines) {
+    const metadataLabel = metadataLabelForLine(line);
+    if (mode === 'story' && isIgnoredStoryMetadataLabel(metadataLabel)) {
+      if (metadataLabel) ignoredMetadataLabels.add(metadataLabel);
+      if (currentItem) {
+        criteria.push({ text: cleanListLine(currentItem), source });
+        currentItem = '';
+      }
+      inCriteriaSection = false;
+      continue;
+    }
+
     if (isExplicitRequirementHeading(line)) {
       inCriteriaSection = true;
       if (currentItem) {
@@ -216,15 +277,41 @@ export function extractAcceptanceCriteriaFromText(text: string, source: string):
     criteria.push({ text: cleanListLine(currentItem), source });
   }
 
-  if (criteria.length) return criteria;
+  if (criteria.length) {
+    return {
+      items: criteria,
+      ignoredMetadataLabels: [...ignoredMetadataLabels],
+    };
+  }
+
+  if (mode === 'story') {
+    return {
+      items: [],
+      ignoredMetadataLabels: [...ignoredMetadataLabels],
+    };
+  }
 
   const listBlockCriteria = extractListBlockCriteria(lines, source);
-  if (listBlockCriteria.length) return listBlockCriteria;
+  if (listBlockCriteria.length) {
+    return {
+      items: listBlockCriteria,
+      ignoredMetadataLabels: [...ignoredMetadataLabels],
+    };
+  }
 
-  return lines
+  const inferred = lines
     .map((line) => cleanListLine(line))
     .filter((line) => isCriterionText(line))
     .map((line) => ({ text: line, source }));
+
+  return {
+    items: inferred,
+    ignoredMetadataLabels: [...ignoredMetadataLabels],
+  };
+}
+
+export function extractAcceptanceCriteriaFromText(text: string, source: string): Array<{ text: string; source: string }> {
+  return extractCriteriaByMode(text, source, 'main').items;
 }
 
 export function extractUserStoriesFromText(text: string, source: string): Array<{ text: string; source: string }> {
@@ -366,10 +453,12 @@ function mergeIssueMetadata(mainIssue: SimplifiedIssue, fetchedIssue: Simplified
 }
 
 function extractMainIssueCriteria(mainIssue: SimplifiedIssue): ScopedItem[] {
+  const descriptionResult = extractCriteriaByMode(mainIssue.description, `${mainIssue.key} description`, 'main');
+  const renderedDescriptionResult = extractCriteriaByMode(mainIssue.renderedDescription, `${mainIssue.key} rendered description`, 'main');
   return dedupeScopedItems(
     [
-      ...extractAcceptanceCriteriaFromText(mainIssue.description, `${mainIssue.key} description`),
-      ...extractAcceptanceCriteriaFromText(mainIssue.renderedDescription, `${mainIssue.key} rendered description`),
+      ...descriptionResult.items,
+      ...renderedDescriptionResult.items,
     ],
     'AC'
   );
@@ -377,10 +466,12 @@ function extractMainIssueCriteria(mainIssue: SimplifiedIssue): ScopedItem[] {
 
 function extractStoryCriteria(storyIssue?: SimplifiedIssue | null): ScopedItem[] {
   if (!storyIssue) return [];
+  const descriptionResult = extractCriteriaByMode(storyIssue.description, `${storyIssue.key} description`, 'story');
+  const renderedDescriptionResult = extractCriteriaByMode(storyIssue.renderedDescription, `${storyIssue.key} rendered description`, 'story');
   return dedupeScopedItems(
     [
-      ...extractAcceptanceCriteriaFromText(storyIssue.description, `${storyIssue.key} description`),
-      ...extractAcceptanceCriteriaFromText(storyIssue.renderedDescription, `${storyIssue.key} rendered description`),
+      ...descriptionResult.items,
+      ...renderedDescriptionResult.items,
     ],
     'AC'
   );
@@ -451,30 +542,64 @@ export function isolateStorySection(body: string, anchor: string, storySummary: 
   };
 }
 
-function combineScopedItems(groups: ScopedGroup[]): ScopedItem[] {
-  const output: Array<{ text: string; source?: string }> = [];
-  const seen = new Set<string>();
-
-  for (const group of groups) {
-    for (const item of group.items || []) {
-      const key = canonicalize(item.text);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      output.push({
-        text: normalizeInlineText(item.text),
-        source: item.source || group.source,
-      });
-    }
-  }
-
-  return dedupeScopedItems(output, 'AC');
+function hasExplicitRequirementSection(text: string): boolean {
+  return /(?:^|\n)\s*(acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)\s*:?\s*(?:\n|$)/i.test(
+    String(text || '')
+  );
 }
 
-function resolveAcceptanceCriteriaSource(groups: ScopedGroup[]): string {
-  const active = groups.filter((group) => (group.items || []).length > 0).map((group) => group.key);
-  if (!active.length) return 'none';
-  if (active.length === 1) return active[0];
-  return 'combined';
+function selectAcceptanceCriteria(
+  mainIssueCriteria: ScopedItem[],
+  parentStoryCriteria: ScopedItem[],
+  scopedSectionCriteria: ScopedItem[],
+  mainIssue: SimplifiedIssue,
+  scopeConfluenceSection: ScopeConfluenceSection | null,
+  storyMetadataLabels: string[]
+): CriteriaSelectionResult {
+  if (mainIssueCriteria.length > 0) {
+    return {
+      acceptanceCriteria: mainIssueCriteria,
+      acceptanceCriteriaSource: 'main_jira',
+      selectionReason: hasExplicitRequirementSection(mainIssue.description) || hasExplicitRequirementSection(mainIssue.renderedDescription)
+        ? 'Main Jira explicit AC detected.'
+        : 'Main Jira requirements inferred from numbered description items.',
+      ignoredSources: [
+        ...(parentStoryCriteria.length > 0 ? ['parent_story_jira'] : []),
+        ...(scopedSectionCriteria.length > 0 ? ['parent_story_confluence_section'] : []),
+      ],
+      ignoredMetadataLabels: storyMetadataLabels,
+    };
+  }
+
+  if (scopedSectionCriteria.length > 0) {
+    return {
+      acceptanceCriteria: scopedSectionCriteria,
+      acceptanceCriteriaSource: 'parent_story_confluence_section',
+      selectionReason: scopeConfluenceSection?.matched
+        ? 'Main Jira scope was insufficient, so the matched PRD subsection was used.'
+        : 'Main Jira scope was insufficient, so the scoped PRD subsection was used.',
+      ignoredSources: parentStoryCriteria.length > 0 ? ['parent_story_jira'] : [],
+      ignoredMetadataLabels: storyMetadataLabels,
+    };
+  }
+
+  if (parentStoryCriteria.length > 0) {
+    return {
+      acceptanceCriteria: parentStoryCriteria,
+      acceptanceCriteriaSource: 'parent_story_jira',
+      selectionReason: 'Main Jira scope was insufficient, so explicit parent Story acceptance criteria were used.',
+      ignoredSources: [],
+      ignoredMetadataLabels: storyMetadataLabels,
+    };
+  }
+
+  return {
+    acceptanceCriteria: [],
+    acceptanceCriteriaSource: 'none',
+    selectionReason: 'No trustworthy acceptance criteria were extracted from the main Jira ticket, parent Story, or scoped PRD section.',
+    ignoredSources: [],
+    ignoredMetadataLabels: storyMetadataLabels,
+  };
 }
 
 function determineConfidence(
@@ -545,6 +670,7 @@ function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIss
 }
 
 export async function buildQaContext(client: QaClient, jiraKey: string, options: QaContextOptions = {}): Promise<QaContext> {
+  const log = options.logger;
   const mainIssue = await client.getIssue(jiraKey);
   const linkedIssueKeys = new Set<string>();
 
@@ -646,7 +772,9 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
           anchor: preferredStoryRef.anchor || '',
           matchedHeading: '',
           matched: false,
-          reason: 'Story found, but linked PRD page could not be fetched.',
+          reason: page?.fetchError
+            ? `Story found, but linked PRD page fetch failed: ${page.fetchError}`
+            : 'Story found, but linked PRD page could not be fetched.',
           sourceIssueKey: scopeParentIssue.key,
           body: '',
         };
@@ -667,17 +795,49 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   }
 
   const mainIssueCriteria = extractMainIssueCriteria(mainIssue);
-  const parentStoryCriteria = extractStoryCriteria(scopeParentIssue as unknown as SimplifiedIssue | null);
-  const acceptanceCriteria = combineScopedItems([
-    { key: 'main_jira', items: mainIssueCriteria },
-    { key: 'parent_story_jira', items: parentStoryCriteria },
-    { key: 'parent_story_confluence_section', items: scopedSectionCriteria },
-  ]);
-  const acceptanceCriteriaSource = resolveAcceptanceCriteriaSource([
-    { key: 'main_jira', items: mainIssueCriteria },
-    { key: 'parent_story_jira', items: parentStoryCriteria },
-    { key: 'parent_story_confluence_section', items: scopedSectionCriteria },
-  ]);
+  const storyDescriptionResult = extractCriteriaByMode(
+    (scopeParentIssue as unknown as SimplifiedIssue | null)?.description || '',
+    scopeParentIssue ? `${scopeParentIssue.key} description` : '',
+    'story'
+  );
+  const storyRenderedDescriptionResult = extractCriteriaByMode(
+    (scopeParentIssue as unknown as SimplifiedIssue | null)?.renderedDescription || '',
+    scopeParentIssue ? `${scopeParentIssue.key} rendered description` : '',
+    'story'
+  );
+  const parentStoryCriteria = dedupeScopedItems(
+    [...storyDescriptionResult.items, ...storyRenderedDescriptionResult.items],
+    'AC'
+  );
+  const selection = selectAcceptanceCriteria(
+    mainIssueCriteria,
+    parentStoryCriteria,
+    scopedSectionCriteria,
+    mainIssue,
+    scopeConfluenceSection,
+    [...storyDescriptionResult.ignoredMetadataLabels, ...storyRenderedDescriptionResult.ignoredMetadataLabels]
+  );
+  log?.info('context.scope_selection', {
+    jiraKey: mainIssue.key,
+    mainIssueCriteriaCount: mainIssueCriteria.length,
+    parentStoryCriteriaCount: parentStoryCriteria.length,
+    scopedSectionCriteriaCount: scopedSectionCriteria.length,
+    acceptanceCriteriaSource: selection.acceptanceCriteriaSource,
+    acceptanceCriteriaCount: selection.acceptanceCriteria.length,
+    scopeParentIssueKey: scopeParentIssue?.key || '',
+    scopeConfluencePageId: scopeConfluenceSection?.pageId || '',
+    scopeConfluenceMatched: scopeConfluenceSection?.matched || false,
+    ignoredSources: selection.ignoredSources,
+    ignoredMetadataLabels: selection.ignoredMetadataLabels,
+  });
+  if (scopeConfluenceSection && !scopeConfluenceSection.matched) {
+    log?.warn('context.prd_scope_unmatched', {
+      jiraKey: mainIssue.key,
+      scopeParentIssueKey: scopeParentIssue?.key || '',
+      pageId: scopeConfluenceSection.pageId,
+      reason: scopeConfluenceSection.reason,
+    });
+  }
 
   const userStories = dedupeScopedItems(
     [
@@ -700,13 +860,28 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     scopeParentIssue,
     scopeParentRelation,
     scopeConfluenceSection,
-    acceptanceCriteria,
+    acceptanceCriteria: selection.acceptanceCriteria,
     userStories,
-    acceptanceCriteriaSource,
+    acceptanceCriteriaSource: selection.acceptanceCriteriaSource,
     confidenceLevel: confidence.confidenceLevel,
-    confidenceReasons: confidence.confidenceReasons,
+    confidenceReasons: [
+      ...confidence.confidenceReasons,
+      selection.selectionReason,
+      ...selection.ignoredSources.map((source) =>
+        source === 'parent_story_jira'
+          ? 'Parent Story AC ignored because main Jira AC exists.'
+          : 'Scoped PRD AC ignored because main Jira AC exists.'
+      ),
+      ...selection.ignoredMetadataLabels.map((label) => `Story metadata ignored: ${label}.`),
+    ],
     requiresConfidencePermission: confidence.requiresConfidencePermission,
-    acceptanceCriteriaDiagnostics: diagnostics,
+    acceptanceCriteriaDiagnostics: {
+      ...diagnostics,
+      selectedAcceptanceCriteriaSource: selection.acceptanceCriteriaSource,
+      selectedAcceptanceCriteriaReason: selection.selectionReason,
+      ignoredSources: selection.ignoredSources,
+      ignoredMetadataLabels: selection.ignoredMetadataLabels,
+    },
     constraints: {
       feOnly: Boolean(options.feOnly),
       beAlreadyTested: Boolean(options.beAlreadyTested),

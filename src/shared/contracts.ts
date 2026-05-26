@@ -109,6 +109,10 @@ export interface AcceptanceCriteriaDiagnostics {
   allIssueUserStories: ScopedItem[];
   allIssueCriteria: ScopedItem[];
   confluenceCriteria: ScopedItem[];
+  selectedAcceptanceCriteriaSource?: string;
+  selectedAcceptanceCriteriaReason?: string;
+  ignoredSources?: string[];
+  ignoredMetadataLabels?: string[];
 }
 
 export interface QaContext {

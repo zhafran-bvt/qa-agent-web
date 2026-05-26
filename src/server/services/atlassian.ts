@@ -125,18 +125,70 @@ export async function getAccessibleResources(accessToken: string): Promise<Acces
   });
 }
 
-function extractText(value: unknown): string {
+export function extractText(value: unknown): string {
   if (!value) return '';
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) return value.map(extractText).filter(Boolean).join('\n');
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+      try {
+        return extractText(JSON.parse(trimmed));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => extractText(item))
+      .filter(Boolean)
+      .join('');
+  }
   if (typeof value !== 'object') return String(value);
 
   const record = value as Record<string, unknown>;
-  const parts: string[] = [];
-  if (record.text) parts.push(String(record.text));
-  if (record.content) parts.push(extractText(record.content));
-  if (record.value) parts.push(extractText(record.value));
-  return parts.filter(Boolean).join('\n');
+  const type = String(record.type || '');
+  const content = Array.isArray(record.content) ? record.content : [];
+  const text = record.text ? String(record.text) : '';
+  const joinedContent = content.map((item) => extractText(item)).join('');
+
+  switch (type) {
+    case 'text':
+      return text;
+    case 'hardBreak':
+      return '\n';
+    case 'paragraph':
+    case 'heading':
+    case 'blockquote':
+    case 'codeBlock':
+    case 'panel':
+      return `${joinedContent}\n`;
+    case 'listItem':
+      return joinedContent.trim();
+    case 'orderedList':
+      return content
+        .map((item, index) => {
+          const itemText = extractText(item).trim();
+          return itemText ? `${index + 1}. ${itemText}\n` : '';
+        })
+        .join('');
+    case 'bulletList':
+      return content
+        .map((item) => {
+          const itemText = extractText(item).trim();
+          return itemText ? `- ${itemText}\n` : '';
+        })
+        .join('');
+    case 'doc':
+      return `${joinedContent}`;
+    default: {
+      const parts: string[] = [];
+      if (text) parts.push(text);
+      if (joinedContent) parts.push(joinedContent);
+      if (record.value) parts.push(extractText(record.value));
+      return parts.join('');
+    }
+  }
 }
 
 export function extractPageId(url: string): string | null {

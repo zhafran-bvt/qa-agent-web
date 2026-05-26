@@ -71,6 +71,23 @@ export function ContextPanel({
             <div>{context.requiresConfidencePermission ? 'QA permission is required before generation.' : 'No confidence override is required.'}</div>
           </div>
 
+          {context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.length ? (
+            <div className="summary">
+              <strong>Scope Resolution</strong>
+              <ul>
+                {context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason ? (
+                  <li>{context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason}</li>
+                ) : null}
+                {(context.acceptanceCriteriaDiagnostics.ignoredSources || []).map((source) => (
+                  <li key={source}>Ignored source: {source}</li>
+                ))}
+                {(context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels || []).map((label) => (
+                  <li key={label}>Ignored story metadata: {label}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
           <div className="details-grid">
             <div className="detail-card">
               <h3>User Stories</h3>
