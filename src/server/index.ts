@@ -39,14 +39,32 @@ const MIGRATIONS_DIR = path.join(PROJECT_ROOT, 'src/server/migrations');
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
 
+function normalizeAtlassianScopes(rawScopes: string): string {
+  const required = [
+    'read:jira-work',
+    'read:page:confluence',
+    'read:confluence-content.all',
+    'read:confluence-space.summary',
+    'offline_access',
+  ];
+  const present = new Set(
+    String(rawScopes || '')
+      .split(/\s+/)
+      .map((scope) => scope.trim())
+      .filter(Boolean)
+  );
+  for (const scope of required) present.add(scope);
+  return Array.from(present).join(' ');
+}
+
 const config = {
   atlassian: {
     clientId: process.env.ATLASSIAN_CLIENT_ID || '',
     clientSecret: process.env.ATLASSIAN_CLIENT_SECRET || '',
     redirectUri: process.env.ATLASSIAN_REDIRECT_URI || `${APP_BASE_URL}/auth/atlassian/callback`,
-    scopes:
-      process.env.ATLASSIAN_SCOPES ||
-      'read:jira-work read:confluence-content.all read:confluence-space.summary offline_access',
+    scopes: normalizeAtlassianScopes(
+      process.env.ATLASSIAN_SCOPES || 'read:jira-work read:confluence-content.all read:confluence-space.summary offline_access'
+    ),
   },
   llm: {
     providers: [

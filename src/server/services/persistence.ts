@@ -82,23 +82,45 @@ class ResilientPersistence implements Persistence {
     private readonly primary: Persistence,
     private readonly fallback: Persistence,
     private readonly logger: Logger,
-    private readonly allowFallbackOnInitError: boolean
+    private readonly allowFallbackOnInitError: boolean,
+    private readonly maxInitAttempts: number,
+    private readonly retryDelayMs: number
   ) {
     this.active = primary;
   }
 
   async initialize(): Promise<void> {
-    try {
-      await this.primary.initialize();
-      this.active = this.primary;
-    } catch (error) {
-      if (!this.allowFallbackOnInitError) throw error;
-      this.logger.warn('persistence.postgres_init_failed_fallback', {
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-      await this.fallback.initialize();
-      this.active = this.fallback;
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= this.maxInitAttempts; attempt += 1) {
+      try {
+        await this.primary.initialize();
+        this.active = this.primary;
+        return;
+      } catch (error) {
+        lastError = error;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (attempt < this.maxInitAttempts) {
+          this.logger.warn('persistence.postgres_init_retry', {
+            attempt,
+            maxAttempts: this.maxInitAttempts,
+            retryDelayMs: this.retryDelayMs,
+            errorMessage,
+          });
+          await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
+          continue;
+        }
+      }
     }
+
+    if (!this.allowFallbackOnInitError) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+
+    this.logger.warn('persistence.postgres_init_failed_fallback', {
+      errorMessage: lastError instanceof Error ? lastError.message : String(lastError),
+    });
+    await this.fallback.initialize();
+    this.active = this.fallback;
   }
 
   ping(): Promise<{ ok: boolean; database: boolean; mode: 'postgres' | 'file+memory-fallback'; error?: string }> {
@@ -683,13 +705,15 @@ export function createPersistence({
 
   const pool = new Pool({
     connectionString: databaseUrl,
-    connectionTimeoutMillis: 5000,
+    connectionTimeoutMillis: databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1') ? 5000 : 30000,
     ssl: databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
   });
   return new ResilientPersistence(
     new PostgresPersistence(pool, logger, migrationsDir || path.join(process.cwd(), 'src/server/migrations')),
     fallback,
     logger,
-    Boolean(allowFallbackOnInitError)
+    Boolean(allowFallbackOnInitError),
+    allowFallbackOnInitError ? 1 : 6,
+    5000
   );
 }
