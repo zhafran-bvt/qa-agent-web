@@ -122,6 +122,17 @@ export interface AcceptanceCriteriaDiagnostics {
   selectedAcceptanceCriteriaReason?: string;
   ignoredSources?: string[];
   ignoredMetadataLabels?: string[];
+  thinTicketFallbackUsed?: boolean;
+  prdSubsectionMatchQuality?: 'confident' | 'broad' | 'none';
+  matchedPrdSubsectionHeading?: string;
+  matchedPrdSubsectionConfidence?: number;
+  userStoryFragmentsDiscardedCount?: number;
+  synthesisUsed?: boolean;
+  synthesisReason?: string;
+  rawAcceptanceCriteriaQuality?: 'none' | 'weak' | 'strong';
+  rawAcceptanceCriteriaWeakSignals?: string[];
+  discardedFragmentCount?: number;
+  discardedFragmentExamples?: string[];
 }
 
 export interface QaContext {
@@ -151,6 +162,25 @@ export interface QaContext {
 
 export interface AnalyzeResponse {
   context: QaContext;
+}
+
+export interface ScopeSnapshotTranslation {
+  mainSummary: string;
+  parentStorySummary: string;
+  scopedPrdSection: string;
+  confidenceReasons: string[];
+  selectedAcceptanceCriteriaReason?: string;
+  userStories: ScopedItem[];
+  acceptanceCriteria: ScopedItem[];
+}
+
+export interface ScopeSnapshotTranslationRequest {
+  context: QaContext;
+  targetLanguage: 'id';
+}
+
+export interface ScopeSnapshotTranslationResponse {
+  translation: ScopeSnapshotTranslation;
 }
 
 export interface GeneratedTestCase {

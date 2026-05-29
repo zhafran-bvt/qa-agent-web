@@ -7,6 +7,8 @@ import type {
   GenerateResponse,
   PushRequest,
   PushResponse,
+  ScopeSnapshotTranslationRequest,
+  ScopeSnapshotTranslationResponse,
   ValidateRequest,
   ValidateResponse,
   WorkflowHistoryDetailResponse,
@@ -70,6 +72,13 @@ export function loadHistoryRun(id: string): Promise<WorkflowHistoryDetailRespons
 
 export function loadDiagnostics(): Promise<DiagnosticsResponse> {
   return requestJson<DiagnosticsResponse>('/api/diagnostics');
+}
+
+export function translateScopeSnapshot(payload: ScopeSnapshotTranslationRequest): Promise<ScopeSnapshotTranslationResponse> {
+  return requestJson<ScopeSnapshotTranslationResponse>('/api/context/translate', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function logout(): Promise<void> {

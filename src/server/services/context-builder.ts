@@ -38,6 +38,8 @@ interface StorySection {
   title: string;
   body: string;
   reason: string;
+  matchQuality?: 'confident' | 'broad' | 'none';
+  confidence?: number;
 }
 
 type CriteriaExtractionMode = 'main' | 'story' | 'scoped';
@@ -83,6 +85,12 @@ function normalizeMultilineText(value: unknown): string {
     .trim();
 }
 
+function stripBracketPrefixes(value: string): string {
+  return String(value || '')
+    .replace(/^\[[^\]]+\]\s*/g, '')
+    .trim();
+}
+
 export function canonicalize(value: unknown): string {
   return normalizeInlineText(value)
     .toLowerCase()
@@ -90,6 +98,25 @@ export function canonicalize(value: unknown): string {
     .replace(/[-+/_().,:;|[\]{}]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeMatchText(value: unknown): string {
+  return canonicalize(value)
+    .replace(/\bscoring\b/g, ' score ')
+    .replace(/\bscored\b/g, ' score ')
+    .replace(/\bscores\b/g, ' score ')
+    .replace(/\bresults\b/g, ' result ')
+    .replace(/\bexecutive\b/g, ' executive ')
+    .replace(/\bsummary\b/g, ' summary ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeMatchText(value: string): string[] {
+  return normalizeMatchText(value)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2);
 }
 
 function dedupeScopedItems(items: Array<{ text: string; source?: string }>, prefix: string): ScopedItem[] {
@@ -322,7 +349,7 @@ export function extractUserStoriesFromText(text: string, source: string): Array<
     .filter(Boolean);
 
   for (const line of lines) {
-    if (/as a\b/i.test(line) && /i want\b/i.test(line)) {
+    if (isDisplayableUserStory(line)) {
       stories.push({ text: line.replace(/^#+\s*/, ''), source });
     }
   }
@@ -485,6 +512,167 @@ function cleanHeadingText(line: string): string {
   return normalizeInlineText(String(line || '').replace(/^#+\s*/, ''));
 }
 
+function isDisplayableUserStory(text: string): boolean {
+  const normalized = normalizeInlineText(text);
+  if (!normalized) return false;
+  if (!/^as\b/i.test(normalized) && !/^\d+\.\s+as\b/i.test(normalized)) return false;
+  if (!/i want\b/i.test(normalized)) return false;
+  if (normalized.length < 18) return false;
+  if (/^[^A-Za-z]*AI:?$/i.test(normalized)) return false;
+  return true;
+}
+
+function isThinMainIssue(mainIssue: SimplifiedIssue, mainIssueCriteria: ScopedItem[]): boolean {
+  if (mainIssueCriteria.length > 0) return false;
+  const description = normalizeMultilineText([mainIssue.summary || '', mainIssue.description || '', mainIssue.renderedDescription || ''].join('\n'));
+  const stripped = stripBracketPrefixes(description);
+  if (stripped.length < 80) return true;
+  const meaningfulLines = stripped
+    .split('\n')
+    .map((line) => normalizeInlineText(line))
+    .filter((line) => line.length >= 20);
+  return meaningfulLines.length <= 1;
+}
+
+function deriveTitleSignals(mainIssue: SimplifiedIssue, storySummary: string): string[] {
+  const rawSegments = [
+    stripBracketPrefixes(mainIssue.summary || ''),
+    ...stripBracketPrefixes(mainIssue.summary || '')
+      .split(/\s+[–-]\s+/)
+      .map((segment) => segment.trim())
+      .filter(Boolean),
+    storySummary || '',
+  ];
+
+  const output: string[] = [];
+  const seen = new Set<string>();
+
+  for (const segment of rawSegments) {
+    const normalized = normalizeMatchText(segment);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(segment.trim());
+  }
+
+  return output;
+}
+
+interface RankedPrdSection {
+  heading: string;
+  body: string;
+  score: number;
+  confidence: number;
+}
+
+function isPrdSubheading(line: string): boolean {
+  const text = cleanHeadingText(line).replace(/:$/, '');
+  if (!text) return false;
+  if (isStoryHeadingLine(text)) return false;
+  if (/^(acceptance criteria|requirements|expected result|expected behavior|goals|non-goals|feature flag|data flow|background|ui behavior|scope)$/i.test(text)) {
+    return false;
+  }
+  if (/^[-*•]/.test(line)) return false;
+  if (/^\d+[\.)]\s+/.test(line) && /\bAs a\b/i.test(text)) return false;
+  if (text.length > 90) return false;
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 8) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9 /&()_-]*$/.test(text);
+}
+
+function parsePrdSubsections(body: string): Array<{ heading: string; body: string }> {
+  const lines = normalizeMultilineText(body)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const sections: Array<{ heading: string; body: string }> = [];
+  let currentHeading = '';
+  let currentBody: string[] = [];
+
+  const flush = () => {
+    if (!currentHeading || !currentBody.length) return;
+    sections.push({
+      heading: currentHeading,
+      body: currentBody.join('\n').trim(),
+    });
+  };
+
+  for (const line of lines) {
+    if (isPrdSubheading(line)) {
+      flush();
+      currentHeading = cleanHeadingText(line).replace(/:$/, '');
+      currentBody = [];
+      continue;
+    }
+
+    if (currentHeading) currentBody.push(line);
+  }
+
+  flush();
+  return sections;
+}
+
+function scorePrdSubsection(heading: string, body: string, titleSignals: string[]): RankedPrdSection {
+  const headingNormalized = normalizeMatchText(heading);
+  const bodyNormalized = normalizeMatchText(body.slice(0, 800));
+  const headingTokens = new Set(tokenizeMatchText(heading));
+  let score = 0;
+
+  for (const signal of titleSignals) {
+    const normalizedSignal = normalizeMatchText(signal);
+    if (!normalizedSignal) continue;
+    const signalTokens = tokenizeMatchText(signal);
+    const overlap = signalTokens.filter((token) => headingTokens.has(token)).length;
+
+    if (headingNormalized === normalizedSignal) score += 12;
+    else if (headingNormalized.includes(normalizedSignal) || normalizedSignal.includes(headingNormalized)) score += 9;
+    else if (bodyNormalized.includes(normalizedSignal)) score += 4;
+
+    score += overlap * 2;
+
+    if (/no score/.test(normalizedSignal) && /no score/.test(headingNormalized)) score += 6;
+    if (/ai summary/.test(normalizedSignal) && /ai summary/.test(headingNormalized)) score += 4;
+    if (/executive summary/.test(normalizedSignal) && /summary/.test(headingNormalized)) score += 3;
+  }
+
+  const confidence = Math.min(1, score / 18);
+  return { heading, body, score, confidence };
+}
+
+function rankPrdSubsection(
+  baseSection: StorySection,
+  mainIssue: SimplifiedIssue,
+  storySummary: string
+): StorySection | null {
+  const subsections = parsePrdSubsections(baseSection.body || '');
+  if (!subsections.length) return null;
+
+  const titleSignals = deriveTitleSignals(mainIssue, storySummary);
+  const ranked = subsections
+    .map((section) => scorePrdSubsection(section.heading, section.body, titleSignals))
+    .filter((section) => section.score > 0)
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return left.body.length - right.body.length;
+    });
+
+  if (!ranked.length) return null;
+
+  const best = ranked[0];
+  const second = ranked[1];
+  const closeMatch = second && Math.abs(best.score - second.score) <= 2;
+  const matchQuality: 'confident' | 'broad' = best.score >= 10 && !closeMatch ? 'confident' : 'broad';
+
+  return {
+    matched: true,
+    title: best.heading,
+    body: best.body,
+    reason: '',
+    matchQuality,
+    confidence: Number(best.confidence.toFixed(2)),
+  };
+}
+
 export function anchorToHeading(anchor: string): string {
   const text = String(anchor || '').replace(/^#/, '').replace(/\+/g, ' ').replace(/-/g, ' ');
   return normalizeInlineText(text);
@@ -523,6 +711,8 @@ export function isolateStorySection(body: string, anchor: string, storySummary: 
       reason: anchor
         ? 'Story found, but PRD anchor did not resolve to a unique section.'
         : 'Story found, but PRD section could not be matched from the linked story title.',
+      matchQuality: 'none',
+      confidence: 0,
     };
   }
 
@@ -539,6 +729,8 @@ export function isolateStorySection(body: string, anchor: string, storySummary: 
     title: matchedHeading,
     body: lines.slice(start, end).join('\n').trim(),
     reason: '',
+    matchQuality: 'confident',
+    confidence: 1,
   };
 }
 
@@ -554,7 +746,8 @@ function selectAcceptanceCriteria(
   scopedSectionCriteria: ScopedItem[],
   mainIssue: SimplifiedIssue,
   scopeConfluenceSection: ScopeConfluenceSection | null,
-  storyMetadataLabels: string[]
+  storyMetadataLabels: string[],
+  mainIssueThin: boolean
 ): CriteriaSelectionResult {
   if (mainIssueCriteria.length > 0) {
     return {
@@ -575,9 +768,13 @@ function selectAcceptanceCriteria(
     return {
       acceptanceCriteria: scopedSectionCriteria,
       acceptanceCriteriaSource: 'parent_story_confluence_section',
-      selectionReason: scopeConfluenceSection?.matched
-        ? 'Main Jira scope was insufficient, so the matched PRD subsection was used.'
-        : 'Main Jira scope was insufficient, so the scoped PRD subsection was used.',
+      selectionReason: mainIssueThin
+        ? scopeConfluenceSection?.matched
+          ? scopeConfluenceSection?.reason || 'Main Jira scope was insufficient, so the matched PRD subsection was used.'
+          : 'Main Jira scope was insufficient, so the scoped PRD subsection was used.'
+        : scopeConfluenceSection?.matched
+          ? 'Main Jira scope was insufficient, so the matched PRD subsection was used.'
+          : 'Main Jira scope was insufficient, so the scoped PRD subsection was used.',
       ignoredSources: parentStoryCriteria.length > 0 ? ['parent_story_jira'] : [],
       ignoredMetadataLabels: storyMetadataLabels,
     };
@@ -606,7 +803,8 @@ function determineConfidence(
   mainCriteria: ScopedItem[],
   scopedSectionCriteria: ScopedItem[],
   parentStory: LinkedIssueSummary | null,
-  scopeConfluenceSection: ScopeConfluenceSection | null
+  scopeConfluenceSection: ScopeConfluenceSection | null,
+  mainIssueThin: boolean
 ) {
   const reasons: string[] = [];
 
@@ -619,9 +817,13 @@ function determineConfidence(
   }
 
   if (scopedSectionCriteria.length > 0 && scopeConfluenceSection && scopeConfluenceSection.matched) {
+    const confidenceLevel: 'high' | 'medium' = scopeConfluenceSection.reason.includes('broadly') ? 'medium' : 'high';
     return {
-      confidenceLevel: 'high' as const,
-      confidenceReasons: ['Parent Story was resolved and its linked PRD subsection was matched successfully.'],
+      confidenceLevel,
+      confidenceReasons: [
+        scopeConfluenceSection.reason || 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+        ...(mainIssueThin ? ['Main Jira scope was insufficient, so the matched PRD subsection was used.'] : []),
+      ],
       requiresConfidencePermission: false,
     };
   }
@@ -636,8 +838,9 @@ function determineConfidence(
     reasons.push('Parent Story was resolved, but no scoped acceptance criteria were found in the matched section.');
   }
 
+  const confidenceLevel: 'medium' | 'low' = parentStory ? 'medium' : 'low';
   return {
-    confidenceLevel: (parentStory ? 'medium' : 'low') as 'medium' | 'low',
+    confidenceLevel,
     confidenceReasons: reasons,
     requiresConfidencePermission: true,
   };
@@ -729,6 +932,8 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     ...issue,
     classification: classifyLinkedIssue(issue),
   }));
+  const mainIssueCriteria = extractMainIssueCriteria(mainIssue);
+  const mainIssueThin = isThinMainIssue(mainIssue, mainIssueCriteria);
   const scopeParentIssue = classifiedLinkedIssues.find((issue) => issue.classification === 'parent story' && !issue.fetchError) || null;
   const scopeParentRelation = scopeParentIssue ? scopeParentIssue.linkRelation || 'is child of' : '';
 
@@ -746,23 +951,46 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
       const page = confluencePages.find((candidate) => candidate.id === preferredStoryRef.pageId);
       if (page && !page.fetchError) {
         const section = isolateStorySection(page.body || '', preferredStoryRef.anchor, scopeParentIssue.summary || '');
+        const subsectionBase = section.matched
+          ? section
+          : {
+              matched: true,
+              title: page.title || scopeParentIssue.summary || '',
+              body: page.body || '',
+              reason: '',
+              matchQuality: 'broad' as const,
+              confidence: 0.4,
+            };
+        const thinFallbackCandidate = mainIssueThin ? rankPrdSubsection(subsectionBase, mainIssue, scopeParentIssue.summary || '') : null;
+        const effectiveSection = thinFallbackCandidate || section;
         scopeConfluenceSection = {
           pageId: page.id,
           title: page.title || '',
           url: preferredStoryRef.url || page.webUrl || '',
           anchor: preferredStoryRef.anchor || '',
-          matchedHeading: section.title,
-          matched: section.matched,
-          reason: section.reason,
+          matchedHeading: effectiveSection.title,
+          matched: effectiveSection.matched,
+          reason:
+            effectiveSection.matchQuality === 'broad'
+              ? `Parent Story was resolved and a PRD subsection was matched broadly from the thin ticket title.`
+              : effectiveSection.reason,
           sourceIssueKey: scopeParentIssue.key,
-          body: section.body,
+          body: effectiveSection.body,
         };
-        if (section.matched) {
+        if (effectiveSection.matched) {
           scopedSectionCriteria = dedupeScopedItems(
-            extractAcceptanceCriteriaFromText(section.body, `${page.id} ${section.title || page.title}`),
+            extractAcceptanceCriteriaFromText(effectiveSection.body, `${page.id} ${effectiveSection.title || page.title}`),
             'AC'
           );
-          scopedSectionStories = dedupeScopedItems([{ text: section.title || scopeParentIssue.summary || '', source: `${page.id} ${page.title}` }], 'US');
+          scopedSectionStories = dedupeScopedItems(
+            [
+              ...(isDisplayableUserStory(scopeParentIssue.summary || '')
+                ? [{ text: scopeParentIssue.summary || '', source: `${scopeParentIssue.key} summary` }]
+                : []),
+              ...(isDisplayableUserStory(effectiveSection.title || '') ? [{ text: effectiveSection.title || '', source: `${page.id} ${page.title}` }] : []),
+            ],
+            'US'
+          );
         }
       } else {
         scopeConfluenceSection = {
@@ -794,7 +1022,6 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     }
   }
 
-  const mainIssueCriteria = extractMainIssueCriteria(mainIssue);
   const storyDescriptionResult = extractCriteriaByMode(
     (scopeParentIssue as unknown as SimplifiedIssue | null)?.description || '',
     scopeParentIssue ? `${scopeParentIssue.key} description` : '',
@@ -815,7 +1042,8 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     scopedSectionCriteria,
     mainIssue,
     scopeConfluenceSection,
-    [...new Set([...storyDescriptionResult.ignoredMetadataLabels, ...storyRenderedDescriptionResult.ignoredMetadataLabels])]
+    [...new Set([...storyDescriptionResult.ignoredMetadataLabels, ...storyRenderedDescriptionResult.ignoredMetadataLabels])],
+    mainIssueThin
   );
   log?.info('context.scope_selection', {
     jiraKey: mainIssue.key,
@@ -841,13 +1069,21 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
 
   const userStories = dedupeScopedItems(
     [
-      ...(scopeParentIssue ? [{ text: scopeParentIssue.summary || '', source: `${scopeParentIssue.key} summary` }] : []),
+      ...(scopeParentIssue && isDisplayableUserStory(scopeParentIssue.summary || '')
+        ? [{ text: scopeParentIssue.summary || '', source: `${scopeParentIssue.key} summary` }]
+        : []),
       ...scopedSectionStories,
     ],
     'US'
   );
 
-  const confidence = determineConfidence(mainIssueCriteria, scopedSectionCriteria, scopeParentIssue, scopeConfluenceSection);
+  const allUserStoryCandidates = [
+    ...(scopeParentIssue ? [{ text: scopeParentIssue.summary || '', source: `${scopeParentIssue.key} summary` }] : []),
+    ...(scopeConfluenceSection?.matchedHeading ? [{ text: scopeConfluenceSection.matchedHeading, source: `${scopeConfluenceSection.pageId} heading` }] : []),
+  ];
+  const discardedUserStoryFragments = allUserStoryCandidates.filter((candidate) => !isDisplayableUserStory(candidate.text));
+
+  const confidence = determineConfidence(mainIssueCriteria, scopedSectionCriteria, scopeParentIssue, scopeConfluenceSection, mainIssueThin);
   const diagnostics = buildContextSummary(mainIssue, classifiedLinkedIssues, confluencePages);
   const epic = mainIssue.parent && mainIssue.parent.summary;
 
@@ -866,7 +1102,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     confidenceLevel: confidence.confidenceLevel,
     confidenceReasons: [
       ...confidence.confidenceReasons,
-      selection.selectionReason,
+      ...(selection.selectionReason && !confidence.confidenceReasons.includes(selection.selectionReason) ? [selection.selectionReason] : []),
       ...selection.ignoredSources.map((source) =>
         source === 'parent_story_jira'
           ? 'Parent Story AC ignored because main Jira AC exists.'
@@ -881,6 +1117,11 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
       selectedAcceptanceCriteriaReason: selection.selectionReason,
       ignoredSources: selection.ignoredSources,
       ignoredMetadataLabels: selection.ignoredMetadataLabels,
+      thinTicketFallbackUsed: mainIssueThin && selection.acceptanceCriteriaSource === 'parent_story_confluence_section',
+      prdSubsectionMatchQuality: scopeConfluenceSection?.matched ? (scopeConfluenceSection.reason.includes('broadly') ? 'broad' : 'confident') : 'none',
+      matchedPrdSubsectionHeading: scopeConfluenceSection?.matchedHeading || '',
+      matchedPrdSubsectionConfidence: scopeConfluenceSection?.matched ? (scopeConfluenceSection.reason.includes('broadly') ? 0.6 : 1) : 0,
+      userStoryFragmentsDiscardedCount: discardedUserStoryFragments.length,
     },
     constraints: {
       feOnly: Boolean(options.feOnly),

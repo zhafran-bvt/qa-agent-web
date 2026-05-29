@@ -1,27 +1,31 @@
 import type { WorkflowHistoryDetail, WorkflowHistorySummary } from '../../shared/contracts';
+import type { UiLanguage } from '../i18n';
+import { uiText } from '../i18n';
 
 interface HistoryPanelProps {
   runs: WorkflowHistorySummary[];
   selectedRun: WorkflowHistoryDetail | null;
   busy: boolean;
+  lang: UiLanguage;
   onOpenRun: (id: string) => void;
 }
 
-function runLabel(run: WorkflowHistorySummary): string {
+function runLabel(run: WorkflowHistorySummary, lang: UiLanguage): string {
+  const t = uiText[lang].history;
   const parts = [run.entryType.toUpperCase(), run.jiraKey, run.user];
-  if (run.caseCount != null) parts.push(`${run.caseCount} cases`);
-  if (run.entryType === 'push') parts.push(`push ${run.pushed || 0}/${(run.pushed || 0) + (run.failed || 0)}`);
+  if (run.caseCount != null) parts.push(t.cases(run.caseCount));
+  if (run.entryType === 'push') parts.push(t.pushSummary(run.pushed || 0, (run.pushed || 0) + (run.failed || 0)));
   return parts.join(' · ');
 }
 
-export function HistoryPanel({ runs, selectedRun, busy, onOpenRun }: HistoryPanelProps) {
+export function HistoryPanel({ runs, selectedRun, busy, lang, onOpenRun }: HistoryPanelProps) {
+  const t = uiText[lang].history;
   return (
-    <section className="panel panel-stack">
+    <section className="panel panel-stack panel-secondary">
       <div className="panel-heading">
-        <span className="panel-step">5</span>
         <div>
-          <h2>Workflow History</h2>
-          <p>Browse persisted analyze, generate, and push runs across QA users.</p>
+          <h2>{t.title}</h2>
+          <p>{t.subtitle}</p>
         </div>
       </div>
 
@@ -30,34 +34,34 @@ export function HistoryPanel({ runs, selectedRun, busy, onOpenRun }: HistoryPane
           {runs.length ? (
             runs.map((run) => (
               <button className="history-item" key={run.id} type="button" onClick={() => onOpenRun(run.id)}>
-                <strong>{runLabel(run)}</strong>
+                <strong>{runLabel(run, lang)}</strong>
                 <span>{new Date(run.createdAt).toLocaleString()}</span>
               </button>
             ))
           ) : (
-            <div className="summary muted">No persisted runs yet.</div>
+            <div className="summary muted">{t.noRuns}</div>
           )}
         </div>
 
         <div className="history-detail">
           {busy ? (
-            <div className="summary">Loading run details...</div>
+            <div className="summary">{t.loadingDetails}</div>
           ) : selectedRun ? (
             <div className="summary">
               <div>
                 <strong>{selectedRun.entryType.toUpperCase()}</strong> · {selectedRun.jiraKey} · {selectedRun.user}
               </div>
               <div>{new Date(selectedRun.createdAt).toLocaleString()}</div>
-              {selectedRun.provider ? <div>LLM: {selectedRun.provider} / {selectedRun.model}</div> : null}
-              <div>Cases: {selectedRun.testCases.length}</div>
+              {selectedRun.provider ? <div>{t.llm(selectedRun.provider, selectedRun.model || '')}</div> : null}
+              <div>{t.casesLabel(selectedRun.testCases.length)}</div>
               {selectedRun.push ? (
                 <div>
-                  Push: {selectedRun.push.summary.pushed} pushed / {selectedRun.push.summary.failed} failed · section {selectedRun.push.sectionId}
+                  {t.pushLabel(selectedRun.push.summary.pushed, selectedRun.push.summary.failed, selectedRun.push.sectionId)}
                 </div>
               ) : null}
             </div>
           ) : (
-            <div className="summary muted">Select a run to inspect details.</div>
+            <div className="summary muted">{t.selectRun}</div>
           )}
         </div>
       </div>

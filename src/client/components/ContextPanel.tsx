@@ -1,59 +1,89 @@
-import type { QaContext } from '../../shared/contracts';
+import type { QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
+import type { UiLanguage } from '../i18n';
+import { uiText } from '../i18n';
 
 interface ContextPanelProps {
   context: QaContext | null;
+  translation: ScopeSnapshotTranslation | null;
+  translating: boolean;
   permissionApproved: boolean;
   overrideReason: string;
   busy: boolean;
+  lang: UiLanguage;
+  onLanguageChange: (value: UiLanguage) => void;
   onPermissionApprovedChange: (value: boolean) => void;
   onOverrideReasonChange: (value: string) => void;
   onGenerate: () => void;
 }
 
-function renderKeyValueRows(context: QaContext) {
+function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTranslation | null, lang: UiLanguage) {
+  const t = uiText[lang].context;
   return [
-    ['Ticket', context.ticketKey],
-    ['Epic', context.epic],
-    ['Main Summary', context.mainIssue.summary || '-'],
+    [t.ticket, context.ticketKey],
+    [t.epic, context.epic],
+    [t.acSource, context.acceptanceCriteriaSource || 'none'],
+    [t.confidence, context.confidenceLevel.toUpperCase()],
+    [t.mainSummary, translation?.mainSummary || context.mainIssue.summary || '-'],
     [
-      'Parent Story',
-      context.scopeParentIssue ? `${context.scopeParentIssue.key}: ${context.scopeParentIssue.summary || ''}` : 'No parent Story detected',
+      t.parentStory,
+      context.scopeParentIssue
+        ? `${context.scopeParentIssue.key}: ${translation?.parentStorySummary || context.scopeParentIssue.summary || ''}`
+        : t.noParentStory,
     ],
     [
-      'Scoped PRD Section',
+      t.scopedPrdSection,
       context.scopeConfluenceSection?.pageId
-        ? `${context.scopeConfluenceSection.pageId}: ${context.scopeConfluenceSection.matchedHeading || context.scopeConfluenceSection.title}`
-        : 'No scoped PRD section detected',
+        ? `${context.scopeConfluenceSection.pageId}: ${translation?.scopedPrdSection || context.scopeConfluenceSection.matchedHeading || context.scopeConfluenceSection.title}`
+        : t.noScopedPrd,
     ],
-    ['AC Source', context.acceptanceCriteriaSource || 'none'],
   ];
 }
 
 export function ContextPanel({
   context,
+  translation,
+  translating,
   permissionApproved,
   overrideReason,
   busy,
+  lang,
+  onLanguageChange,
   onPermissionApprovedChange,
   onOverrideReasonChange,
   onGenerate,
 }: ContextPanelProps) {
+  const t = uiText[lang].context;
+  const displayConfidenceReasons = translation?.confidenceReasons?.length ? translation.confidenceReasons : context?.confidenceReasons || [];
+  const displaySelectedReason =
+    translation?.selectedAcceptanceCriteriaReason || context?.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '';
+  const displayAcceptanceCriteria = translation?.acceptanceCriteria?.length ? translation.acceptanceCriteria : context?.acceptanceCriteria || [];
+  const displayUserStories = translation?.userStories?.length ? translation.userStories : context?.userStories || [];
   return (
-    <section className="panel panel-stack">
+    <section className="panel panel-stack panel-context">
       <div className="panel-heading">
-        <span className="panel-step">2</span>
-        <div>
-          <h2>Context</h2>
-          <p>Review the resolved Story scope, confidence level, and extracted acceptance criteria before generation.</p>
+        <div className="panel-heading-main">
+          <span className="panel-step">2</span>
+          <div>
+            <h2>{t.title}</h2>
+            <p>{t.subtitle}</p>
+          </div>
+        </div>
+        <div className="panel-actions">
+          <button className={`button button-secondary button-small ${lang === 'en' ? 'active-filter' : ''}`} type="button" onClick={() => onLanguageChange('en')}>
+            EN
+          </button>
+          <button className={`button button-secondary button-small ${lang === 'id' ? 'active-filter' : ''}`} type="button" onClick={() => onLanguageChange('id')}>
+            {translating ? '...' : 'ID'}
+          </button>
         </div>
       </div>
 
       {!context ? (
-        <div className="summary muted">No context loaded.</div>
+        <div className="summary muted">{t.noContext}</div>
       ) : (
         <>
-          <div className="context-grid">
-            {renderKeyValueRows(context).map(([label, value]) => (
+          <div className="context-grid context-grid-compact">
+            {renderKeyValueRows(context, translation, lang).map(([label, value]) => (
               <div className="context-item" key={label}>
                 <span className="context-label">{label}</span>
                 <div className="context-value">{value}</div>
@@ -61,61 +91,64 @@ export function ContextPanel({
             ))}
           </div>
 
-          <div className={`summary ${context.requiresConfidencePermission ? 'summary-warn' : ''}`}>
-            <strong>Confidence: {context.confidenceLevel.toUpperCase()}</strong>
+          <div className={`summary summary-status ${context.requiresConfidencePermission ? 'summary-warn' : ''}`}>
+            <strong>{t.confidenceSummary}</strong>
             <ul>
-              {context.confidenceReasons.map((reason) => (
+              {displayConfidenceReasons.map((reason) => (
                 <li key={reason}>{reason}</li>
               ))}
             </ul>
-            <div>{context.requiresConfidencePermission ? 'QA permission is required before generation.' : 'No confidence override is required.'}</div>
+            <div>{context.requiresConfidencePermission ? t.qaPermissionRequired : t.noConfidenceOverride}</div>
           </div>
 
-          {context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.length ? (
-            <div className="summary">
-              <strong>Scope Resolution</strong>
+          {displaySelectedReason || context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.length ? (
+            <details className="summary summary-detail">
+              <summary>{t.scopeResolutionDetails}</summary>
+              <div className="summary-detail-body">
               <ul>
-                {context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason ? (
-                  <li>{context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason}</li>
+                {displaySelectedReason ? (
+                  <li>{displaySelectedReason}</li>
                 ) : null}
                 {(context.acceptanceCriteriaDiagnostics.ignoredSources || []).map((source) => (
-                  <li key={source}>Ignored source: {source}</li>
+                  <li key={source}>{t.ignoredSource(source)}</li>
                 ))}
                 {(context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels || []).map((label) => (
-                  <li key={label}>Ignored story metadata: {label}</li>
+                  <li key={label}>{t.ignoredStoryMetadata(label)}</li>
                 ))}
               </ul>
-            </div>
+              </div>
+            </details>
           ) : null}
 
           <div className="details-grid">
+            <div className="detail-card detail-card-primary">
+              <h3>{t.acceptanceCriteria}</h3>
+              {displayAcceptanceCriteria.length ? (
+                <ul className="criteria-list">
+                  {displayAcceptanceCriteria.map((criterion) => (
+                    <li className="criteria-item" key={criterion.id}>
+                      <span className="criteria-id">{criterion.id}</span>
+                      <div className="criteria-text">{criterion.text}</div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">{t.noAcceptanceCriteria}</p>
+              )}
+            </div>
+
             <div className="detail-card">
-              <h3>User Stories</h3>
-              {context.userStories.length ? (
+              <h3>{t.userStories}</h3>
+              {displayUserStories.length ? (
                 <ul>
-                  {context.userStories.map((story) => (
+                  {displayUserStories.map((story) => (
                     <li key={story.id}>
                       <strong>{story.id}</strong> {story.text}
                     </li>
                   ))}
                 </ul>
               ) : (
-                <p className="muted">No user stories extracted.</p>
-              )}
-            </div>
-
-            <div className="detail-card">
-              <h3>Acceptance Criteria</h3>
-              {context.acceptanceCriteria.length ? (
-                <ul>
-                  {context.acceptanceCriteria.map((criterion) => (
-                    <li key={criterion.id}>
-                      <strong>{criterion.id}</strong> {criterion.text}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">No scoped acceptance criteria extracted.</p>
+                <p className="muted">{t.noUserStories}</p>
               )}
             </div>
           </div>
@@ -128,21 +161,21 @@ export function ContextPanel({
                   checked={permissionApproved}
                   onChange={(event) => onPermissionApprovedChange(event.target.checked)}
                 />
-                <span>I understand the scope-confidence warning and want to continue generating test cases</span>
+                <span>{t.overrideCheckbox}</span>
               </label>
               <label className="field compact">
-                <span>Manual Override Reason</span>
+                <span>{t.manualOverrideReason}</span>
                 <textarea
                   value={overrideReason}
-                  placeholder="Optional note for why generation should proceed with low-confidence scope"
+                  placeholder={t.manualOverridePlaceholder}
                   onChange={(event) => onOverrideReasonChange(event.target.value)}
                 />
               </label>
             </div>
           ) : null}
 
-          <button className="button" type="button" disabled={busy || (context.requiresConfidencePermission && !permissionApproved)} onClick={onGenerate}>
-            {busy ? 'Generating...' : 'Generate BDD with AI'}
+          <button className="button button-generate" type="button" disabled={busy || (context.requiresConfidencePermission && !permissionApproved)} onClick={onGenerate}>
+            {busy ? t.generating : t.generate}
           </button>
         </>
       )}

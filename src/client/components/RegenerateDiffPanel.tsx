@@ -1,4 +1,6 @@
 import type { CoverageSummary, GeneratedTestCase, ValidationEntry } from '../../shared/contracts';
+import type { UiLanguage } from '../i18n';
+import { uiText } from '../i18n';
 
 interface PendingGeneration {
   runId?: string;
@@ -14,6 +16,7 @@ interface PendingGeneration {
 interface RegenerateDiffPanelProps {
   currentCases: GeneratedTestCase[];
   candidate: PendingGeneration;
+  lang: UiLanguage;
   onReplace: () => void;
   onCancel: () => void;
 }
@@ -38,42 +41,43 @@ function compareCases(currentCases: GeneratedTestCase[], candidateCases: Generat
   return rows;
 }
 
-export function RegenerateDiffPanel({ currentCases, candidate, onReplace, onCancel }: RegenerateDiffPanelProps) {
+export function RegenerateDiffPanel({ currentCases, candidate, lang, onReplace, onCancel }: RegenerateDiffPanelProps) {
+  const t = uiText[lang].regenerate;
   const rows = compareCases(currentCases, candidate.testCases);
   return (
     <section className="panel panel-stack">
       <div className="panel-heading">
-        <span className="panel-step">R</span>
-        <div>
-          <h2>Regenerate Diff</h2>
-          <p>Review the candidate draft before it replaces the current reviewed set.</p>
+        <div className="panel-heading-main">
+          <span className="panel-step">R</span>
+          <div>
+            <h2>{t.title}</h2>
+            <p>{t.subtitle}</p>
+          </div>
         </div>
       </div>
 
       <div className="summary">
-        <div>Current cases: {currentCases.length}</div>
-        <div>Candidate cases: {candidate.testCases.length}</div>
-        <div>
-          Generated with {candidate.provider} / {candidate.model}
-        </div>
+        <div>{t.currentCases(currentCases.length)}</div>
+        <div>{t.candidateCases(candidate.testCases.length)}</div>
+        <div>{t.generatedWith(candidate.provider, candidate.model)}</div>
       </div>
 
       <div className="diff-list">
         {rows.map((row) => (
           <div className={`diff-item diff-${row.status}`} key={row.key}>
             <strong>{row.status.toUpperCase()}</strong>
-            <div>Current: {row.current?.title || '-'}</div>
-            <div>Candidate: {row.candidate?.title || '-'}</div>
+            <div>{t.current}: {row.current?.title || '-'}</div>
+            <div>{t.candidate}: {row.candidate?.title || '-'}</div>
           </div>
         ))}
       </div>
 
       <div className="diff-actions">
         <button className="button" type="button" onClick={onReplace}>
-          Replace current draft
+          {t.replace}
         </button>
         <button className="button button-secondary" type="button" onClick={onCancel}>
-          Keep current draft
+          {t.keep}
         </button>
       </div>
     </section>

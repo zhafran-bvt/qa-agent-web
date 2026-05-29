@@ -469,6 +469,77 @@ Acceptance Criteria
   assert.equal(context.confidenceLevel, 'high');
 });
 
+test('uses the thin ticket title to narrow a PRD subsection and cleans junk user-story fragments', async () => {
+  const issues = {
+    'ORB-3157': {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - Generate executive summary for analysis results with no scoring',
+      description: '',
+      renderedDescription: '',
+      linkedIssues: [
+        {
+          key: 'ORB-1248',
+          relation: 'is child of',
+          summary: 'AI Assistance Summary Result',
+          issueType: 'Story',
+        },
+      ],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'AI Assistance', issueType: 'Epic' },
+    },
+    'ORB-1248': {
+      key: 'ORB-1248',
+      summary: 'AI Assistance Summary Result',
+      description: 'PRD: https://bvarta-project.atlassian.net/wiki/pages/viewpage.action?pageId=950075398#AI-Assistance-Summary-Result',
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Story',
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({
+      id: '950075398',
+      title: 'AI Powered Assistance',
+      body: `
+1. AI Assistance Summary Result
+Overview paragraph.
+
+AI Summary WITH SCORE
+Acceptance Criteria
+1. The summary compares ranked areas.
+
+AI Summary NO SCORE
+Acceptance Criteria
+1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.
+2. The no-score AI Summary uses an absolute profiling-based narrative and describes the area characteristics, defining signals, and zone type.
+3. The no-score AI Summary includes landmark context and environment risk indication.
+4. Strategic Takeaways remain available for the no-score variant.
+
+- AI:
+`,
+    }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3157', { includeComments: true });
+
+  assert.equal(context.acceptanceCriteriaSource, 'parent_story_confluence_section');
+  assert.equal(context.scopeConfluenceSection?.matched, true);
+  assert.equal(context.scopeConfluenceSection?.matchedHeading, 'AI Summary NO SCORE');
+  assert.equal(context.acceptanceCriteriaDiagnostics.thinTicketFallbackUsed, true);
+  assert.equal(context.acceptanceCriteriaDiagnostics.prdSubsectionMatchQuality, 'confident');
+  assert.equal(context.acceptanceCriteria.length, 5);
+  assert.equal(context.acceptanceCriteria.some((criterion) => /Strategic Takeaways/i.test(criterion.text)), true);
+  assert.equal(context.userStories.some((story) => /- AI:/i.test(story.text)), false);
+  assert.equal(context.acceptanceCriteriaDiagnostics.userStoryFragmentsDiscardedCount, 2);
+});
+
 test('parses page id and anchor from story PRD links', () => {
   const ref = parseConfluenceReference(
     'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/897351682/Handling+Administrative+Area+Filter#5.-As-a-PM%2C-I-want-the-filter-function',

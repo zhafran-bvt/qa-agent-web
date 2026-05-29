@@ -1,6 +1,7 @@
 import https from 'node:https';
-import type { GeneratedTestCase, QaContext } from '../../shared/contracts';
+import type { GeneratedTestCase, QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import { buildCoverage } from './validation';
+import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 
 interface ProviderConfig {
   name: string;
@@ -9,7 +10,7 @@ interface ProviderConfig {
   model: string;
 }
 
-interface LlmConfig {
+export interface LlmConfig {
   providers: ProviderConfig[];
 }
 
@@ -23,6 +24,24 @@ interface ProviderGenerationResult {
   provider: string;
   model: string;
   testCases: GeneratedTestCase[];
+}
+
+interface ProviderSynthesisResult {
+  provider: string;
+  model: string;
+  acceptanceCriteria: AcceptanceCriteriaSynthesisResult['acceptanceCriteria'];
+}
+
+interface NormalizedSynthesisCriterion {
+  id: string;
+  text: string;
+  rationale?: string;
+}
+
+interface ProviderScopeTranslationResult {
+  provider: string;
+  model: string;
+  translation: ScopeSnapshotTranslation;
 }
 
 function stripAcceptanceCriteriaSections(text: string): string {
@@ -158,11 +177,26 @@ export function findCaseArray(value: unknown): unknown[] | null {
   return null;
 }
 
+export function findAcceptanceCriteriaArray(value: unknown): unknown[] | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.acceptanceCriteria)) return record.acceptanceCriteria as unknown[];
+  if (Array.isArray(record.acceptance_criteria)) return record.acceptance_criteria as unknown[];
+  return null;
+}
+
 export function normalizeTextList(value: unknown): string {
   if (Array.isArray(value)) {
     return value.map((item) => String(item || '').trim()).filter(Boolean).join('\n');
   }
   return String(value || '').trim();
+}
+
+export function normalizeJiraReference(value: unknown): string {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const exactMatch = raw.match(/[A-Z]+-\d+/i);
+  return exactMatch ? exactMatch[0].toUpperCase() : raw.toUpperCase();
 }
 
 export function normalizeIdList(value: unknown): string[] {
@@ -203,6 +237,19 @@ export function normalizeBddScenario(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function normalizeScopedItems(value: unknown, fallback: Array<{ id: string; text: string }>): Array<{ id: string; text: string }> {
+  if (!Array.isArray(value)) return fallback;
+  return value
+    .map((item, index) => {
+      const record = (item || {}) as Record<string, unknown>;
+      return {
+        id: String(record.id || fallback[index]?.id || ''),
+        text: String(record.text || '').trim(),
+      };
+    })
+    .filter((item) => item.id && item.text);
+}
+
 export function normalizeCase(testCase: Record<string, unknown>, index: number): GeneratedTestCase {
   const evidenceRecord = (testCase.evidence && typeof testCase.evidence === 'object' ? (testCase.evidence as Record<string, unknown>) : {}) || {};
 
@@ -210,7 +257,7 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
     id: String(testCase.id || testCase.testCaseId || testCase.test_case_id || `TC-${String(index + 1).padStart(2, '0')}`),
     title: String(testCase.title || ''),
     type: String(testCase.type || ''),
-    jiraReference: String(testCase.jiraReference || testCase.jira_reference || testCase.refs || ''),
+    jiraReference: normalizeJiraReference(testCase.jiraReference || testCase.jira_reference || testCase.refs || ''),
     preconditions: normalizeTextList(testCase.preconditions || testCase.custom_preconds || ''),
     bddScenario: normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
     coversAcceptanceCriteria: normalizeIdList(testCase.coversAcceptanceCriteria || testCase.covers_acceptance_criteria || ''),
@@ -229,6 +276,34 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
   };
 }
 
+function normalizeSynthesisCriteria(criteria: unknown[]): NormalizedSynthesisCriterion[] {
+  return criteria.map((criterion, index) => {
+    const record = (criterion || {}) as Record<string, unknown>;
+    return {
+      id: String(record.id || `AC-${index + 1}`),
+      text: String(record.text || '').trim(),
+      rationale: String(record.rationale || '').trim() || undefined,
+    };
+  });
+}
+
+function hasOvermergedPayloadCriterion(criteria: NormalizedSynthesisCriterion[]): boolean {
+  return criteria.some((criterion) => {
+    const text = String(criterion.text || '');
+    return /run analysis/i.test(text) && /save config/i.test(text);
+  });
+}
+
+function needsGranularityRepair(
+  input: AcceptanceCriteriaSynthesisInput,
+  criteria: NormalizedSynthesisCriterion[]
+): boolean {
+  if (!criteria.length) return false;
+  if (input.targetMinCriteria && criteria.length < input.targetMinCriteria) return true;
+  if (hasOvermergedPayloadCriterion(criteria)) return true;
+  return false;
+}
+
 function dedupeGeneratedCases(testCases: GeneratedTestCase[]): GeneratedTestCase[] {
   const seen = new Set<string>();
   const output: GeneratedTestCase[] = [];
@@ -241,6 +316,240 @@ function dedupeGeneratedCases(testCases: GeneratedTestCase[]): GeneratedTestCase
   }
 
   return output;
+}
+
+export function buildGenerationPromptContext(context: GenerateContext) {
+  return {
+    ticketKey: context.ticketKey,
+    epic: context.epic,
+    mainIssue: {
+      key: context.mainIssue.key,
+      summary: context.mainIssue.summary || '',
+      description: context.mainIssue.description || '',
+      status: context.mainIssue.status || '',
+      issueType: context.mainIssue.issueType || '',
+    },
+    linkedIssues: (context.linkedIssues || []).map((issue) => ({
+      key: issue.key,
+      summary: issue.summary || '',
+      issueType: issue.issueType || '',
+      status: issue.status || '',
+      relation: issue.linkRelation || issue.relation || '',
+      classification: issue.classification || '',
+    })),
+    scopeParentIssue: context.scopeParentIssue
+      ? {
+          key: context.scopeParentIssue.key,
+          summary: context.scopeParentIssue.summary || '',
+          issueType: context.scopeParentIssue.issueType || '',
+        }
+      : null,
+    scopeConfluenceSection: context.scopeConfluenceSection
+      ? {
+          title: context.scopeConfluenceSection.matchedHeading || context.scopeConfluenceSection.title || '',
+          body: context.scopeConfluenceSection.body || '',
+          matched: context.scopeConfluenceSection.matched,
+        }
+      : null,
+    acceptanceCriteria: context.acceptanceCriteria,
+    acceptanceCriteriaSource: context.acceptanceCriteriaSource,
+    userStories: context.userStories,
+    confidenceLevel: context.confidenceLevel,
+    confidenceReasons: context.confidenceReasons,
+    constraints: context.constraints,
+    actualDevScopeGuidance: context.actualDevScopeGuidance,
+    coverageEnforced: context.coverageEnforced,
+    manualScopeOverride: context.manualScopeOverride,
+    manualScopeOverrideReason: context.manualScopeOverrideReason,
+  };
+}
+
+async function synthesizeWithProvider(provider: ProviderConfig, input: AcceptanceCriteriaSynthesisInput): Promise<ProviderSynthesisResult> {
+  const prdScopedThinTicket = input.acceptanceCriteriaSource === 'parent_story_confluence_section' && input.thinTicketFallbackUsed;
+  const targetInstruction =
+    input.targetMinCriteria && input.targetMaxCriteria
+      ? `Target ${input.targetMinCriteria}-${input.targetMaxCriteria} medium-granularity criteria unless the ticket is clearly simpler.`
+      : 'Prefer a concise but complete canonical set.';
+  const systemPrompt = [
+    'You are a senior QA engineer deriving final FE acceptance criteria from Jira implementation scope.',
+    prdScopedThinTicket
+      ? 'The main Jira ticket is too thin. Use the matched PRD subsection as the primary authority, with the task title as the scope key and the parent story as routing context only.'
+      : 'The main Jira ticket is the authority for implemented scope.',
+    prdScopedThinTicket
+      ? 'Do not broaden beyond the matched PRD subsection and the thin ticket title.'
+      : 'Parent Story and PRD are supporting context only and must not expand scope beyond the main ticket.',
+    'Prefer FE-testable behavior and FE-owned payload contracts.',
+    'Ignore background, non-goals, BE-only dependency notes, code scaffolding, partial flow-control lines, and duplicate rendered/plain fragments.',
+    'If the raw acceptance criteria are already strong, preserve them semantically while normalizing wording and deduplicating.',
+    targetInstruction,
+    input.granularityHint || '',
+    prdScopedThinTicket && input.prdSubsectionMatchQuality === 'broad'
+      ? 'The PRD subsection match was broad rather than exact, so stay conservative and keep only behavior clearly supported by the matched subsection.'
+      : '',
+    'Do not over-merge distinct FE behaviors into one criterion.',
+    'When present in the main ticket, keep Run Analysis payload mapping, Save Config payload mapping, dataset linkage or datasets[] behavior, and preview or map labeling behavior as separate criteria instead of compressing them into one broad clause.',
+    'Return strict JSON only. No markdown and no explanation.',
+    'The JSON must be an object with this exact top-level shape: {"acceptanceCriteria":[{"id":"AC-1","text":"..."},{"id":"AC-2","text":"..."}]}',
+    'Use sequential ids AC-1, AC-2, AC-3 in output order.',
+    'Do not include any keys other than id, text, and optional rationale inside each acceptance criterion object.',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: JSON.stringify(
+            {
+              instruction: 'Produce the final canonical acceptance criteria set.',
+              input,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    }
+  );
+
+  const content = response.choices?.[0]?.message?.content;
+  const parsed = extractJson(content);
+  const criteria = findAcceptanceCriteriaArray(parsed);
+  if (!Array.isArray(criteria)) {
+    throw new Error('LLM synthesis response JSON must contain an acceptanceCriteria array.');
+  }
+
+  let normalizedCriteria = normalizeSynthesisCriteria(criteria);
+
+  if (needsGranularityRepair(input, normalizedCriteria)) {
+    const repairPrompt = [
+      'You are repairing an over-merged FE acceptance-criteria set.',
+      'Keep scope identical to the main ticket. Do not invent new behavior.',
+      'Split only criteria that bundle multiple distinct FE behaviors or payload contracts together.',
+      input.targetMinCriteria && input.targetMaxCriteria
+        ? `Return ${input.targetMinCriteria}-${input.targetMaxCriteria} criteria if the ticket supports that many distinct behaviors.`
+        : 'Return a medium-granularity canonical set.',
+      input.granularityHint || '',
+      'Keep these concerns separate when present: selection and visibility, geometry preservation, Run Analysis payload, Save Config payload with dataset_id linkage, datasets[] versus legacy dataset behavior, and preview or map label behavior.',
+      'Return strict JSON only in the shape {"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const repairResponse = await requestJson<any>(
+      `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+      { Authorization: `Bearer ${provider.apiKey}` },
+      {
+        model: provider.model,
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: repairPrompt },
+          {
+            role: 'user',
+            content: JSON.stringify(
+              {
+                instruction: 'Split any over-merged criteria into a better final canonical set.',
+                originalInput: input,
+                currentAcceptanceCriteria: normalizedCriteria,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      }
+    );
+
+    const repairContent = repairResponse.choices?.[0]?.message?.content;
+    const repairParsed = extractJson(repairContent);
+    const repairedCriteria = findAcceptanceCriteriaArray(repairParsed);
+    if (Array.isArray(repairedCriteria)) {
+      normalizedCriteria = normalizeSynthesisCriteria(repairedCriteria);
+    }
+  }
+
+  return {
+    provider: provider.name,
+    model: provider.model,
+    acceptanceCriteria: normalizedCriteria,
+  };
+}
+
+async function translateScopeSnapshotWithProvider(
+  provider: ProviderConfig,
+  context: QaContext,
+  targetLanguage: 'id'
+): Promise<ProviderScopeTranslationResult> {
+  const systemPrompt = [
+    'You translate a QA scope snapshot for UI display only.',
+    'Translate to casual, friendly, clear Indonesian.',
+    'Do not change scope, meaning, acceptance-criteria ids, or user-story ids.',
+    'Keep technical tokens and identifiers intact when needed: Jira keys, AC ids, US ids, dataset_id, catchment.datasets[], BY_DATASET, Polygon, MultiPolygon, Jira, Confluence, TestRail.',
+    'Do not translate generated test case titles or BDD scenarios because they are not part of this task.',
+    'Return strict JSON only.',
+    'Use this exact top-level shape: {"mainSummary":"","parentStorySummary":"","scopedPrdSection":"","confidenceReasons":[""],"selectedAcceptanceCriteriaReason":"","userStories":[{"id":"US-1","text":""}],"acceptanceCriteria":[{"id":"AC-1","text":""}]}',
+  ].join('\n');
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: JSON.stringify(
+            {
+              instruction: `Translate the Scope Snapshot display content to ${targetLanguage}.`,
+              source: {
+                mainSummary: context.mainIssue.summary || '',
+                parentStorySummary: context.scopeParentIssue?.summary || '',
+                scopedPrdSection:
+                  context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
+                confidenceReasons: context.confidenceReasons || [],
+                selectedAcceptanceCriteriaReason: context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '',
+                userStories: context.userStories || [],
+                acceptanceCriteria: context.acceptanceCriteria || [],
+              },
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    }
+  );
+
+  const content = response.choices?.[0]?.message?.content;
+  const parsed = extractJson(content) as Record<string, unknown>;
+
+  return {
+    provider: provider.name,
+    model: provider.model,
+    translation: {
+      mainSummary: String(parsed.mainSummary || '').trim(),
+      parentStorySummary: String(parsed.parentStorySummary || '').trim(),
+      scopedPrdSection: String(parsed.scopedPrdSection || '').trim(),
+      confidenceReasons: Array.isArray(parsed.confidenceReasons)
+        ? parsed.confidenceReasons.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      selectedAcceptanceCriteriaReason: String(parsed.selectedAcceptanceCriteriaReason || '').trim() || undefined,
+      userStories: normalizeScopedItems(parsed.userStories, context.userStories || []),
+      acceptanceCriteria: normalizeScopedItems(parsed.acceptanceCriteria, context.acceptanceCriteria || []),
+    },
+  };
 }
 
 function getMissingAcceptanceCriteria(context: GenerateContext, testCases: GeneratedTestCase[]) {
@@ -277,6 +586,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
     'Each testCases item must include id, title, type, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
@@ -299,7 +609,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     {
       instruction: 'Generate happy path, negative, and edge-case BDD test cases.',
       scopePriority,
-      context,
+      context: buildGenerationPromptContext(context),
     },
     null,
     2
@@ -350,6 +660,7 @@ async function repairMissingCoverageWithProvider(
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
     'Each testCases item must include id, title, type, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
     'The evidence object must include coverageNote only.',
     'Each returned case must map to at least one missing acceptance criterion id.',
     'Keep the set minimal but sufficient.',
@@ -366,7 +677,7 @@ async function repairMissingCoverageWithProvider(
         type: testCase.type,
         coversAcceptanceCriteria: testCase.coversAcceptanceCriteria,
       })),
-      context,
+      context: buildGenerationPromptContext(context),
     },
     null,
     2
@@ -436,4 +747,56 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
   }
 
   throw lastError || new Error('LLM generation failed.');
+}
+
+export async function synthesizeAcceptanceCriteria(config: LlmConfig, input: AcceptanceCriteriaSynthesisInput): Promise<AcceptanceCriteriaSynthesisResult> {
+  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  if (!providers.length) {
+    throw new Error('No LLM provider API key is configured.');
+  }
+
+  let lastError: Error | undefined;
+  for (let index = 0; index < providers.length; index += 1) {
+    const provider = providers[index];
+    try {
+      const result = await synthesizeWithProvider(provider, input);
+      return {
+        acceptanceCriteria: result.acceptanceCriteria,
+        provider: result.provider,
+        model: result.model,
+      };
+    } catch (error) {
+      lastError = error as Error;
+      const hasFallback = index < providers.length - 1;
+      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('LLM acceptance criteria synthesis failed.');
+}
+
+export async function translateScopeSnapshot(config: LlmConfig, context: QaContext, targetLanguage: 'id'): Promise<ScopeSnapshotTranslation> {
+  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  if (!providers.length) {
+    throw new Error('No LLM provider API key is configured.');
+  }
+
+  let lastError: Error | undefined;
+  for (let index = 0; index < providers.length; index += 1) {
+    const provider = providers[index];
+    try {
+      const result = await translateScopeSnapshotWithProvider(provider, context, targetLanguage);
+      return result.translation;
+    } catch (error) {
+      lastError = error as Error;
+      const hasFallback = index < providers.length - 1;
+      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('Scope snapshot translation failed.');
 }

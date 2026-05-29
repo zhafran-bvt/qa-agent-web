@@ -11,8 +11,9 @@ import {
   refreshAccessToken,
   type AccessibleResource,
 } from './services/atlassian';
+import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
-import { generateTestCases } from './services/llm';
+import { generateTestCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
@@ -25,6 +26,8 @@ import type {
   GenerateRequest,
   PushRequest,
   QaContext,
+  ScopeSnapshotTranslationRequest,
+  ScopeSnapshotTranslationResponse,
   ValidateRequest,
 } from '../shared/contracts';
 
@@ -436,18 +439,64 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       notes: body.notes || '',
       logger: log,
     });
-    const analysisRunId = await persistence.createAnalysisRun({ jiraKey, user: session.user, context });
-    if (analysisRunId) context.analysisRunId = analysisRunId;
+    const finalizedContext = await finalizeAcceptanceCriteria(context, {
+      synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
+      logger: log,
+    });
+    log.info('context.ac_finalized', {
+      jiraKey,
+      source: finalizedContext.acceptanceCriteriaSource,
+      finalAcceptanceCriteriaCount: finalizedContext.acceptanceCriteria.length,
+      synthesisUsed: finalizedContext.acceptanceCriteriaDiagnostics.synthesisUsed || false,
+      rawAcceptanceCriteriaQuality: finalizedContext.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality || 'none',
+      discardedFragmentCount: finalizedContext.acceptanceCriteriaDiagnostics.discardedFragmentCount || 0,
+    });
+    const analysisRunId = await persistence.createAnalysisRun({ jiraKey, user: session.user, context: finalizedContext });
+    if (analysisRunId) finalizedContext.analysisRunId = analysisRunId;
     log.info('api.analyze.complete', {
       jiraKey,
       user: session.user,
-      acceptanceCriteriaSource: context.acceptanceCriteriaSource,
-      acceptanceCriteriaCount: context.acceptanceCriteria.length,
-      userStoryCount: context.userStories.length,
-      confidenceLevel: context.confidenceLevel,
+      acceptanceCriteriaSource: finalizedContext.acceptanceCriteriaSource,
+      acceptanceCriteriaCount: finalizedContext.acceptanceCriteria.length,
+      userStoryCount: finalizedContext.userStories.length,
+      confidenceLevel: finalizedContext.confidenceLevel,
     });
     await appendAudit({ type: 'analyze', user: session.user, jiraKey, linkedIssueCount: context.linkedIssues.length });
-    sendJson(res, 200, { context });
+    sendJson(res, 200, { context: finalizedContext });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/context/translate') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.llm.providers.some((provider) => provider.apiKey)) {
+      sendError(res, 400, 'No LLM provider API key is configured.');
+      return;
+    }
+    const body = await readBody<ScopeSnapshotTranslationRequest>(req);
+    if (!body.context) {
+      sendError(res, 400, 'Context is required.');
+      return;
+    }
+    if (body.targetLanguage !== 'id') {
+      sendError(res, 400, 'Unsupported target language.');
+      return;
+    }
+    log.info('api.context_translate.start', {
+      jiraKey: body.context.ticketKey,
+      targetLanguage: body.targetLanguage,
+      acceptanceCriteriaCount: body.context.acceptanceCriteria.length,
+      userStoryCount: body.context.userStories.length,
+    });
+    const translation = await translateScopeSnapshot(config.llm, body.context, body.targetLanguage);
+    const response: ScopeSnapshotTranslationResponse = { translation };
+    log.info('api.context_translate.complete', {
+      jiraKey: body.context.ticketKey,
+      targetLanguage: body.targetLanguage,
+      translatedAcceptanceCriteriaCount: translation.acceptanceCriteria.length,
+      translatedUserStoryCount: translation.userStories.length,
+    });
+    sendJson(res, 200, response);
     return;
   }
 

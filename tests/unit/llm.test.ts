@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildScopePriorityContext, findCaseArray, isFallbackError, normalizeBddScenario, normalizeCase, normalizeTextList } from '../../src/server/services/llm';
+import {
+  buildGenerationPromptContext,
+  buildScopePriorityContext,
+  findAcceptanceCriteriaArray,
+  findCaseArray,
+  isFallbackError,
+  normalizeBddScenario,
+  normalizeCase,
+  normalizeJiraReference,
+  normalizeTextList,
+} from '../../src/server/services/llm';
 
 test('finds generated cases from common LLM JSON wrappers', () => {
   const testCases = [{ title: 'Case', bddScenario: 'Feature: Example' }];
@@ -8,6 +18,12 @@ test('finds generated cases from common LLM JSON wrappers', () => {
   assert.equal(findCaseArray({ test_cases: testCases }), testCases);
   assert.equal(findCaseArray({ result: { cases: testCases } }), testCases);
   assert.equal(findCaseArray({ data: { items: testCases } }), testCases);
+});
+
+test('finds synthesized acceptance criteria arrays from common wrappers', () => {
+  const acceptanceCriteria = [{ id: 'AC-1', text: 'Criterion' }];
+  assert.equal(findAcceptanceCriteriaArray({ acceptanceCriteria }), acceptanceCriteria);
+  assert.equal(findAcceptanceCriteriaArray({ acceptance_criteria: acceptanceCriteria }), acceptanceCriteria);
 });
 
 test('normalizes snake case LLM fields', () => {
@@ -69,6 +85,12 @@ test('normalizes top-level coverage note fallback', () => {
     ).evidence.coverageNote,
     'This case proves the feature behavior against the PRD mapping.'
   );
+});
+
+test('normalizes jira references down to the main ticket key', () => {
+  assert.equal(normalizeJiraReference('ORB-3079 / AC-1'), 'ORB-3079');
+  assert.equal(normalizeJiraReference('orb-3079, AC-2'), 'ORB-3079');
+  assert.equal(normalizeJiraReference('ORB-3079'), 'ORB-3079');
 });
 
 test('normalizes list preconditions into textarea-friendly text', () => {
@@ -174,4 +196,46 @@ test('falls back to acceptance criteria when description is only AC content', ()
 
   assert.equal(scopePriority.primaryAuthority, 'main_ticket_acceptance_criteria');
   assert.equal(scopePriority.mainTicketDescription, '');
+});
+
+test('builds a slim generation prompt context without noisy diagnostics criteria dumps', () => {
+  const payload = buildGenerationPromptContext({
+    ticketKey: 'ORB-3079',
+    epic: 'Spatial Analysis',
+    mainIssue: {
+      key: 'ORB-3079',
+      summary: '[FE] Integration API - Run Analysis with BVT Polygon Catchment Datasets',
+      description: 'Main issue description',
+    },
+    linkedIssues: [{ key: 'ORB-3090', summary: 'Blocking dependency', classification: 'blocking dependency' }],
+    confluencePages: [],
+    scopeParentIssue: { key: 'ORB-2873', summary: 'Parent story', issueType: 'Story' },
+    scopeParentRelation: 'is child of',
+    scopeConfluenceSection: {
+      pageId: '1',
+      title: 'PRD',
+      url: 'https://example.test',
+      anchor: 'story',
+      matchedHeading: 'As User, I want to select spatial input based on BVT Data',
+      matched: true,
+      reason: '',
+      sourceIssueKey: 'ORB-2873',
+      body: 'Scoped PRD section',
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Canonical acceptance criterion' }],
+    userStories: [{ id: 'US-1', text: 'As User, I want ...' }],
+    acceptanceCriteriaSource: 'main_jira',
+    confidenceLevel: 'high',
+    confidenceReasons: [],
+    requiresConfidencePermission: false,
+    acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [{ id: 'AC-99', text: 'Noisy raw criterion' }], confluenceCriteria: [] },
+    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    actualDevScopeGuidance: 'Use the main Jira issue first.',
+    coverageEnforced: true,
+    manualScopeOverride: false,
+    manualScopeOverrideReason: '',
+  });
+
+  assert.equal('acceptanceCriteriaDiagnostics' in payload, false);
+  assert.deepEqual(payload.acceptanceCriteria, [{ id: 'AC-1', text: 'Canonical acceptance criterion' }]);
 });

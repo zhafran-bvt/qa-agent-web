@@ -8,6 +8,7 @@ import {
   loadHistoryRuns,
   logout,
   pushCases,
+  translateScopeSnapshot,
   validateCases,
 } from './api';
 import { AnalyzePanel } from './components/AnalyzePanel';
@@ -17,6 +18,7 @@ import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { HistoryPanel } from './components/HistoryPanel';
 import { RegenerateDiffPanel } from './components/RegenerateDiffPanel';
 import { ReviewPanel } from './components/ReviewPanel';
+import { uiText, type UiLanguage } from './i18n';
 import type {
   AnalyzeRequest,
   ConfigResponse,
@@ -25,6 +27,7 @@ import type {
   GenerateResponse,
   GeneratedTestCase,
   QaContext,
+  ScopeSnapshotTranslation,
   ValidationEntry,
   WorkflowHistoryDetail,
   WorkflowHistorySummary,
@@ -39,8 +42,20 @@ const initialForm: AnalyzeRequest = {
 };
 
 type PendingGeneration = GenerateResponse;
+type ToastTone = 'success' | 'error' | 'info';
+type ToastItem = {
+  id: number;
+  tone: ToastTone;
+  title: string;
+  message: string;
+};
 
 export default function App() {
+  const [lang, setLang] = useState<UiLanguage>('en');
+  const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
+  const [showStatusModal, setShowStatusModal] = useState(false);
+  const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
+  const [translatingScope, setTranslatingScope] = useState(false);
   const [config, setConfig] = useState<ConfigResponse | null>(null);
   const [form, setForm] = useState<AnalyzeRequest>(initialForm);
   const [context, setContext] = useState<QaContext | null>(null);
@@ -65,7 +80,9 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [generatedRunId, setGeneratedRunId] = useState<string>('');
   const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
   const skipNextValidation = useRef(false);
+  const nextToastId = useRef(1);
 
   async function refreshAuxiliaryData() {
     try {
@@ -73,7 +90,9 @@ export default function App() {
       setHistoryRuns(history.runs);
       setDiagnostics(diag);
     } catch (loadError) {
-      setError((loadError as Error).message);
+      const message = (loadError as Error).message;
+      setError(message);
+      pushToast('error', toastText.refreshErrorTitle, message);
     }
   }
 
@@ -84,7 +103,11 @@ export default function App() {
         setSectionId(response.defaults.testrailSectionId || '');
         if (response.authenticated) await refreshAuxiliaryData();
       })
-      .catch((loadError) => setError((loadError as Error).message))
+      .catch((loadError) => {
+        const message = (loadError as Error).message;
+        setError(message);
+        pushToast('error', toastText.loadConfigErrorTitle, message);
+      })
       .finally(() => setLoadingConfig(false));
   }, []);
 
@@ -109,17 +132,35 @@ export default function App() {
           setValidation(response.validation);
           setCoverage(response.coverage);
         })
-        .catch((validationError) => setError((validationError as Error).message));
+        .catch((validationError) => {
+          const message = (validationError as Error).message;
+          setError(message);
+          pushToast('error', toastText.validationErrorTitle, message);
+        });
     }, 300);
     return () => window.clearTimeout(timer);
   }, [context, coverageEnforced, testCases]);
 
   const invalidCount = useMemo(() => validation.filter((item) => !item.valid).length, [validation]);
+  const t = uiText[lang];
+  const toastText = uiText[lang].toast;
   const pushDisabled = useMemo(() => {
     const validationOkay = testCases.length > 0 && validation.every((item) => item.valid);
     const coverageOkay = !coverageEnforced || !coverage || coverage.uncoveredCriteria.length === 0;
     return !(validationOkay && coverageOkay && approved && sectionId.trim());
   }, [approved, coverage, coverageEnforced, sectionId, testCases.length, validation]);
+
+  function removeToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function pushToast(tone: ToastTone, title: string, message: string) {
+    const id = nextToastId.current++;
+    setToasts((current) => [...current, { id, tone, title, message }]);
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, 4200);
+  }
 
   async function handleAnalyze() {
     setAnalyzing(true);
@@ -138,10 +179,36 @@ export default function App() {
       setPushResults('');
       setGeneratedRunId('');
       setPendingGeneration(null);
+      setLang('en');
+      setScopeTranslation(null);
+      pushToast('success', toastText.analyzeSuccessTitle, toastText.analyzeSuccessMessage(response.context.ticketKey));
     } catch (analyzeError) {
-      setError((analyzeError as Error).message);
+      const message = (analyzeError as Error).message;
+      setError(message);
+      pushToast('error', toastText.analyzeErrorTitle, message);
     } finally {
       setAnalyzing(false);
+    }
+  }
+
+  async function handleScopeLanguageChange(nextLang: UiLanguage) {
+    setLang(nextLang);
+    if (nextLang !== 'id' || !context || scopeTranslation || translatingScope) return;
+    setTranslatingScope(true);
+    setError('');
+    try {
+      const response = await translateScopeSnapshot({
+        context,
+        targetLanguage: 'id',
+      });
+      setScopeTranslation(response.translation);
+    } catch (translationError) {
+      const message = (translationError as Error).message;
+      setError(message);
+      pushToast('error', toastText.translateErrorTitle, message);
+      setLang('en');
+    } finally {
+      setTranslatingScope(false);
     }
   }
 
@@ -153,7 +220,7 @@ export default function App() {
     setCoverageEnforced(response.coverageEnforced !== false);
     setManualScopeOverride(Boolean(response.manualScopeOverride));
     setApproved(false);
-    setPushResults(`Generated with ${response.provider} / ${response.model}`);
+    setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
   }
 
@@ -169,13 +236,17 @@ export default function App() {
       });
       if (testCases.length > 0) {
         setPendingGeneration(response);
-        setPushResults(`Candidate generated with ${response.provider} / ${response.model}. Review diff before replace.`);
+        setPushResults(t.runStatus.candidateGenerated(response.provider, response.model));
+        pushToast('info', toastText.generateCandidateTitle, toastText.generateCandidateMessage);
       } else {
         applyGeneration(response);
+        pushToast('success', toastText.generateSuccessTitle, toastText.generateSuccessMessage(response.testCases.length));
       }
       await refreshAuxiliaryData();
     } catch (generateError) {
-      setError((generateError as Error).message);
+      const message = (generateError as Error).message;
+      setError(message);
+      pushToast('error', toastText.generateErrorTitle, message);
     } finally {
       setGenerating(false);
     }
@@ -198,9 +269,12 @@ export default function App() {
         testCases,
       });
       setPushResults(JSON.stringify(response, null, 2));
+      pushToast('success', toastText.pushSuccessTitle, toastText.pushSuccessMessage);
       await refreshAuxiliaryData();
     } catch (pushError) {
-      setPushResults((pushError as Error).message);
+      const message = (pushError as Error).message;
+      setPushResults(message);
+      pushToast('error', toastText.pushErrorTitle, message);
     } finally {
       setPushing(false);
     }
@@ -223,7 +297,9 @@ export default function App() {
       const response = await loadHistoryRun(id);
       setSelectedHistoryRun(response.run);
     } catch (historyError) {
-      setError((historyError as Error).message);
+      const message = (historyError as Error).message;
+      setError(message);
+      pushToast('error', toastText.historyErrorTitle, message);
     } finally {
       setHistoryLoading(false);
     }
@@ -231,27 +307,138 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {toasts.length ? (
+        <div className="toast-stack" aria-live="polite" aria-atomic="true">
+          {toasts.map((toast) => (
+            <div className={`toast toast-${toast.tone}`} key={toast.id}>
+              <div className="toast-icon" aria-hidden="true">
+                {toast.tone === 'success' ? '✓' : toast.tone === 'error' ? '!' : 'i'}
+              </div>
+              <div className="toast-copy">
+                <strong>{toast.title}</strong>
+                <div>{toast.message}</div>
+              </div>
+              <button className="toast-close" type="button" onClick={() => removeToast(toast.id)}>
+                {toastText.dismiss}
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="utility-trigger-stack">
+        <button className="workflow-help-trigger" type="button" onClick={() => setShowWorkflowHelp(true)} aria-haspopup="dialog" aria-expanded={showWorkflowHelp}>
+          <span className="workflow-help-trigger-icon">?</span>
+          <span>{t.help.trigger}</span>
+        </button>
+
+        <button className="workflow-help-trigger" type="button" onClick={() => setShowStatusModal(true)} aria-haspopup="dialog" aria-expanded={showStatusModal}>
+          <span className="workflow-help-trigger-icon">!</span>
+          <span>{t.status.trigger}</span>
+        </button>
+      </div>
+
+      {showWorkflowHelp ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowWorkflowHelp(false)}>
+          <section
+            className="modal-card workflow-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="workflow-help-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">QA Agent</div>
+                <h2 id="workflow-help-title">{t.help.title}</h2>
+                <p>{t.help.subtitle}</p>
+              </div>
+              <button className="button button-secondary button-small" type="button" onClick={() => setShowWorkflowHelp(false)}>
+                {t.help.close}
+              </button>
+            </div>
+
+            <div className="workflow-visualization" aria-label="QA Agent workflow overview">
+              {t.help.steps.map((step, index) => {
+                const shortLabel = step.title.replace(/^\d+\.\s*/, '');
+                return (
+                  <div className="workflow-visual-step" key={step.title}>
+                    <div className="workflow-visual-node">
+                      <span className="workflow-visual-number">{index + 1}</span>
+                    </div>
+                    <div className="workflow-visual-label">{shortLabel}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="workflow-help-list">
+              {t.help.steps.map((step) => (
+                <article className="workflow-help-step" key={step.title}>
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                  {'details' in step && Array.isArray(step.details) && step.details.length ? (
+                    <ul className="workflow-help-points">
+                      {step.details.map((detail) => (
+                        <li key={detail}>{detail}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {showStatusModal ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowStatusModal(false)}>
+          <section
+            className="modal-card workflow-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="status-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">QA Agent</div>
+                <h2 id="status-modal-title">{uiText.en.diagnostics.title}</h2>
+                <p>{uiText.en.diagnostics.subtitle}</p>
+              </div>
+              <button className="button button-secondary button-small" type="button" onClick={() => setShowStatusModal(false)}>
+                {t.status.close}
+              </button>
+            </div>
+
+            <div className="modal-panel-wrap">
+              <DiagnosticsPanel lang="en" diagnostics={diagnostics} />
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       <header className="hero">
-        <div>
+        <div className="hero-copy">
           <div className="eyebrow">QA Agent</div>
-          <h1>BDD generation from Jira, Story scope, and PRD context</h1>
-          <p>Analyze the implementation chain, review typed test cases, validate AC coverage, and push approved cases to TestRail.</p>
+          <h1>{uiText.en.heroTitle}</h1>
+          <p>{uiText.en.heroSubtitle}</p>
         </div>
 
         <div className="hero-actions">
           <div className="auth-card">
-            <div className="auth-label">Atlassian</div>
+            <div className="auth-label">{uiText.en.authLabel}</div>
             <div className="auth-value">
-              {loadingConfig ? 'Checking...' : config?.authenticated ? `Logged in as ${config.user}` : 'Not logged in'}
+              {loadingConfig ? uiText.en.checking : config?.authenticated ? uiText.en.loggedInAs(config.user || '') : uiText.en.notLoggedIn}
             </div>
-            {config?.session?.expiresAt ? <div className="muted">Session expiry: {new Date(config.session.expiresAt).toLocaleString()}</div> : null}
+            {config?.session?.expiresAt ? <div className="muted">{uiText.en.sessionExpiry(new Date(config.session.expiresAt).toLocaleString())}</div> : null}
             {config?.authenticated ? (
               <button className="button button-secondary" type="button" onClick={handleLogout}>
-                Logout
+                {uiText.en.logout}
               </button>
             ) : (
               <a className="button button-secondary" href="/auth/atlassian">
-                Login with Atlassian
+                {uiText.en.loginWithAtlassian}
               </a>
             )}
           </div>
@@ -260,23 +447,47 @@ export default function App() {
 
       {error ? <div className="global-error">{error}</div> : null}
 
-      <main className="main-grid">
-        <div className="main-column">
-          <div className="top-grid">
-            <AnalyzePanel form={form} busy={analyzing} onChange={(patch) => setForm((current) => ({ ...current, ...patch }))} onAnalyze={handleAnalyze} />
-            <ContextPanel
-              context={context}
-              permissionApproved={confidenceApproved}
-              overrideReason={overrideReason}
-              busy={generating}
-              onPermissionApprovedChange={setConfidenceApproved}
-              onOverrideReasonChange={setOverrideReason}
-              onGenerate={handleGenerate}
-            />
+      <main className="workflow-shell">
+        <div className="section-bar">
+          <h2>{uiText.en.mainWorkflow}</h2>
+          <div className="section-tag">{uiText.en.guidedWorkflow}</div>
+        </div>
+
+        <div className="workflow-top">
+          <div className="workflow-main-column">
+            <AnalyzePanel lang="en" form={form} busy={analyzing} onChange={(patch) => setForm((current) => ({ ...current, ...patch }))} onAnalyze={handleAnalyze} />
           </div>
+          <ApprovalPanel
+            lang="en"
+            approved={approved}
+            sectionId={sectionId}
+            pushDisabled={pushDisabled}
+            busy={pushing}
+            results={pushResults}
+            onApprovedChange={setApproved}
+            onSectionIdChange={setSectionId}
+            onPush={handlePush}
+          />
+        </div>
+
+        <div className="workflow-main-column">
+          <ContextPanel
+            lang={lang}
+            context={context}
+            translation={lang === 'id' ? scopeTranslation : null}
+            translating={translatingScope}
+            permissionApproved={confidenceApproved}
+            overrideReason={overrideReason}
+            busy={generating}
+            onLanguageChange={handleScopeLanguageChange}
+            onPermissionApprovedChange={setConfidenceApproved}
+            onOverrideReasonChange={setOverrideReason}
+            onGenerate={handleGenerate}
+          />
 
           {pendingGeneration ? (
             <RegenerateDiffPanel
+              lang="en"
               currentCases={testCases}
               candidate={pendingGeneration}
               onReplace={() => {
@@ -288,6 +499,7 @@ export default function App() {
           ) : null}
 
           <ReviewPanel
+            lang="en"
             context={context}
             testCases={testCases}
             validation={validation}
@@ -296,26 +508,23 @@ export default function App() {
             manualScopeOverride={manualScopeOverride}
             onCaseChange={handleCaseChange}
           />
-
-          <HistoryPanel runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
-          <DiagnosticsPanel diagnostics={diagnostics} />
         </div>
 
-        <ApprovalPanel
-          approved={approved}
-          sectionId={sectionId}
-          pushDisabled={pushDisabled}
-          busy={pushing}
-          results={pushResults}
-          onApprovedChange={setApproved}
-          onSectionIdChange={setSectionId}
-          onPush={handlePush}
-        />
+        <section className="secondary-sections">
+          <div className="section-bar section-bar-secondary">
+            <h2>{uiText.en.secondarySections}</h2>
+            <div className="section-note">{uiText.en.secondarySectionsNote}</div>
+          </div>
+
+          <div className="secondary-stack">
+          <HistoryPanel lang="en" runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
+          </div>
+        </section>
       </main>
 
       <footer className="footer-bar">
-        <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' · ') || 'No LLM configured'}</div>
-        <div>{invalidCount ? `${invalidCount} cases need fixes` : testCases.length ? 'Validation clear' : 'No cases generated yet'}</div>
+        <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' · ') || uiText.en.noLlmConfigured}</div>
+        <div>{invalidCount ? uiText.en.casesNeedFixes(invalidCount) : testCases.length ? uiText.en.validationClear : uiText.en.noCasesGeneratedYet}</div>
       </footer>
     </div>
   );
