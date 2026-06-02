@@ -1,6 +1,6 @@
-import { extractPageId, type SimplifiedIssue } from './atlassian';
+import { extractPageId, extractText, type SimplifiedIssue } from './atlassian';
 import type { Logger } from './logger';
-import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
+import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, ScopeAuthority, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
 
 interface QaContextOptions {
   feOnly?: boolean;
@@ -33,6 +33,13 @@ interface ConfluenceReference {
   relationship: string;
 }
 
+interface AdfBlock {
+  kind: 'heading' | 'block';
+  level: number;
+  text: string;
+  nodeType: string;
+}
+
 interface StorySection {
   matched: boolean;
   title: string;
@@ -40,6 +47,8 @@ interface StorySection {
   reason: string;
   matchQuality?: 'confident' | 'broad' | 'none';
   confidence?: number;
+  candidates?: Array<{ heading: string; score: number; confidence: number }>;
+  regionBlocks?: AdfBlock[];
 }
 
 type CriteriaExtractionMode = 'main' | 'story' | 'scoped';
@@ -60,7 +69,7 @@ interface CriteriaSelectionResult {
 interface QaClient {
   getIssue(issueKey: string): Promise<SimplifiedIssue>;
   getRemoteLinks(issueKey: string): Promise<Array<Record<string, any>>>;
-  getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string }>;
+  getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string; adf?: unknown }>;
   getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>>;
 }
 
@@ -89,6 +98,30 @@ function stripBracketPrefixes(value: string): string {
   return String(value || '')
     .replace(/^\[[^\]]+\]\s*/g, '')
     .trim();
+}
+
+function stripAcceptanceCriteriaSections(text: string): string {
+  const lines = String(text || '')
+    .replace(/\r/g, '')
+    .split('\n');
+  const kept: string[] = [];
+  let inAcceptanceSection = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (/^(acceptance criteria|acceptance|ac)[:]?$/i.test(line)) {
+      inAcceptanceSection = true;
+      continue;
+    }
+
+    if (inAcceptanceSection && line && !/^(\d+[\.)]|[a-z][\.)]|[-*•]|AC[-\s_:]*\d+)/i.test(line)) {
+      inAcceptanceSection = false;
+    }
+
+    if (!inAcceptanceSection && line) kept.push(line);
+  }
+
+  return kept.join('\n').trim();
 }
 
 export function canonicalize(value: unknown): string {
@@ -522,6 +555,14 @@ function isDisplayableUserStory(text: string): boolean {
   return true;
 }
 
+function isJunkScopeFragment(text: string): boolean {
+  const normalized = normalizeInlineText(text).replace(/:$/, '');
+  if (!normalized) return true;
+  if (/^[-*•]?\s*(ai|prd|ff|feature flag|notes?|comments?)$/i.test(normalized)) return true;
+  if (/^[^A-Za-z]*$/.test(normalized)) return true;
+  return false;
+}
+
 function isThinMainIssue(mainIssue: SimplifiedIssue, mainIssueCriteria: ScopedItem[]): boolean {
   if (mainIssueCriteria.length > 0) return false;
   const description = normalizeMultilineText([mainIssue.summary || '', mainIssue.description || '', mainIssue.renderedDescription || ''].join('\n'));
@@ -567,6 +608,7 @@ interface RankedPrdSection {
 function isPrdSubheading(line: string): boolean {
   const text = cleanHeadingText(line).replace(/:$/, '');
   if (!text) return false;
+  if (isJunkScopeFragment(text)) return false;
   if (isStoryHeadingLine(text)) return false;
   if (/^(acceptance criteria|requirements|expected result|expected behavior|goals|non-goals|feature flag|data flow|background|ui behavior|scope)$/i.test(text)) {
     return false;
@@ -575,8 +617,143 @@ function isPrdSubheading(line: string): boolean {
   if (/^\d+[\.)]\s+/.test(line) && /\bAs a\b/i.test(text)) return false;
   if (text.length > 90) return false;
   const wordCount = text.split(/\s+/).filter(Boolean).length;
+  if (wordCount <= 1 && !/score/i.test(text)) return false;
   if (wordCount > 8) return false;
   return /^[A-Za-z0-9][A-Za-z0-9 /&()_-]*$/.test(text);
+}
+
+// --- Fix 2: ADF heading-hierarchy parsing -----------------------------------
+// Flattened text loses heading levels, so PRD table cells get mistaken for
+// headings and an H3's H4 children fragment into sibling sections. Working from
+// the raw ADF tree fixes both: only `heading` nodes are headings (table cells
+// live inside `table` nodes), and level awareness lets children fold into their
+// parent. These run only when raw ADF is available; otherwise the text-based
+// parsers below remain the fallback.
+
+function flattenAdfBlocks(adf: unknown): AdfBlock[] {
+  const doc = adf && typeof adf === 'object' ? (adf as Record<string, unknown>) : null;
+  const content = doc && Array.isArray(doc.content) ? doc.content : [];
+  const blocks: AdfBlock[] = [];
+
+  for (const node of content) {
+    if (!node || typeof node !== 'object') continue;
+    const type = String((node as Record<string, unknown>).type || '');
+    if (type === 'heading') {
+      const attrs = (node as Record<string, any>).attrs || {};
+      const level = Number(attrs.level) || 1;
+      const text = normalizeInlineText(extractText(node));
+      if (text) blocks.push({ kind: 'heading', level, text, nodeType: 'heading' });
+      continue;
+    }
+    const text = normalizeMultilineText(extractText(node));
+    if (text) blocks.push({ kind: 'block', level: 0, text, nodeType: type || 'block' });
+  }
+
+  return blocks;
+}
+
+// Tables in these PRDs are plan/toggle matrices (layout), not acceptance
+// criteria. Their flattened cells would otherwise glue onto the trailing list
+// item during criteria extraction, so they are excluded from section bodies.
+function isBodyContributingBlock(block: AdfBlock): boolean {
+  return block.nodeType !== 'table';
+}
+
+function isScopeExcludedHeading(heading: string): boolean {
+  return /^(acceptance criteria|requirements|expected result|expected behavior|behaviour|goals|non-goals|feature flag|data flow|background|ui behavior|scope|out of scope|definition of done)$/i.test(
+    heading
+  );
+}
+
+// Build ranking candidates from a block stream. Every meaningful heading is a
+// candidate whose body spans until the next heading of equal-or-shallower level
+// — so an H3's H4 children and lists fold into the H3 body, while the H3 stays a
+// first-class candidate. Table cells are never candidates (they are not heading
+// nodes).
+function parseSectionsFromBlocks(blocks: AdfBlock[]): Array<{ heading: string; body: string }> {
+  const sections: Array<{ heading: string; body: string }> = [];
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (block.kind !== 'heading') continue;
+    const heading = cleanHeadingText(block.text).replace(/:$/, '');
+    if (!heading || isJunkScopeFragment(heading) || isScopeExcludedHeading(heading)) continue;
+
+    const bodyParts: string[] = [];
+    for (let next = index + 1; next < blocks.length; next += 1) {
+      const nextBlock = blocks[next];
+      if (nextBlock.kind === 'heading' && nextBlock.level <= block.level) break;
+      if (isBodyContributingBlock(nextBlock) && !isJunkScopeFragment(nextBlock.text)) bodyParts.push(nextBlock.text);
+    }
+
+    const body = bodyParts.filter(Boolean).join('\n').trim();
+    if (body) sections.push({ heading, body });
+  }
+
+  return sections;
+}
+
+function isolateStorySectionFromBlocks(blocks: AdfBlock[], anchor: string, storySummary: string): StorySection {
+  const anchorCanonical = canonicalize(anchorToHeading(anchor));
+  const storyCanonical = canonicalize(storySummary);
+
+  let start = -1;
+  let matchedHeading = '';
+  let matchedLevel = 1;
+
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    if (block.kind !== 'heading') continue;
+    const heading = cleanHeadingText(block.text);
+    const headingCanonical = canonicalize(heading);
+    const matchesAnchor = Boolean(anchorCanonical) && (headingCanonical.includes(anchorCanonical) || anchorCanonical.includes(headingCanonical));
+    const matchesStory = Boolean(storyCanonical) && (headingCanonical.includes(storyCanonical) || storyCanonical.includes(headingCanonical));
+    if (matchesAnchor || matchesStory) {
+      start = index;
+      matchedHeading = heading;
+      matchedLevel = block.level;
+      break;
+    }
+  }
+
+  if (start < 0) {
+    return {
+      matched: false,
+      title: '',
+      body: '',
+      reason: anchor
+        ? 'Story found, but PRD anchor did not resolve to a unique section.'
+        : 'Story found, but PRD section could not be matched from the linked story title.',
+      matchQuality: 'none',
+      confidence: 0,
+    };
+  }
+
+  let end = blocks.length;
+  for (let index = start + 1; index < blocks.length; index += 1) {
+    if (blocks[index].kind === 'heading' && blocks[index].level <= matchedLevel) {
+      end = index;
+      break;
+    }
+  }
+
+  const regionBlocks = blocks.slice(start, end);
+  const body = regionBlocks
+    .filter(isBodyContributingBlock)
+    .map((block) => block.text)
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+
+  return {
+    matched: true,
+    title: matchedHeading,
+    body,
+    reason: '',
+    matchQuality: 'confident',
+    confidence: 1,
+    regionBlocks,
+  };
 }
 
 function parsePrdSubsections(body: string): Array<{ heading: string; body: string }> {
@@ -605,11 +782,79 @@ function parsePrdSubsections(body: string): Array<{ heading: string; body: strin
       continue;
     }
 
-    if (currentHeading) currentBody.push(line);
+    if (currentHeading && !isJunkScopeFragment(line)) currentBody.push(line);
   }
 
   flush();
   return sections;
+}
+
+// A "qualifier" is a discriminating polarity in the ticket title that plain
+// token overlap cannot see: a negated token such as "no scoring", "without
+// ranking", or "non-comparative". The negated token (here "score", "ranking",
+// "comparative") must match the chosen subsection's polarity for that same
+// token. This is GENERIC — it works for any "no/without/non <token>" pair, not
+// a fixed score family — and acts as a gate: a subsection of the opposite
+// polarity is rejected so generic overlap can never let it win.
+//
+// Residual limit: antonym pairs with no shared negation word (e.g. "single"
+// vs "comparative") still need a lexicon and are intentionally NOT gated here;
+// they fall back to token overlap.
+const NEGATION_TOKEN_PATTERN = /\b(?:no|without|non)\s+([a-z0-9]+)/g;
+const NEGATION_STOPWORDS = new Set(['one', 'longer', 'more', 'less', 'op', 'the', 'a', 'an']);
+
+function negatedTokens(normalizedText: string): Set<string> {
+  const tokens = new Set<string>();
+  let match: RegExpExecArray | null;
+  NEGATION_TOKEN_PATTERN.lastIndex = 0;
+  while ((match = NEGATION_TOKEN_PATTERN.exec(normalizedText))) {
+    const token = match[1];
+    if (token.length >= 2 && !NEGATION_STOPWORDS.has(token)) tokens.add(token);
+  }
+  return tokens;
+}
+
+type QualifierVerdict = 'match' | 'opposite' | 'neutral';
+
+function qualifierVerdict(titleSignals: string[], heading: string): QualifierVerdict {
+  const titleText = normalizeMatchText(titleSignals.join(' '));
+  const headingText = normalizeMatchText(heading);
+  const titleNegated = negatedTokens(titleText);
+  const headingNegated = negatedTokens(headingText);
+  const titleTokens = new Set(tokenizeMatchText(titleText));
+  const headingTokens = new Set(tokenizeMatchText(headingText));
+
+  let matched = false;
+  // The title negates a token: a heading that mentions that token must also
+  // negate it; if it asserts the token plainly, the heading is opposite polarity.
+  for (const token of titleNegated) {
+    if (!headingTokens.has(token)) continue;
+    if (headingNegated.has(token)) matched = true;
+    else return 'opposite';
+  }
+  // Symmetric case: the heading negates a token the title asserts plainly
+  // (e.g. a "no score" heading for a plain "score" title) -> opposite polarity.
+  for (const token of headingNegated) {
+    if (titleTokens.has(token) && !titleNegated.has(token)) return 'opposite';
+  }
+  return matched ? 'match' : 'neutral';
+}
+
+function qualifierGateScore(titleSignals: string[], heading: string): number {
+  const verdict = qualifierVerdict(titleSignals, heading);
+  if (verdict === 'opposite') return -10;
+  if (verdict === 'match') return 8;
+  return 0;
+}
+
+function qualifierMatches(titleSignals: string[], heading: string): boolean {
+  return qualifierVerdict(titleSignals, heading) === 'match';
+}
+
+// Human-readable summary of the title's negation qualifier, for diagnostics.
+function describeTitleQualifier(titleSignals: string[]): string | undefined {
+  const negated = [...negatedTokens(normalizeMatchText(titleSignals.join(' ')))];
+  return negated.length ? negated.map((token) => `no ${token}`).join(' / ') : undefined;
 }
 
 function scorePrdSubsection(heading: string, body: string, titleSignals: string[]): RankedPrdSection {
@@ -629,30 +874,42 @@ function scorePrdSubsection(heading: string, body: string, titleSignals: string[
     else if (bodyNormalized.includes(normalizedSignal)) score += 4;
 
     score += overlap * 2;
-
-    if (/no score/.test(normalizedSignal) && /no score/.test(headingNormalized)) score += 6;
-    if (/ai summary/.test(normalizedSignal) && /ai summary/.test(headingNormalized)) score += 4;
-    if (/executive summary/.test(normalizedSignal) && /summary/.test(headingNormalized)) score += 3;
   }
 
-  const confidence = Math.min(1, score / 18);
+  // Apply the discriminating qualifier once, as a decisive gate.
+  score += qualifierGateScore(titleSignals, heading);
+
+  const confidence = Math.min(1, Math.max(0, score) / 18);
   return { heading, body, score, confidence };
 }
 
 function rankPrdSubsection(
   baseSection: StorySection,
   mainIssue: SimplifiedIssue,
-  storySummary: string
+  storySummary: string,
+  precomputedSubsections?: Array<{ heading: string; body: string }> | null
 ): StorySection | null {
-  const subsections = parsePrdSubsections(baseSection.body || '');
+  const subsections =
+    precomputedSubsections && precomputedSubsections.length
+      ? precomputedSubsections
+      : parsePrdSubsections(baseSection.body || '');
   if (!subsections.length) return null;
 
   const titleSignals = deriveTitleSignals(mainIssue, storySummary);
   const ranked = subsections
     .map((section) => scorePrdSubsection(section.heading, section.body, titleSignals))
     .filter((section) => section.score > 0)
+    // Hard gate: a subsection whose polarity is the OPPOSITE of a negated title
+    // qualifier is disqualified outright — generic token overlap must never let
+    // it win. Matching and neutral (no-polarity) headings are kept.
+    .filter((section) => qualifierVerdict(titleSignals, section.heading) !== 'opposite')
     .sort((left, right) => {
       if (right.score !== left.score) return right.score - left.score;
+      // Tie-break on the discriminating qualifier before falling back to the
+      // shortest body, so a qualifier match always beats a generic short cell.
+      const leftQualifier = qualifierMatches(titleSignals, left.heading) ? 1 : 0;
+      const rightQualifier = qualifierMatches(titleSignals, right.heading) ? 1 : 0;
+      if (leftQualifier !== rightQualifier) return rightQualifier - leftQualifier;
       return left.body.length - right.body.length;
     });
 
@@ -661,7 +918,7 @@ function rankPrdSubsection(
   const best = ranked[0];
   const second = ranked[1];
   const closeMatch = second && Math.abs(best.score - second.score) <= 2;
-  const matchQuality: 'confident' | 'broad' = best.score >= 10 && !closeMatch ? 'confident' : 'broad';
+  const matchQuality: 'confident' | 'broad' = best.score >= 10 && !closeMatch && !isJunkScopeFragment(best.heading) ? 'confident' : 'broad';
 
   return {
     matched: true,
@@ -670,6 +927,11 @@ function rankPrdSubsection(
     reason: '',
     matchQuality,
     confidence: Number(best.confidence.toFixed(2)),
+    candidates: ranked.slice(0, 5).map((section) => ({
+      heading: section.heading,
+      score: section.score,
+      confidence: Number(section.confidence.toFixed(2)),
+    })),
   };
 }
 
@@ -799,6 +1061,70 @@ function selectAcceptanceCriteria(
   };
 }
 
+function buildScopeAuthority(
+  mainIssue: SimplifiedIssue,
+  selection: CriteriaSelectionResult,
+  scopeConfluenceSection: ScopeConfluenceSection | null,
+  scopeParentIssue: LinkedIssueSummary | null
+): ScopeAuthority {
+  if (selection.acceptanceCriteriaSource === 'main_jira') {
+    const descriptionWithoutAc = stripAcceptanceCriteriaSections(mainIssue.description || mainIssue.renderedDescription || '');
+    const meaningfulDescription = normalizeInlineText(descriptionWithoutAc);
+    if (meaningfulDescription.length >= 20) {
+      return {
+        type: 'main_jira_description',
+        title: mainIssue.summary || mainIssue.key,
+        body: descriptionWithoutAc,
+        reason: selection.selectionReason,
+        quality: 'high',
+        sourceIssueKey: mainIssue.key,
+      };
+    }
+
+    return {
+      type: 'main_jira_acceptance_criteria',
+      title: mainIssue.summary || mainIssue.key,
+      body: selection.acceptanceCriteria.map((criterion) => `${criterion.id}. ${criterion.text}`).join('\n'),
+      reason: selection.selectionReason,
+      quality: 'high',
+      sourceIssueKey: mainIssue.key,
+    };
+  }
+
+  if (selection.acceptanceCriteriaSource === 'parent_story_confluence_section' && scopeConfluenceSection) {
+    const broad = scopeConfluenceSection.reason.includes('broadly');
+    return {
+      type: broad ? 'broad_prd_section' : 'matched_prd_subsection',
+      title: scopeConfluenceSection.matchedHeading || scopeConfluenceSection.title || scopeParentIssue?.summary || mainIssue.summary || mainIssue.key,
+      body: scopeConfluenceSection.body || '',
+      reason: selection.selectionReason || scopeConfluenceSection.reason,
+      quality: broad ? 'medium' : 'high',
+      sourceIssueKey: scopeConfluenceSection.sourceIssueKey || scopeParentIssue?.key,
+      pageId: scopeConfluenceSection.pageId || undefined,
+    };
+  }
+
+  if (selection.acceptanceCriteriaSource === 'parent_story_jira' && scopeParentIssue) {
+    return {
+      type: 'parent_story_jira',
+      title: scopeParentIssue.summary || scopeParentIssue.key,
+      body: selection.acceptanceCriteria.map((criterion) => `${criterion.id}. ${criterion.text}`).join('\n'),
+      reason: selection.selectionReason,
+      quality: 'medium',
+      sourceIssueKey: scopeParentIssue.key,
+    };
+  }
+
+  return {
+    type: 'none',
+    title: mainIssue.summary || mainIssue.key,
+    body: '',
+    reason: selection.selectionReason,
+    quality: 'low',
+    sourceIssueKey: mainIssue.key,
+  };
+}
+
 function determineConfidence(
   mainCriteria: ScopedItem[],
   scopedSectionCriteria: ScopedItem[],
@@ -846,6 +1172,112 @@ function determineConfidence(
   };
 }
 
+// Fix 1: the single most authoritative pointer is often the anchor on a sibling
+// in the implementation chain (e.g. the blocking BE twin), not the parent Story
+// — whose PRD link is frequently bare. Recover the best anchor for the chosen
+// PRD page from every issue in the chain plus the page's own aggregated
+// sourceRefs, ranked by overlap with the main ticket title.
+function scoreAnchorOverlap(anchor: string, mainIssue: SimplifiedIssue, storySummary: string): number {
+  const headingTokens = new Set(tokenizeMatchText(anchorToHeading(anchor)));
+  if (!headingTokens.size) return 0;
+  const titleTokens = [
+    ...tokenizeMatchText(stripBracketPrefixes(mainIssue.summary || '')),
+    ...tokenizeMatchText(storySummary || ''),
+  ];
+  let overlap = 0;
+  for (const token of new Set(titleTokens)) {
+    if (headingTokens.has(token)) overlap += 1;
+  }
+  const qualifierBonus = qualifierMatches([stripBracketPrefixes(mainIssue.summary || ''), storySummary || ''], anchorToHeading(anchor)) ? 3 : 0;
+  return overlap + qualifierBonus;
+}
+
+// Source precedence for anchor tie-breaking: the parent Story is the canonical
+// scope source, then the main ticket, then linked siblings.
+function anchorSourcePrecedence(sourceType: string): number {
+  const value = sourceType || '';
+  if (/parent/i.test(value)) return 3;
+  if (/main/i.test(value)) return 2;
+  return 1;
+}
+
+interface ResolvedAnchor {
+  anchor: string;
+  fromChain: boolean;
+}
+
+interface AnchorCandidate {
+  anchor: string;
+  precedence: number;
+  overlap: number;
+}
+
+// P2: anchor selection must be deterministic and respect source quality, not
+// fall through to Set-insertion order on a tie. Candidates are ranked by title
+// overlap, then source precedence, then a stable string compare. The parent
+// Story's own anchor is only overridden when a chain/page anchor scores
+// STRICTLY higher overlap — so a zero or tied overlap never moves us onto an
+// arbitrary sibling anchor.
+function resolveBestAnchorForPage(
+  pageId: string,
+  parentAnchor: string,
+  chainRefs: ConfluenceReference[],
+  pageSourceRefs: PageRefSource[] | undefined,
+  chainIssueKeys: Set<string>,
+  mainIssue: SimplifiedIssue,
+  storySummary: string
+): ResolvedAnchor {
+  const byAnchor = new Map<string, number>();
+  const add = (anchor: string, precedence: number) => {
+    if (!anchor) return;
+    const existing = byAnchor.get(anchor);
+    if (existing === undefined || precedence > existing) byAnchor.set(anchor, precedence);
+  };
+
+  for (const ref of chainRefs) {
+    if (ref.pageId === pageId && ref.anchor && chainIssueKeys.has(ref.issueKey)) add(ref.anchor, anchorSourcePrecedence(ref.sourceType));
+  }
+  for (const source of pageSourceRefs || []) {
+    if (source.anchor && (!source.issueKey || chainIssueKeys.has(source.issueKey))) add(source.anchor, anchorSourcePrecedence(source.sourceType || ''));
+  }
+  if (parentAnchor) add(parentAnchor, 4);
+
+  if (!byAnchor.size) return { anchor: '', fromChain: false };
+
+  const candidates: AnchorCandidate[] = [...byAnchor.entries()].map(([anchor, precedence]) => ({
+    anchor,
+    precedence,
+    overlap: scoreAnchorOverlap(anchor, mainIssue, storySummary),
+  }));
+  candidates.sort((left, right) => {
+    if (right.overlap !== left.overlap) return right.overlap - left.overlap;
+    if (right.precedence !== left.precedence) return right.precedence - left.precedence;
+    return left.anchor < right.anchor ? -1 : left.anchor > right.anchor ? 1 : 0;
+  });
+
+  if (parentAnchor) {
+    const parentOverlap = scoreAnchorOverlap(parentAnchor, mainIssue, storySummary);
+    const bestNonParent = candidates.find((candidate) => candidate.anchor !== parentAnchor);
+    if (bestNonParent && bestNonParent.overlap > parentOverlap) {
+      return { anchor: bestNonParent.anchor, fromChain: true };
+    }
+    return { anchor: parentAnchor, fromChain: false };
+  }
+
+  return { anchor: candidates[0].anchor, fromChain: true };
+}
+
+// Fix 4: pages that only reach us via "mentioned in" remote links, or that are
+// clearly release/version planning artifacts, are context — not scope. They
+// must not feed the acceptance-criteria candidate pool.
+function isContextOnlyConfluencePage(page: ConfluencePageSummary): boolean {
+  const title = normalizeInlineText(page.title || '');
+  if (/release plan|version plan|tech version|sprint plan|delivery plan|roadmap/i.test(title)) return true;
+  const refs = page.sourceRefs || [];
+  if (refs.length && refs.every((ref) => /mentioned in/i.test(ref.relationship || ''))) return true;
+  return false;
+}
+
 function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIssueSummary[], confluencePages: ConfluencePageSummary[]): AcceptanceCriteriaDiagnostics {
   const issueSources = [mainIssue, ...linkedIssues.filter((issue) => !issue.fetchError)] as Array<SimplifiedIssue | LinkedIssueSummary>;
   return {
@@ -865,7 +1297,7 @@ function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIss
     ),
     confluenceCriteria: dedupeScopedItems(
       confluencePages
-        .filter((page) => !page.fetchError)
+        .filter((page) => !page.fetchError && !isContextOnlyConfluencePage(page))
         .flatMap((page) => extractAcceptanceCriteriaFromText(page.body || '', `${page.id} ${page.title || 'Confluence page'}`)),
       'AC'
     ),
@@ -912,11 +1344,17 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   }
 
   const confluencePages: ConfluencePageSummary[] = [];
+  // Raw ADF is kept server-side only (keyed by page id) for heading-hierarchy
+  // scope resolution; it is intentionally NOT attached to confluencePages so it
+  // never bloats the client-facing context payload.
+  const pageAdfById = new Map<string, unknown>();
   for (const ref of pageRefs.values()) {
     try {
       const page = await client.getConfluencePage(ref.pageId);
       const comments = options.includeComments ? await client.getConfluenceComments(ref.pageId) : [];
-      confluencePages.push({ ...page, sourceRefs: ref.sources, sourceUrl: ref.url, comments });
+      const { adf, ...pageRest } = page as typeof page & { adf?: unknown };
+      if (adf) pageAdfById.set(String(page.id), adf);
+      confluencePages.push({ ...pageRest, sourceRefs: ref.sources, sourceUrl: ref.url, comments });
     } catch (error) {
       confluencePages.push({
         id: ref.pageId,
@@ -940,6 +1378,25 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   let scopeConfluenceSection: ScopeConfluenceSection | null = null;
   let scopedSectionCriteria: ScopedItem[] = [];
   let scopedSectionStories: ScopedItem[] = [];
+  let thinFallbackUsed = false;
+  let anchorResolvedFromChain = false;
+  let rankedScopeCandidates: Array<{ heading: string; score: number; confidence: number }> = [];
+
+  // Fix 1: gather PRD references from the whole implementation chain (main
+  // ticket, every linked issue, and the parent Story) so a precise anchor on a
+  // sibling — typically the blocking BE twin — can be recovered even when the
+  // parent Story's own PRD link is bare.
+  const chainIssueKeys = new Set<string>([mainIssue.key, ...linkedIssues.map((issue) => issue.key)]);
+  const chainPageRefs: ConfluenceReference[] = [
+    ...extractConfluencePageRefsFromText(mainIssue.description || '', mainIssue.key, 'main-description'),
+    ...extractConfluencePageRefsFromText(mainIssue.renderedDescription || '', mainIssue.key, 'main-rendered-description'),
+    ...linkedIssues
+      .filter((issue) => !issue.fetchError)
+      .flatMap((issue) => [
+        ...extractConfluencePageRefsFromText((issue as unknown as SimplifiedIssue).description || '', issue.key, 'linked-description'),
+        ...extractConfluencePageRefsFromText((issue as unknown as SimplifiedIssue).renderedDescription || '', issue.key, 'linked-rendered-description'),
+      ]),
+  ];
 
   if (scopeParentIssue) {
     const storyRefs = [
@@ -950,8 +1407,24 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     if (preferredStoryRef) {
       const page = confluencePages.find((candidate) => candidate.id === preferredStoryRef.pageId);
       if (page && !page.fetchError) {
-        const section = isolateStorySection(page.body || '', preferredStoryRef.anchor, scopeParentIssue.summary || '');
-        const subsectionBase = section.matched
+        const resolvedAnchor = resolveBestAnchorForPage(
+          preferredStoryRef.pageId,
+          preferredStoryRef.anchor,
+          chainPageRefs,
+          page.sourceRefs,
+          chainIssueKeys,
+          mainIssue,
+          scopeParentIssue.summary || ''
+        );
+        anchorResolvedFromChain = resolvedAnchor.fromChain;
+        // Fix 2: prefer the ADF heading hierarchy when raw ADF is available, so
+        // table cells never become headings and an H3's H4 children fold into
+        // it. Fall back to flattened-text parsing when ADF is absent.
+        const adfBlocks = pageAdfById.has(page.id) ? flattenAdfBlocks(pageAdfById.get(page.id)) : null;
+        const section = adfBlocks
+          ? isolateStorySectionFromBlocks(adfBlocks, resolvedAnchor.anchor, scopeParentIssue.summary || '')
+          : isolateStorySection(page.body || '', resolvedAnchor.anchor, scopeParentIssue.summary || '');
+        const subsectionBase: StorySection = section.matched
           ? section
           : {
               matched: true,
@@ -960,14 +1433,30 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
               reason: '',
               matchQuality: 'broad' as const,
               confidence: 0.4,
+              regionBlocks: adfBlocks || undefined,
             };
-        const thinFallbackCandidate = mainIssueThin ? rankPrdSubsection(subsectionBase, mainIssue, scopeParentIssue.summary || '') : null;
+        // Build ranking candidates from the relevant ADF region: the matched
+        // section's own blocks when an anchor locked on (so its H3 stays a
+        // candidate with H4 children as body), otherwise the whole page.
+        const adfRankCandidates = adfBlocks
+          ? parseSectionsFromBlocks(subsectionBase.regionBlocks || adfBlocks)
+          : null;
+        const thinFallbackCandidate = mainIssueThin
+          ? rankPrdSubsection(subsectionBase, mainIssue, scopeParentIssue.summary || '', adfRankCandidates)
+          : null;
+        // Fix 5: record that the thin-ticket ranking path actually executed,
+        // independent of which AC source ultimately won, so telemetry matches
+        // reality. Also surface the ranked candidates for QA review.
+        if (mainIssueThin) {
+          thinFallbackUsed = true;
+          rankedScopeCandidates = thinFallbackCandidate?.candidates || [];
+        }
         const effectiveSection = thinFallbackCandidate || section;
         scopeConfluenceSection = {
           pageId: page.id,
           title: page.title || '',
           url: preferredStoryRef.url || page.webUrl || '',
-          anchor: preferredStoryRef.anchor || '',
+          anchor: resolvedAnchor.anchor || '',
           matchedHeading: effectiveSection.title,
           matched: effectiveSection.matched,
           reason:
@@ -1083,8 +1572,21 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   ];
   const discardedUserStoryFragments = allUserStoryCandidates.filter((candidate) => !isDisplayableUserStory(candidate.text));
 
+  // Fix 5 (fail loud): if the ticket title carries a discriminating qualifier
+  // (e.g. "no scoring") but the matched PRD scope does not confirm that
+  // polarity, say so explicitly instead of letting confident-looking but wrong
+  // acceptance criteria through.
+  const scopeQualifierTitleSignals = [mainIssue.summary || '', scopeParentIssue?.summary || ''];
+  const detectedScopeQualifier = describeTitleQualifier(scopeQualifierTitleSignals);
+  const qualifierUnconfirmed = Boolean(
+    detectedScopeQualifier &&
+      scopeConfluenceSection &&
+      (!scopeConfluenceSection.matched || qualifierVerdict(scopeQualifierTitleSignals, scopeConfluenceSection.matchedHeading) !== 'match')
+  );
+
   const confidence = determineConfidence(mainIssueCriteria, scopedSectionCriteria, scopeParentIssue, scopeConfluenceSection, mainIssueThin);
   const diagnostics = buildContextSummary(mainIssue, classifiedLinkedIssues, confluencePages);
+  const scopeAuthority = buildScopeAuthority(mainIssue, selection, scopeConfluenceSection, scopeParentIssue);
   const epic = mainIssue.parent && mainIssue.parent.summary;
 
   return {
@@ -1096,6 +1598,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     scopeParentIssue,
     scopeParentRelation,
     scopeConfluenceSection,
+    scopeAuthority,
     acceptanceCriteria: selection.acceptanceCriteria,
     userStories,
     acceptanceCriteriaSource: selection.acceptanceCriteriaSource,
@@ -1109,19 +1612,27 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
           : 'Scoped PRD AC ignored because main Jira AC exists.'
       ),
       ...selection.ignoredMetadataLabels.map((label) => `Story metadata ignored: ${label}.`),
+      ...(qualifierUnconfirmed
+        ? [
+            `Scope qualifier "${detectedScopeQualifier}" was detected in the ticket title, but the matched PRD scope did not confirm it. Review the ranked scope candidates before trusting acceptance criteria coverage.`,
+          ]
+        : []),
     ],
-    requiresConfidencePermission: confidence.requiresConfidencePermission,
+    requiresConfidencePermission: confidence.requiresConfidencePermission || qualifierUnconfirmed,
     acceptanceCriteriaDiagnostics: {
       ...diagnostics,
       selectedAcceptanceCriteriaSource: selection.acceptanceCriteriaSource,
       selectedAcceptanceCriteriaReason: selection.selectionReason,
       ignoredSources: selection.ignoredSources,
       ignoredMetadataLabels: selection.ignoredMetadataLabels,
-      thinTicketFallbackUsed: mainIssueThin && selection.acceptanceCriteriaSource === 'parent_story_confluence_section',
+      thinTicketFallbackUsed: thinFallbackUsed,
       prdSubsectionMatchQuality: scopeConfluenceSection?.matched ? (scopeConfluenceSection.reason.includes('broadly') ? 'broad' : 'confident') : 'none',
       matchedPrdSubsectionHeading: scopeConfluenceSection?.matchedHeading || '',
       matchedPrdSubsectionConfidence: scopeConfluenceSection?.matched ? (scopeConfluenceSection.reason.includes('broadly') ? 0.6 : 1) : 0,
       userStoryFragmentsDiscardedCount: discardedUserStoryFragments.length,
+      scopeQualifierDetected: detectedScopeQualifier,
+      scopeCandidatesRanked: rankedScopeCandidates.length ? rankedScopeCandidates : undefined,
+      scopeAnchorResolvedFromChain: anchorResolvedFromChain,
     },
     constraints: {
       feOnly: Boolean(options.feOnly),

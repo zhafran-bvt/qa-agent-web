@@ -28,6 +28,15 @@ const context: QaContext = {
     sourceIssueKey: 'ORB-2870',
     body: 'Acceptance Criteria...',
   },
+  scopeAuthority: {
+    type: 'matched_prd_subsection',
+    title: '5. As a PM, I want the filter function can handle data contain multiple administrative area list',
+    body: 'Acceptance Criteria...',
+    reason: 'Use the main Jira issue and scoped Story PRD section.',
+    quality: 'high',
+    sourceIssueKey: 'ORB-2870',
+    pageId: '897351682',
+  },
   acceptanceCriteria: [
     { id: 'AC-1', text: 'Matching: A row is included when any administrative area matches the filter selection.' },
     { id: 'AC-2', text: 'Integrity: The system returns the original record with no row splitting.' },

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "description": "Internal QA Agent web app for Jira/Confluence BDD generation and TestRail push",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "dev": "QA_AGENT_PORT=5180 QA_AGENT_BASE_URL=http://localhost:5180 ATLASSIAN_REDIRECT_URI=http://localhost:5180/auth/atlassian/callback concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
@@ -12,7 +15,9 @@
     "build:client": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.app.json",
     "start": "npm run build && node dist/src/server/index.js",
-    "test": "tsx --test tests/unit/*.test.ts"
+    "test": "npm run test:server && npm run test:client",
+    "test:server": "tsx --test tests/unit/*.test.ts",
+    "test:client": "vitest run --config vitest.client.config.ts"
   },
   "dependencies": {
     "pg": "^8.16.3",
@@ -20,14 +25,18 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^24.10.1",
     "@types/pg": "^8.15.5",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.1",
     "concurrently": "^9.2.1",
+    "jsdom": "^27.0.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vite": "^7.2.0"
+    "vite": "^7.2.0",
+    "vitest": "^4.1.8"
   }
 }

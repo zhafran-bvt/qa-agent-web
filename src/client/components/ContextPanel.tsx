@@ -58,6 +58,17 @@ export function ContextPanel({
     translation?.selectedAcceptanceCriteriaReason || context?.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '';
   const displayAcceptanceCriteria = translation?.acceptanceCriteria?.length ? translation.acceptanceCriteria : context?.acceptanceCriteria || [];
   const displayUserStories = translation?.userStories?.length ? translation.userStories : context?.userStories || [];
+  const diagnostics = context?.acceptanceCriteriaDiagnostics;
+  const scopeDiagnosticsRows = diagnostics
+    ? [
+        [t.scopeAuthority, context.scopeAuthority?.type || t.none],
+        [t.scopeAuthorityTitle, context.scopeAuthority?.title || t.none],
+        [t.thinTicketFallback, diagnostics.thinTicketFallbackUsed ? t.yes : t.no],
+        [t.prdMatchQuality, diagnostics.prdSubsectionMatchQuality || t.none],
+        [t.matchedPrdHeading, diagnostics.matchedPrdSubsectionHeading || t.none],
+        [t.discardedUserStoryFragments, String(diagnostics.userStoryFragmentsDiscardedCount || 0)],
+      ]
+    : [];
   return (
     <section className="panel panel-stack panel-context">
       <div className="panel-heading">
@@ -116,6 +127,20 @@ export function ContextPanel({
                   <li key={label}>{t.ignoredStoryMetadata(label)}</li>
                 ))}
               </ul>
+              </div>
+            </details>
+          ) : null}
+
+          {scopeDiagnosticsRows.length ? (
+            <details className="summary summary-detail">
+              <summary>{t.scopeDiagnostics}</summary>
+              <div className="scope-diagnostics-grid">
+                {scopeDiagnosticsRows.map(([label, value]) => (
+                  <div className="scope-diagnostic-item" key={label}>
+                    <span>{label}</span>
+                    <strong>{value}</strong>
+                  </div>
+                ))}
               </div>
             </details>
           ) : null}

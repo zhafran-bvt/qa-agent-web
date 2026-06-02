@@ -298,10 +298,9 @@ function shouldLogRequestAtInfo(pathname: string, statusCode: number): boolean {
   return false;
 }
 
-function shouldEnforceAcceptanceCriteria(context: QaContext | null, confidencePermissionApproved: boolean): boolean {
+function shouldEnforceAcceptanceCriteria(context: QaContext | null, _confidencePermissionApproved: boolean): boolean {
   if (!context) return false;
-  if (context.requiresConfidencePermission && confidencePermissionApproved) return false;
-  return context.confidenceLevel === 'high' && Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
+  return Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
 }
 
 async function appendAudit(event: Record<string, unknown>): Promise<void> {
@@ -531,6 +530,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       providerCandidates: config.llm.providers.filter((provider) => provider.apiKey).map((provider) => provider.name),
       coverageEnforced,
       acceptanceCriteriaCount: body.context.acceptanceCriteria.length,
+      scopeAuthorityType: body.context.scopeAuthority?.type || 'none',
       manualScopeOverride: generationContext.manualScopeOverride,
     });
     const generation = await generateTestCases(config.llm, generationContext);
@@ -567,6 +567,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       generatedCaseCount: generation.testCases.length,
       hydratedCaseCount: testCases.length,
       coverageEnforced,
+      scopeAuthorityType: body.context.scopeAuthority?.type || 'none',
       coveredCriteria: coverage.coveredCriteria,
       totalCriteria: coverage.totalCriteria,
       uncoveredCriteria: coverage.uncoveredCriteria,

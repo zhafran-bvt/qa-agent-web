@@ -149,6 +149,14 @@ test('prefers main ticket description over story context when description is mea
     scopeParentIssue: { key: 'ORB-2870', summary: 'Story context only' },
     scopeParentRelation: 'is child of',
     scopeConfluenceSection: null,
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'ORB-3118',
+      body: 'Add Admin Area filter to the line dataset flow.\nThe Add Dataset button stays disabled until a valid value is selected.',
+      reason: 'Use the main Jira issue first.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3118',
+    },
     acceptanceCriteria: [{ id: 'AC-1', text: 'Adm Area filter is required' }],
     userStories: [],
     acceptanceCriteriaSource: 'combined',
@@ -163,7 +171,7 @@ test('prefers main ticket description over story context when description is mea
     manualScopeOverrideReason: '',
   });
 
-  assert.equal(scopePriority.primaryAuthority, 'main_ticket_description');
+  assert.equal(scopePriority.primaryAuthority, 'main_jira_description');
   assert.match(scopePriority.mainTicketDescription, /Add Admin Area filter/);
 });
 
@@ -180,6 +188,14 @@ test('falls back to acceptance criteria when description is only AC content', ()
     scopeParentIssue: { key: 'ORB-2870', summary: 'Story context only' },
     scopeParentRelation: 'is child of',
     scopeConfluenceSection: null,
+    scopeAuthority: {
+      type: 'main_jira_acceptance_criteria',
+      title: 'ORB-3118',
+      body: 'AC-1. Adm Area filter is required',
+      reason: 'Use the main Jira issue first.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3118',
+    },
     acceptanceCriteria: [{ id: 'AC-1', text: 'Adm Area filter is required' }],
     userStories: [],
     acceptanceCriteriaSource: 'combined',
@@ -194,8 +210,108 @@ test('falls back to acceptance criteria when description is only AC content', ()
     manualScopeOverrideReason: '',
   });
 
-  assert.equal(scopePriority.primaryAuthority, 'main_ticket_acceptance_criteria');
+  assert.equal(scopePriority.primaryAuthority, 'main_jira_acceptance_criteria');
   assert.equal(scopePriority.mainTicketDescription, '');
+});
+
+test('uses matched PRD subsection as primary authority for thin-ticket PRD fallback', () => {
+  const scopePriority = buildScopePriorityContext({
+    ticketKey: 'ORB-3157',
+    epic: 'AI Assistance',
+    mainIssue: {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - Generate executive summary for analysis results with no scoring',
+      description: '',
+    },
+    linkedIssues: [],
+    confluencePages: [],
+    scopeParentIssue: { key: 'ORB-1248', summary: 'AI Assistance Summary Result', issueType: 'Story' },
+    scopeParentRelation: 'is child of',
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd',
+      anchor: 'AI-Summary-NO-SCORE',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body: 'The AI Summary tab is available for no-score analysis. General Summary uses absolute profiling. Strategic Takeaways remain available.',
+    },
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body: 'The AI Summary tab is available for no-score analysis. General Summary uses absolute profiling. Strategic Takeaways remain available.',
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'No-score AI Summary behavior is available' }],
+    userStories: [],
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    confidenceLevel: 'high',
+    confidenceReasons: [],
+    requiresConfidencePermission: false,
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    actualDevScopeGuidance: 'Use the matched PRD subsection for thin tickets.',
+    coverageEnforced: true,
+    manualScopeOverride: false,
+    manualScopeOverrideReason: '',
+  });
+
+  assert.equal(scopePriority.primaryAuthority, 'matched_prd_subsection');
+  assert.ok(scopePriority.matchedPrdSubsection);
+  assert.equal(scopePriority.matchedPrdSubsection.title, 'AI Summary NO SCORE');
+  assert.match(scopePriority.matchedPrdSubsection.body, /Strategic Takeaways/);
+});
+
+test('P3: the no-scopeAuthority fallback emits the unified main_jira_* authority vocabulary', () => {
+  // Simulates an older/replayed context that predates scopeAuthority. The
+  // fallback must use the same vocabulary as the rest of the system, not the
+  // legacy main_ticket_* names.
+  const base = {
+    ticketKey: 'ORB-9100',
+    epic: 'Spatial Analysis',
+    linkedIssues: [],
+    confluencePages: [],
+    scopeParentIssue: null,
+    scopeParentRelation: '',
+    scopeConfluenceSection: null,
+    // scopeAuthority intentionally omitted.
+    userStories: [],
+    acceptanceCriteriaSource: 'main_jira',
+    confidenceLevel: 'high',
+    confidenceReasons: [],
+    requiresConfidencePermission: false,
+    acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [], confluenceCriteria: [] },
+    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    actualDevScopeGuidance: 'Use the main Jira issue first.',
+    coverageEnforced: true,
+    manualScopeOverride: false,
+    manualScopeOverrideReason: '',
+  };
+
+  const withDescription = buildScopePriorityContext({
+    ...base,
+    mainIssue: { key: 'ORB-9100', description: 'Add an export button to the analysis results toolbar.' },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Export button is shown' }],
+  } as any);
+  assert.equal(withDescription.primaryAuthority, 'main_jira_description');
+
+  const acOnly = buildScopePriorityContext({
+    ...base,
+    mainIssue: { key: 'ORB-9100', description: 'AC:\n1. Export button is shown' },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Export button is shown' }],
+  } as any);
+  assert.equal(acOnly.primaryAuthority, 'main_jira_acceptance_criteria');
 });
 
 test('builds a slim generation prompt context without noisy diagnostics criteria dumps', () => {
@@ -222,6 +338,14 @@ test('builds a slim generation prompt context without noisy diagnostics criteria
       sourceIssueKey: 'ORB-2873',
       body: 'Scoped PRD section',
     },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: '[FE] Integration API - Run Analysis with BVT Polygon Catchment Datasets',
+      body: 'Main issue description',
+      reason: 'Use the main Jira issue first.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3079',
+    },
     acceptanceCriteria: [{ id: 'AC-1', text: 'Canonical acceptance criterion' }],
     userStories: [{ id: 'US-1', text: 'As User, I want ...' }],
     acceptanceCriteriaSource: 'main_jira',
@@ -238,4 +362,5 @@ test('builds a slim generation prompt context without noisy diagnostics criteria
 
   assert.equal('acceptanceCriteriaDiagnostics' in payload, false);
   assert.deepEqual(payload.acceptanceCriteria, [{ id: 'AC-1', text: 'Canonical acceptance criterion' }]);
+  assert.equal(payload.scopeAuthority?.type, 'main_jira_description');
 });

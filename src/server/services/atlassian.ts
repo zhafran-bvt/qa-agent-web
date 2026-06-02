@@ -347,7 +347,7 @@ export class AtlassianClient {
     );
   }
 
-  async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string }> {
+  async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string; adf?: unknown }> {
     const tried = new Set<string>();
     const candidates = [this.cloudId, ...this.resources.map((resource) => resource.id)].filter((id) => {
       if (!id || tried.has(id)) return false;
@@ -372,12 +372,24 @@ export class AtlassianClient {
           this.cloudId = candidateCloudId;
           this.selectedResource = this.resources.find((resource) => resource.id === candidateCloudId) || this.selectedResource;
         }
+        const adfValue = page.body && page.body.atlas_doc_format && page.body.atlas_doc_format.value;
+        let adf: unknown = null;
+        if (typeof adfValue === 'string') {
+          try {
+            adf = JSON.parse(adfValue);
+          } catch {
+            adf = null;
+          }
+        } else if (adfValue && typeof adfValue === 'object') {
+          adf = adfValue;
+        }
         return {
           id: String(page.id),
           title: page.title,
           status: page.status,
           webUrl: page._links && page._links.webui ? page._links.webui : null,
-          body: extractText(page.body && page.body.atlas_doc_format && page.body.atlas_doc_format.value),
+          body: extractText(adfValue),
+          adf,
         };
       } catch (error) {
         lastError = error as Error;

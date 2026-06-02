@@ -71,12 +71,66 @@ function stripAcceptanceCriteriaSections(text: string): string {
 }
 
 export function buildScopePriorityContext(context: GenerateContext) {
+  if (context.scopeAuthority && context.scopeAuthority.type !== 'none') {
+    return {
+      primaryAuthority: context.scopeAuthority.type,
+      authorityTitle: context.scopeAuthority.title,
+      authorityBody: context.scopeAuthority.body,
+      authorityReason: context.scopeAuthority.reason,
+      authorityQuality: context.scopeAuthority.quality,
+      hasMeaningfulTicketDescription: context.scopeAuthority.type === 'main_jira_description',
+      mainTicketDescription: context.scopeAuthority.type === 'main_jira_description' ? context.scopeAuthority.body : '',
+      mainTicketAcceptanceCriteria: context.acceptanceCriteria,
+      matchedPrdSubsection:
+        context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+          ? {
+              title: context.scopeAuthority.title,
+              body: context.scopeAuthority.body,
+              matchQuality: context.scopeAuthority.type === 'broad_prd_section' ? 'broad' : 'confident',
+            }
+          : undefined,
+      supportingContext: {
+        parentStorySummary: context.scopeParentIssue?.summary || '',
+        scopedPrdSectionTitle: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
+        scopedPrdSectionBody: context.scopeConfluenceSection?.body || '',
+        actualDevScopeGuidance: context.actualDevScopeGuidance,
+      },
+    };
+  }
+
   const rawDescription = String(context.mainIssue.description || '').trim();
   const descriptionWithoutAc = stripAcceptanceCriteriaSections(rawDescription);
   const hasMeaningfulTicketDescription = descriptionWithoutAc.length >= 20;
+  const prdScopedThinTicket =
+    context.acceptanceCriteriaSource === 'parent_story_confluence_section' &&
+    Boolean(context.acceptanceCriteriaDiagnostics?.thinTicketFallbackUsed) &&
+    Boolean(String(context.scopeConfluenceSection?.body || '').trim());
+
+  if (prdScopedThinTicket) {
+    return {
+      primaryAuthority: 'matched_prd_subsection',
+      hasMeaningfulTicketDescription: false,
+      mainTicketDescription: '',
+      mainTicketAcceptanceCriteria: context.acceptanceCriteria,
+      matchedPrdSubsection: {
+        title: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
+        body: context.scopeConfluenceSection?.body || '',
+        matchQuality: context.acceptanceCriteriaDiagnostics?.prdSubsectionMatchQuality || 'none',
+      },
+      supportingContext: {
+        parentStorySummary: context.scopeParentIssue?.summary || '',
+        scopedPrdSectionTitle: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
+        scopedPrdSectionBody: context.scopeConfluenceSection?.body || '',
+        actualDevScopeGuidance: context.actualDevScopeGuidance,
+      },
+    };
+  }
 
   return {
-    primaryAuthority: hasMeaningfulTicketDescription ? 'main_ticket_description' : 'main_ticket_acceptance_criteria',
+    // Use the unified ScopeAuthority vocabulary even on the no-scopeAuthority
+    // fallback path, so older/replayed contexts cannot emit a divergent
+    // authority name (was main_ticket_* — see ScopeAuthority.type).
+    primaryAuthority: hasMeaningfulTicketDescription ? 'main_jira_description' : 'main_jira_acceptance_criteria',
     hasMeaningfulTicketDescription,
     mainTicketDescription: hasMeaningfulTicketDescription ? descriptionWithoutAc : '',
     mainTicketAcceptanceCriteria: context.acceptanceCriteria,
@@ -351,6 +405,7 @@ export function buildGenerationPromptContext(context: GenerateContext) {
           matched: context.scopeConfluenceSection.matched,
         }
       : null,
+    scopeAuthority: context.scopeAuthority,
     acceptanceCriteria: context.acceptanceCriteria,
     acceptanceCriteriaSource: context.acceptanceCriteriaSource,
     userStories: context.userStories,
@@ -388,6 +443,12 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       : '',
     'Do not over-merge distinct FE behaviors into one criterion.',
     'When present in the main ticket, keep Run Analysis payload mapping, Save Config payload mapping, dataset linkage or datasets[] behavior, and preview or map labeling behavior as separate criteria instead of compressing them into one broad clause.',
+    prdScopedThinTicket
+      ? 'For thin-ticket PRD fallback, cover every distinct requirement in the matched subsection. If the title narrows the scope to a variant such as no scoring, include that variant-specific behavior explicitly instead of producing only generic summary criteria.'
+      : '',
+    prdScopedThinTicket
+      ? 'When the matched subsection describes an output variant, keep independently testable output responsibilities separate, such as availability, narrative style, content sections, risk or warning information, recommendations or takeaways, and single-item versus comparative framing.'
+      : '',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"acceptanceCriteria":[{"id":"AC-1","text":"..."},{"id":"AC-2","text":"..."}]}',
     'Use sequential ids AC-1, AC-2, AC-3 in output order.',
@@ -575,12 +636,19 @@ export function isFallbackError(error: Error & { statusCode?: number }): boolean
 async function generateWithProvider(provider: ProviderConfig, context: GenerateContext) {
   const enforceCoverage = Boolean(context.coverageEnforced);
   const scopePriority = buildScopePriorityContext(context);
+  const prdScopedThinTicket =
+    scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';
   const systemPrompt = [
     'You are a senior QA engineer.',
     'Generate BDD test cases only from the supplied Jira and Confluence context.',
+    'Generate cases from the final canonical acceptance criteria first, then use the selected scope authority as the allowed boundary.',
     'Scope cases to what dev actually built, not the entire PRD.',
-    'The main Jira ticket is the authority for implemented scope.',
-    scopePriority.hasMeaningfulTicketDescription
+    prdScopedThinTicket
+      ? 'The main Jira ticket is too thin. Treat the matched PRD subsection as the primary scope authority for generation, using the task title as the scope key.'
+      : 'The main Jira ticket is the authority for implemented scope.',
+    prdScopedThinTicket
+      ? 'Do not generate from adjacent PRD sections. Stay inside the matched subsection and the final acceptance criteria.'
+      : scopePriority.hasMeaningfulTicketDescription
       ? 'Treat the main Jira ticket description as the primary coverage authority. Acceptance criteria are completeness checks. Parent Story and PRD are supporting context only and must not expand scope beyond the ticket description.'
       : 'The main Jira ticket description is empty or too thin. Treat the main Jira ticket acceptance criteria as the primary coverage authority. Parent Story and PRD are supporting context only.',
     'Return strict JSON only. No markdown and no explanation.',
@@ -599,8 +667,13 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     enforceCoverage
       ? 'Every test case must list at least one coversAcceptanceCriteria id.'
       : 'Every test case must still include sourceScope referencing the Jira issues or scoped Story source used.',
+    enforceCoverage
+      ? 'Do not introduce case themes that cannot be traced to one or more final acceptance criteria, even if the broader Story or PRD page mentions them elsewhere.'
+      : '',
     enforceCoverage ? 'Do not stop after covering only the first acceptance criterion. Ensure sync, state, and cross-control behavior criteria also receive dedicated coverage when present.' : '',
-    scopePriority.hasMeaningfulTicketDescription
+    prdScopedThinTicket
+      ? 'When the matched subsection describes a specific output variant such as no-score analysis, generate cases for that variant-specific behavior instead of broader feature-entry or menu-visibility behavior from surrounding sections.'
+      : scopePriority.hasMeaningfulTicketDescription
       ? 'Do not generate extra cases solely because they appear in the Story or PRD if they are not supported by the main ticket description or its acceptance criteria.'
       : 'When relying on acceptance criteria fallback, still keep Story and PRD context supportive only; do not broaden scope beyond what the ticket acceptance criteria imply.',
   ].join('\n');
@@ -649,16 +722,23 @@ async function repairMissingCoverageWithProvider(
   missingCriteria: Array<{ id: string; text: string }>
 ): Promise<ProviderGenerationResult> {
   const scopePriority = buildScopePriorityContext(context);
+  const prdScopedThinTicket =
+    scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';
   const systemPrompt = [
     'You are a senior QA engineer repairing missing acceptance criteria coverage.',
-    'The main Jira ticket is the authority for implemented scope.',
-    scopePriority.hasMeaningfulTicketDescription
+    prdScopedThinTicket
+      ? 'The main Jira ticket is too thin. Use the matched PRD subsection as the primary scope authority while repairing missing coverage.'
+      : 'The main Jira ticket is the authority for implemented scope.',
+    prdScopedThinTicket
+      ? 'Do not pull in behavior from neighboring PRD sections or broader feature-entry flows.'
+      : scopePriority.hasMeaningfulTicketDescription
       ? 'Use the main Jira ticket description as the primary scope authority while repairing missing coverage. Story and PRD remain supporting context only.'
       : 'The main Jira ticket description is empty or too thin, so use the main Jira ticket acceptance criteria as the primary scope authority while repairing missing coverage.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
+    'Generate repair cases from the same selected scope authority and final acceptance criteria only.',
     'Each testCases item must include id, title, type, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
     'The evidence object must include coverageNote only.',

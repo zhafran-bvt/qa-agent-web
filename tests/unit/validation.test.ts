@@ -104,7 +104,7 @@ test('does not report unknown acceptance criteria when none were detected in con
   assert.deepEqual(result.errors, []);
 });
 
-test('does not enforce acceptance criteria mapping in override mode', () => {
+test('does not enforce acceptance criteria mapping when enforcement is explicitly disabled', () => {
   const result = validateCase(
     { ...validCase, coversAcceptanceCriteria: [] },
     { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', acceptanceCriteria, enforceAcceptanceCriteria: false }
@@ -139,7 +139,7 @@ test('builds coverage and flags uncovered criteria', () => {
   assert.deepEqual(coverage.uncoveredCriteria, []);
 });
 
-test('marks coverage as not enforced when override mode is active', () => {
+test('marks coverage as not enforced when enforcement is explicitly disabled', () => {
   const coverage = buildCoverage([validCase], acceptanceCriteria, { enforceAcceptanceCriteria: false });
   assert.equal(coverage.enforced, false);
 });

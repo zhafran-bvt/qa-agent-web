@@ -108,7 +108,7 @@ function isFragmentaryCriterion(text: string): boolean {
 }
 
 function isFeTestableRequirement(text: string): boolean {
-  return /(should|must|required|display|shown|hidden|enabled|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync)/i.test(
+  return /(should|must|required|display|shown|hidden|enabled|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync|summary|narrative|score|scoring|risk|takeaways|tab|characteristics|signals|zone)/i.test(
     text
   );
 }
@@ -227,6 +227,63 @@ function determineGranularityTarget(parsedSections: ParsedIssueSection[], descri
   return null;
 }
 
+function determineContextGranularityTarget(context: QaContext, parsedSections: ParsedIssueSection[], description: string): GranularityTarget | null {
+  const technicalTarget = determineGranularityTarget(parsedSections, description);
+  if (technicalTarget) return technicalTarget;
+
+  const prdScopedThinTicket =
+    context.acceptanceCriteriaSource === 'parent_story_confluence_section' &&
+    context.acceptanceCriteriaDiagnostics.thinTicketFallbackUsed;
+
+  if (prdScopedThinTicket) {
+    return {
+      min: 4,
+      max: 6,
+      hint:
+        'Use medium granularity for thin-ticket PRD subsection fallback. Cover each distinct behavior in the matched subsection. When present, keep entry-point availability, variant framing, output narrative style, content sections, risk or warning information, recommendations or takeaways, and single-item versus comparative behavior as separate criteria.',
+    };
+  }
+
+  return null;
+}
+
+function splitCompoundCriterion(text: string): string[] {
+  const normalized = normalizeInlineText(text);
+  if (!normalized) return [];
+
+  const labelStarts =
+    '(?:Availability|Entry-point availability|Variant framing|Narrative style|Output narrative|Content sections?|General Summary|Risk warnings?|Warning information|Recommendations?|Takeaways?|Strategic Takeaways|Single-item framing|Comparative framing|Single-item versus comparative framing)';
+  const splitters = [
+    new RegExp(`\\s+(?=${labelStarts}\\s*:)`, 'gi'),
+    /;\s+(?=(?:Run Analysis|Save Config|When|The|Strategic|General|Landmark|Environment|No-score|Single-area|Availability|Narrative|Risk|Recommendations|Takeaways)\b)/g,
+    /\.\s+(?=(?:Run Analysis|Save Config|When|The|Strategic|General|Landmark|Environment|No-score|Single-area|Availability|Narrative|Risk|Recommendations|Takeaways)\b)/g,
+  ];
+
+  let pieces = [normalized];
+  for (const splitter of splitters) {
+    pieces = pieces.flatMap((piece) => piece.split(splitter).map((part) => normalizeInlineText(part)).filter(Boolean));
+  }
+
+  const independentPieces = pieces.filter((piece) => piece.length >= 45 && isFeTestableRequirement(piece));
+  return independentPieces.length >= 2 ? independentPieces : [normalized];
+}
+
+function repairOverMergedCriteria(criteria: ScopedItem[], target: GranularityTarget | null): ScopedItem[] {
+  if (!target || criteria.length >= target.min) return criteria;
+
+  const expanded: Array<{ text: string; source?: string }> = [];
+  for (const criterion of criteria) {
+    const pieces = splitCompoundCriterion(criterion.text);
+    for (const piece of pieces) {
+      expanded.push({ text: piece, source: criterion.source });
+    }
+  }
+
+  const repaired = dedupeCriteria(expanded);
+  if (repaired.length > criteria.length && repaired.length <= target.max + 2) return repaired;
+  return criteria;
+}
+
 function mergeConfidenceReasons(context: QaContext, synthesisUsed: boolean, synthesisReason: string): string[] {
   const existing = (context.confidenceReasons || []).filter((reason) => {
     if (!synthesisUsed) return true;
@@ -243,7 +300,7 @@ export async function finalizeAcceptanceCriteria(
   const quality = assessAcceptanceCriteriaQuality(context.acceptanceCriteria || []);
   const mainIssueBody = context.mainIssue.description || context.mainIssue.renderedDescription || '';
   const parsedSections = parseMainIssueSections(mainIssueBody);
-  const granularityTarget = determineGranularityTarget(parsedSections, mainIssueBody);
+  const granularityTarget = determineContextGranularityTarget(context, parsedSections, mainIssueBody);
 
   let finalCriteria = dedupeCriteria(quality.kept.map((criterion) => ({ text: criterion.text, source: criterion.source })));
   let synthesisUsed = false;
@@ -262,8 +319,13 @@ export async function finalizeAcceptanceCriteria(
         acceptanceCriteriaSource: context.acceptanceCriteriaSource,
         parentStorySummary: context.scopeParentIssue?.summary || '',
         prdSectionTitle:
-          context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || context.scopeParentIssue?.summary || '',
-        prdSectionBody: context.scopeConfluenceSection?.body || '',
+          context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+            ? context.scopeAuthority.title
+            : context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || context.scopeParentIssue?.summary || '',
+        prdSectionBody:
+          context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+            ? context.scopeAuthority.body
+            : context.scopeConfluenceSection?.body || '',
         thinTicketFallbackUsed: context.acceptanceCriteriaDiagnostics.thinTicketFallbackUsed || false,
         prdSubsectionMatchQuality: context.acceptanceCriteriaDiagnostics.prdSubsectionMatchQuality || 'none',
         actualDevScopeGuidance: context.actualDevScopeGuidance,
@@ -278,7 +340,7 @@ export async function finalizeAcceptanceCriteria(
         }))
       );
       if (synthesized.length) {
-        finalCriteria = synthesized;
+        finalCriteria = repairOverMergedCriteria(synthesized, granularityTarget);
         synthesisUsed = true;
         synthesisReason =
           quality.quality === 'strong'
@@ -292,6 +354,8 @@ export async function finalizeAcceptanceCriteria(
       });
     }
   }
+
+  finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);
 
   return {
     ...context,

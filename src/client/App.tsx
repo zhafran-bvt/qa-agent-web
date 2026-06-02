@@ -403,8 +403,8 @@ export default function App() {
             <div className="modal-header">
               <div>
                 <div className="eyebrow">QA Agent</div>
-                <h2 id="status-modal-title">{uiText.en.diagnostics.title}</h2>
-                <p>{uiText.en.diagnostics.subtitle}</p>
+                <h2 id="status-modal-title">{t.diagnostics.title}</h2>
+                <p>{t.diagnostics.subtitle}</p>
               </div>
               <button className="button button-secondary button-small" type="button" onClick={() => setShowStatusModal(false)}>
                 {t.status.close}
@@ -421,24 +421,24 @@ export default function App() {
       <header className="hero">
         <div className="hero-copy">
           <div className="eyebrow">QA Agent</div>
-          <h1>{uiText.en.heroTitle}</h1>
-          <p>{uiText.en.heroSubtitle}</p>
+          <h1>{t.heroTitle}</h1>
+          <p>{t.heroSubtitle}</p>
         </div>
 
         <div className="hero-actions">
           <div className="auth-card">
-            <div className="auth-label">{uiText.en.authLabel}</div>
+            <div className="auth-label">{t.authLabel}</div>
             <div className="auth-value">
-              {loadingConfig ? uiText.en.checking : config?.authenticated ? uiText.en.loggedInAs(config.user || '') : uiText.en.notLoggedIn}
+              {loadingConfig ? t.checking : config?.authenticated ? t.loggedInAs(config.user || '') : t.notLoggedIn}
             </div>
-            {config?.session?.expiresAt ? <div className="muted">{uiText.en.sessionExpiry(new Date(config.session.expiresAt).toLocaleString())}</div> : null}
+            {config?.session?.expiresAt ? <div className="muted">{t.sessionExpiry(new Date(config.session.expiresAt).toLocaleString())}</div> : null}
             {config?.authenticated ? (
               <button className="button button-secondary" type="button" onClick={handleLogout}>
-                {uiText.en.logout}
+                {t.logout}
               </button>
             ) : (
               <a className="button button-secondary" href="/auth/atlassian">
-                {uiText.en.loginWithAtlassian}
+                {t.loginWithAtlassian}
               </a>
             )}
           </div>
@@ -449,8 +449,8 @@ export default function App() {
 
       <main className="workflow-shell">
         <div className="section-bar">
-          <h2>{uiText.en.mainWorkflow}</h2>
-          <div className="section-tag">{uiText.en.guidedWorkflow}</div>
+          <h2>{t.mainWorkflow}</h2>
+          <div className="section-tag">{t.guidedWorkflow}</div>
         </div>
 
         <div className="workflow-top">
@@ -512,8 +512,8 @@ export default function App() {
 
         <section className="secondary-sections">
           <div className="section-bar section-bar-secondary">
-            <h2>{uiText.en.secondarySections}</h2>
-            <div className="section-note">{uiText.en.secondarySectionsNote}</div>
+            <h2>{t.secondarySections}</h2>
+            <div className="section-note">{t.secondarySectionsNote}</div>
           </div>
 
           <div className="secondary-stack">
@@ -523,8 +523,8 @@ export default function App() {
       </main>
 
       <footer className="footer-bar">
-        <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' · ') || uiText.en.noLlmConfigured}</div>
-        <div>{invalidCount ? uiText.en.casesNeedFixes(invalidCount) : testCases.length ? uiText.en.validationClear : uiText.en.noCasesGeneratedYet}</div>
+        <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' · ') || t.noLlmConfigured}</div>
+        <div>{invalidCount ? t.casesNeedFixes(invalidCount) : testCases.length ? t.validationClear : t.noCasesGeneratedYet}</div>
       </footer>
     </div>
   );

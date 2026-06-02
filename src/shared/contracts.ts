@@ -114,6 +114,22 @@ export interface ScopeConfluenceSection {
   body: string;
 }
 
+export interface ScopeAuthority {
+  type:
+    | 'main_jira_description'
+    | 'main_jira_acceptance_criteria'
+    | 'matched_prd_subsection'
+    | 'broad_prd_section'
+    | 'parent_story_jira'
+    | 'none';
+  title: string;
+  body: string;
+  reason: string;
+  quality: 'high' | 'medium' | 'low';
+  sourceIssueKey?: string;
+  pageId?: string;
+}
+
 export interface AcceptanceCriteriaDiagnostics {
   allIssueUserStories: ScopedItem[];
   allIssueCriteria: ScopedItem[];
@@ -127,6 +143,9 @@ export interface AcceptanceCriteriaDiagnostics {
   matchedPrdSubsectionHeading?: string;
   matchedPrdSubsectionConfidence?: number;
   userStoryFragmentsDiscardedCount?: number;
+  scopeQualifierDetected?: string;
+  scopeCandidatesRanked?: Array<{ heading: string; score: number; confidence: number }>;
+  scopeAnchorResolvedFromChain?: boolean;
   synthesisUsed?: boolean;
   synthesisReason?: string;
   rawAcceptanceCriteriaQuality?: 'none' | 'weak' | 'strong';
@@ -145,6 +164,7 @@ export interface QaContext {
   scopeParentIssue: LinkedIssueSummary | null;
   scopeParentRelation: string;
   scopeConfluenceSection: ScopeConfluenceSection | null;
+  scopeAuthority: ScopeAuthority;
   acceptanceCriteria: ScopedItem[];
   userStories: ScopedItem[];
   acceptanceCriteriaSource: string;

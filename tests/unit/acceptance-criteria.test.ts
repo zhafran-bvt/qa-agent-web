@@ -38,6 +38,19 @@ function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
       sourceIssueKey: 'ORB-2873',
       body: 'PRD support context only.',
     },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: '[FE] Integration API - Run Analysis with BVT Polygon Catchment Datasets',
+      body: `Tech Design:
+1. Goals
+- Mendukung dataset spatial_aggregation_type === "polygon" di Catchment Dataset (BY_DATASET mode).
+- Hasilkan payload Run Analysis dan Save Config yang konsisten — tiap polygon row → 1 location/marker.
+- MultiPolygon row tetap utuh sebagai satu entitas (1 location with geometry MultiPolygon), bukan di-explode.
+- Hidden: section catchment-type (radius/road-access) saat polygon dataset dipilih, karena tidak relevan.`,
+      reason: 'Main Jira requirements inferred from numbered description items.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3079',
+    },
     acceptanceCriteria: [
       { id: 'AC-1', text: 'Hidden: section catchment-type (radius/road-access) saat polygon dataset dipilih, karena tidak relevan.', source: 'ORB-3079 description' },
       { id: 'AC-2', text: 'Feature Flag isBVTDataForCatchmentEnabled (dari useAppFeatures) menggate seluruh polygon-catchment-dataset path:', source: 'ORB-3079 description' },
@@ -123,6 +136,14 @@ test('preserves strong explicit acceptance criteria through canonical synthesis'
       summary: '[FE] Integrate API - Filter Line Dataset by Admin Area',
       description: 'AC:\n1. Adm Area filter is required before Add Dataset button is enabled\n2. Adm Area filter follows the existing Global Area Filter sync',
     },
+    scopeAuthority: {
+      type: 'main_jira_acceptance_criteria',
+      title: '[FE] Integrate API - Filter Line Dataset by Admin Area',
+      body: 'AC-1. Adm Area filter is required before Add Dataset button is enabled\nAC-2. Adm Area filter follows the existing Global Area Filter sync',
+      reason: 'Main Jira ticket contains explicit acceptance criteria.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3118',
+    },
     acceptanceCriteria: [
       { id: 'AC-1', text: 'Adm Area filter is required before Add Dataset button is enabled', source: 'ORB-3118 description' },
       { id: 'AC-2', text: 'Adm Area filter follows the existing Global Area Filter sync', source: 'ORB-3118 description' },
@@ -150,4 +171,136 @@ test('preserves strong explicit acceptance criteria through canonical synthesis'
   );
   assert.equal(finalized.acceptanceCriteriaDiagnostics.synthesisUsed, true);
   assert.equal(finalized.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality, 'strong');
+});
+
+test('repairs over-merged thin-ticket PRD synthesis into medium-granularity criteria', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3157',
+    epic: 'AI Assistance',
+    mainIssue: {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - Generate executive summary for analysis results with no scoring',
+      description: '',
+    },
+    scopeParentIssue: { key: 'ORB-1248', summary: 'AI Assistance Summary Result', issueType: 'Story' },
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd',
+      anchor: 'AI-Assistance-Summary-Result',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body:
+        'AI Summary NO SCORE\nAcceptance Criteria\n1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.\n2. The no-score AI Summary uses an absolute profiling-based narrative and describes the area characteristics, defining signals, and zone type.\n3. The no-score AI Summary includes landmark context and environment risk indication.\n4. Strategic Takeaways remain available for the no-score variant.',
+    },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body:
+        'AI Summary NO SCORE\nAcceptance Criteria\n1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.\n2. The no-score AI Summary uses an absolute profiling-based narrative and describes the area characteristics, defining signals, and zone type.\n3. The no-score AI Summary includes landmark context and environment risk indication.\n4. Strategic Takeaways remain available for the no-score variant.',
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.', source: '950075398 AI Summary NO SCORE' },
+      { id: 'AC-2', text: 'The no-score AI Summary uses an absolute profiling-based narrative and describes the area characteristics, defining signals, and zone type.', source: '950075398 AI Summary NO SCORE' },
+      { id: 'AC-3', text: 'The no-score AI Summary includes landmark context and environment risk indication.', source: '950075398 AI Summary NO SCORE' },
+      { id: 'AC-4', text: 'Strategic Takeaways remain available for the no-score variant.', source: '950075398 AI Summary NO SCORE' },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      selectedAcceptanceCriteriaSource: 'parent_story_confluence_section',
+      selectedAcceptanceCriteriaReason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+      matchedPrdSubsectionHeading: 'AI Summary NO SCORE',
+      matchedPrdSubsectionConfidence: 1,
+      userStoryFragmentsDiscardedCount: 1,
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async (input) => {
+      assert.equal(input.targetMinCriteria, 4);
+      assert.equal(input.targetMaxCriteria, 6);
+      assert.match(input.granularityHint || '', /thin-ticket PRD subsection fallback/i);
+      return {
+        acceptanceCriteria: [
+          { id: 'AC-1', text: 'The AI Summary tab is available for analysis results with no score.' },
+          {
+            id: 'AC-2',
+            text:
+              'The no-score AI Summary uses an absolute profiling-based narrative instead of ranking-based scoring. General Summary describes the area characteristics, defining signals, and zone type. The no-score AI Summary includes landmark context and environment risk indication. Strategic Takeaways remain available for the no-score variant.',
+          },
+        ],
+      };
+    },
+  });
+
+  assert.equal(finalized.acceptanceCriteria.length, 5);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /General Summary/i.test(criterion.text)), true);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /Strategic Takeaways/i.test(criterion.text)), true);
+});
+
+test('repairs label-style over-merged thin-ticket PRD synthesis', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3157',
+    mainIssue: {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - Generate executive summary for analysis results with no scoring',
+      description: '',
+    },
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd',
+      anchor: 'AI-Assistance-Summary-Result',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body: 'Matched PRD subsection body.',
+    },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body: 'Matched PRD subsection body.',
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.', source: '950075398 AI Summary NO SCORE' },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async () => ({
+      acceptanceCriteria: [
+        { id: 'AC-1', text: 'Availability: The AI Summary tab is available for analysis results with no score. Narrative style: The output uses absolute profiling instead of ranking. Risk warnings: The summary includes landmark and environment risk information. Recommendations: Strategic Takeaways remain available for the no-score variant.' },
+      ],
+    }),
+  });
+
+  assert.equal(finalized.acceptanceCriteria.length, 4);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Availability:/i.test(criterion.text)), true);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Narrative style:/i.test(criterion.text)), true);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Risk warnings:/i.test(criterion.text)), true);
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Recommendations:/i.test(criterion.text)), true);
 });

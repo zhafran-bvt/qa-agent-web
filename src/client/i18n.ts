@@ -2,8 +2,8 @@ export type UiLanguage = 'en' | 'id';
 
 export const uiText = {
   en: {
-    heroTitle: 'BDD generation from Jira implementation scope',
-    heroSubtitle: 'Analyze scope, review generated cases, validate acceptance-criteria coverage, and push approved output to TestRail.',
+    heroTitle: 'Acceptance-criteria test case generator',
+    heroSubtitle: 'Resolve implementation scope from Jira, Story, and PRD; generate traceable happy-path, negative, and edge cases in BDD format; validate AC coverage; and push approved cases to TestRail.',
     authLabel: 'Atlassian',
     checking: 'Checking...',
     loggedInAs: (user: string) => `Logged in as ${user}`,
@@ -136,6 +136,16 @@ export const uiText = {
       qaPermissionRequired: 'QA permission is required before generation.',
       noConfidenceOverride: 'No confidence override is required.',
       scopeResolutionDetails: 'Scope Resolution Details',
+      scopeDiagnostics: 'Scope Diagnostics',
+      scopeAuthority: 'Scope authority',
+      scopeAuthorityTitle: 'Authority title',
+      thinTicketFallback: 'Thin-ticket fallback',
+      prdMatchQuality: 'PRD match quality',
+      matchedPrdHeading: 'Matched PRD heading',
+      discardedUserStoryFragments: 'Discarded story fragments',
+      yes: 'Yes',
+      no: 'No',
+      none: 'None',
       ignoredSource: (source: string) => `Ignored source: ${source}`,
       ignoredStoryMetadata: (label: string) => `Ignored story metadata: ${label}`,
       acceptanceCriteria: 'Acceptance Criteria',
@@ -160,6 +170,7 @@ export const uiText = {
       noScopedAcForRun: 'No scoped acceptance criteria detected for this run.',
       acceptanceCriteriaCovered: (covered: string, missing: string) =>
         `Acceptance criteria covered: ${covered}${missing ? ` · missing ${missing}` : ''}`,
+      acceptanceCriteriaCoveredNotEnforced: 'Acceptance criteria mapping: not enforced for this run.',
       coverageDetails: 'Coverage and traceability details',
       acCoverageEnforced: 'AC coverage is enforced for this run.',
       acCoverageNotEnforced: 'AC coverage is not enforced for this run.',
@@ -180,6 +191,8 @@ export const uiText = {
       traceabilityDetails: 'Traceability details',
       prdSection: 'PRD Section',
       noPrdSection: 'No scoped PRD section available.',
+      noAcMapping: 'No AC mapping',
+      acMappingNotEnforced: 'AC mapping not enforced',
       acceptanceCriteria: 'Acceptance Criteria',
       noResolvedAcceptanceCriteria: 'No resolved acceptance criteria evidence.',
       coverageNote: 'Coverage Note',
@@ -233,8 +246,8 @@ export const uiText = {
     },
   },
   id: {
-    heroTitle: 'Bikin BDD dari scope implementasi Jira',
-    heroSubtitle: 'Cek scope, review test case hasil generate, pastikan coverage AC aman, lalu push hasil yang sudah oke ke TestRail.',
+    heroTitle: 'Generator test case berbasis acceptance criteria',
+    heroSubtitle: 'Resolve scope implementasi dari Jira, Story, dan PRD; generate test case happy-path, negative, dan edge yang traceable dalam format BDD; validasi coverage AC; lalu push case yang sudah disetujui ke TestRail.',
     authLabel: 'Atlassian',
     checking: 'Lagi cek...',
     loggedInAs: (user: string) => `Login sebagai ${user}`,
@@ -367,6 +380,16 @@ export const uiText = {
       qaPermissionRequired: 'Butuh izin QA dulu sebelum generate.',
       noConfidenceOverride: 'Nggak perlu override confidence.',
       scopeResolutionDetails: 'Detail Resolusi Scope',
+      scopeDiagnostics: 'Diagnostik Scope',
+      scopeAuthority: 'Authority scope',
+      scopeAuthorityTitle: 'Judul authority',
+      thinTicketFallback: 'Fallback tiket tipis',
+      prdMatchQuality: 'Kualitas match PRD',
+      matchedPrdHeading: 'Heading PRD yang match',
+      discardedUserStoryFragments: 'Fragmen story yang dibuang',
+      yes: 'Ya',
+      no: 'Tidak',
+      none: 'Tidak ada',
       ignoredSource: (source: string) => `Sumber yang diabaikan: ${source}`,
       ignoredStoryMetadata: (label: string) => `Metadata story yang diabaikan: ${label}`,
       acceptanceCriteria: 'Acceptance Criteria',
@@ -391,6 +414,7 @@ export const uiText = {
       noScopedAcForRun: 'Run ini belum punya scoped acceptance criteria.',
       acceptanceCriteriaCovered: (covered: string, missing: string) =>
         `AC yang sudah ke-cover: ${covered}${missing ? ` · yang belum ${missing}` : ''}`,
+      acceptanceCriteriaCoveredNotEnforced: 'Mapping acceptance criteria: nggak diwajibkan untuk run ini.',
       coverageDetails: 'Detail coverage dan traceability',
       acCoverageEnforced: 'Coverage AC wajib untuk run ini.',
       acCoverageNotEnforced: 'Coverage AC nggak diwajibkan untuk run ini.',
@@ -411,6 +435,8 @@ export const uiText = {
       traceabilityDetails: 'Detail traceability',
       prdSection: 'Bagian PRD',
       noPrdSection: 'Belum ada scoped PRD section yang tersedia.',
+      noAcMapping: 'Belum ada mapping AC',
+      acMappingNotEnforced: 'Mapping AC nggak diwajibkan',
       acceptanceCriteria: 'Acceptance Criteria',
       noResolvedAcceptanceCriteria: 'Belum ada evidence acceptance criteria yang kebaca.',
       coverageNote: 'Catatan Coverage',
@@ -463,4 +489,11 @@ export const uiText = {
         `Kandidat baru digenerate pakai ${provider} / ${model}. Cek diff dulu sebelum diganti.`,
     },
   },
-} as const;
+};
+
+// Compile-time parity guard: the `id` locale must structurally match `en`, so a
+// missing or renamed key surfaces as a type error here instead of silently
+// rendering `undefined` when the UI language is switched at runtime.
+type UiStrings = (typeof uiText)['en'];
+const _idLocaleParity: UiStrings = uiText.id;
+void _idLocaleParity;

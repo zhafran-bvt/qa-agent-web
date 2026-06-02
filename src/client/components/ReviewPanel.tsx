@@ -17,14 +17,23 @@ function listToInput(value: string[] | undefined): string {
   return Array.isArray(value) ? value.join(', ') : '';
 }
 
-function evidenceSummary(testCase: GeneratedTestCase, lang: UiLanguage): string {
+function evidenceSummary(testCase: GeneratedTestCase, coverageEnforced: boolean, lang: UiLanguage): string {
   const t = uiText[lang].review;
   const criteria = testCase.evidence.acceptanceCriteria || [];
   const ids = criteria.map((criterion) => criterion.id).join(', ');
-  return [testCase.evidence.prdSectionTitle || t.noPrdSection, ids ? `AC: ${ids}` : 'No AC mapping'].join(' · ');
+  return [
+    testCase.evidence.prdSectionTitle || t.noPrdSection,
+    ids ? `AC: ${ids}` : coverageEnforced ? t.noAcMapping : t.acMappingNotEnforced,
+  ].join(' · ');
 }
 
-function generatedSummaryText(testCases: GeneratedTestCase[], coverage: CoverageSummary | null, context: QaContext | null, lang: UiLanguage): string[] {
+function generatedSummaryText(
+  testCases: GeneratedTestCase[],
+  coverage: CoverageSummary | null,
+  context: QaContext | null,
+  coverageEnforced: boolean,
+  lang: UiLanguage
+): string[] {
   const t = uiText[lang].review;
   if (!testCases.length) return [t.noGeneratedCasesYet];
 
@@ -45,7 +54,9 @@ function generatedSummaryText(testCases: GeneratedTestCase[], coverage: Coverage
     t.generatedCases(testCases.length),
     typeSummary ? t.typeMix(typeSummary) : '',
     context?.acceptanceCriteria.length
-      ? t.acceptanceCriteriaCovered(covered.length ? covered.join(', ') : 'none', missing.join(', '))
+      ? coverageEnforced
+        ? t.acceptanceCriteriaCovered(covered.length ? covered.join(', ') : 'none', missing.join(', '))
+        : t.acceptanceCriteriaCoveredNotEnforced
       : t.noScopedAcForRun,
   ].filter(Boolean);
 }
@@ -113,7 +124,7 @@ export function ReviewPanel({
       </div>
 
       <div className="summary summary-generated">
-        {generatedSummaryText(testCases, coverage, context, lang).map((line) => (
+        {generatedSummaryText(testCases, coverage, context, coverageEnforced, lang).map((line) => (
           <div key={line}>{line}</div>
         ))}
       </div>
@@ -134,17 +145,22 @@ export function ReviewPanel({
             <article className="case-card" key={testCase.id || index}>
               <div className="case-header">
                 <div className="case-title-block">
-                  <div className="case-id">{testCase.id}</div>
+                  <div className="case-title-meta">
+                    <div className="case-id">{testCase.id}</div>
+                    <div className="case-reference">{evidenceSummary(testCase, coverageEnforced, lang)}</div>
+                  </div>
                   <div className="case-status">{validationEntry?.valid ? t.valid : t.needsFixesShort}</div>
                 </div>
-                <div className="case-reference">{evidenceSummary(testCase, lang)}</div>
               </div>
 
-              <div className="case-grid">
+              <div className="case-grid case-grid-title">
                 <label className="field">
                   <span>{t.titleLabel}</span>
                   <input value={testCase.title} onChange={(event) => onCaseChange(index, 'title', event.target.value)} />
                 </label>
+              </div>
+
+              <div className="case-grid case-grid-meta">
                 <label className="field">
                   <span>{t.typeLabel}</span>
                   <input value={testCase.type} onChange={(event) => onCaseChange(index, 'type', event.target.value)} />
@@ -155,23 +171,24 @@ export function ReviewPanel({
                 </label>
               </div>
 
-              <div className="case-grid two-col">
-                <label className="field">
-                  <span>{t.coversAc}</span>
-                  <input value={listToInput(testCase.coversAcceptanceCriteria)} readOnly className="readonly-input" />
-                </label>
-                <label className="field">
-                  <span>{t.sourceScope}</span>
-                  <input value={listToInput(testCase.sourceScope)} readOnly className="readonly-input" />
-                </label>
-              </div>
-
               <details className="evidence-panel">
                 <summary className="evidence-summary">{t.traceabilityDetails}</summary>
                 <div className="evidence-content">
+                  <div className="evidence-grid">
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.coversAc}</span>
+                      <div className="readonly-block">{listToInput(testCase.coversAcceptanceCriteria) || t.noAcMapping}</div>
+                    </div>
+
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.sourceScope}</span>
+                      <div className="readonly-block">{listToInput(testCase.sourceScope) || '-'}</div>
+                    </div>
+                  </div>
+
                   <div className="evidence-row">
                     <span className="evidence-label">{t.prdSection}</span>
-                    <div>{testCase.evidence.prdSectionTitle || t.noPrdSection}</div>
+                    <div className="readonly-block">{testCase.evidence.prdSectionTitle || t.noPrdSection}</div>
                   </div>
 
                   <div className="evidence-row">
@@ -206,17 +223,20 @@ export function ReviewPanel({
 
               <label className="field">
                 <span>{t.preconditions}</span>
-                <textarea value={testCase.preconditions} onChange={(event) => onCaseChange(index, 'preconditions', event.target.value)} />
+                <textarea className="review-textarea" value={testCase.preconditions} onChange={(event) => onCaseChange(index, 'preconditions', event.target.value)} />
               </label>
 
               <label className="field">
                 <span>{t.bddScenario}</span>
-                <textarea className="code-area" value={testCase.bddScenario} onChange={(event) => onCaseChange(index, 'bddScenario', event.target.value)} />
+                <textarea className="code-area review-textarea" value={testCase.bddScenario} onChange={(event) => onCaseChange(index, 'bddScenario', event.target.value)} />
               </label>
 
-              <div className={`validation-box ${validationEntry?.valid ? 'validation-ok' : 'validation-error'}`}>
-                {validationEntry?.valid ? t.valid : validationEntry?.errors.join('\n')}
-              </div>
+              {!validationEntry?.valid ? (
+                <div className="validation-row">
+                  <div className="validation-chip validation-error">{t.needsFixesShort}</div>
+                  <div className="validation-detail">{validationEntry.errors.join('\n')}</div>
+                </div>
+              ) : null}
             </article>
           );
         })}
