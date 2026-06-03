@@ -7,6 +7,7 @@ export interface LlmProviderStatus {
 export interface ConfigResponse {
   authenticated: boolean;
   user?: string | null;
+  accountId?: string | null;
   session?: {
     expiresAt?: number | null;
     selectedResource?: {
@@ -385,12 +386,21 @@ export interface WorkflowHistoryDetailResponse {
 export interface DiagnosticsResponse {
   auth: {
     configured: boolean;
+    accountId?: string | null;
     selectedResource: {
       cloudId: string;
       url?: string | null;
       name?: string | null;
     } | null;
     sessionExpiresAt?: number | null;
+  };
+  privacy: {
+    enabled: boolean;
+    storedAccountCount: number;
+    dueAccountCount: number;
+    lastSuccessfulRunAt?: number | null;
+    lastRunError?: string | null;
+    lastCyclePeriodDays?: number | null;
   };
   persistence: {
     mode: 'postgres' | 'file+memory-fallback';

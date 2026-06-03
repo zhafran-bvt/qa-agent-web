@@ -20,8 +20,30 @@ export interface SessionRecord {
   resources: AccessibleResource[];
   selectedResource?: AccessibleResource | null;
   user: string;
+  accountId?: string | null;
+  displayName?: string | null;
+  personalDataRetrievedAt?: number | null;
   createdAt: number;
   expiresAt?: number | null;
+}
+
+export interface PrivacyReportingAccount {
+  accountId: string;
+  displayName?: string | null;
+  retrievedAt: number;
+}
+
+export interface PrivacyReportingSession {
+  sid: string;
+  session: SessionRecord;
+}
+
+export interface PrivacyReportingStatus {
+  storedAccountCount: number;
+  dueAccountCount: number;
+  lastSuccessfulRunAt?: number | null;
+  lastRunError?: string | null;
+  lastCyclePeriodDays?: number | null;
 }
 
 export interface PersistenceDiagnostics {
@@ -65,6 +87,18 @@ export interface Persistence {
   getSession(sid: string): Promise<SessionRecord | null>;
   setSession(sid: string, session: SessionRecord): Promise<void>;
   deleteSession(sid: string): Promise<void>;
+  getPrivacyReportingSession(): Promise<PrivacyReportingSession | null>;
+  getPrivacyReportingSessionForAccount(accountId: string): Promise<PrivacyReportingSession | null>;
+  listPrivacyReportingAccountsDue(now: number, defaultCycleDays: number, limit: number): Promise<PrivacyReportingAccount[]>;
+  recordPrivacyReportingRun(input: {
+    reportedAt: number;
+    cyclePeriodDays: number;
+    results: Array<{ accountId: string; ageSeconds: number; status: 'ok' | 'closed' | 'updated' }>;
+  }): Promise<void>;
+  recordPrivacyReportingRunError(message: string, occurredAt: number): Promise<void>;
+  erasePersonalDataForAccount(accountId: string): Promise<{ sessionsDeleted: number }>;
+  refreshPersonalDataForAccount(accountId: string, updates: { displayName?: string | null; retrievedAt: number }): Promise<{ sessionsUpdated: number }>;
+  getPrivacyReportingStatus(defaultCycleDays: number, now: number): Promise<PrivacyReportingStatus>;
   appendAudit(event: Record<string, unknown>): Promise<void>;
   createAnalysisRun(input: { jiraKey: string; user: string; context: QaContext }): Promise<string | null>;
   createGeneratedRun(input: StoredGenerationRunInput): Promise<string | null>;
@@ -147,6 +181,42 @@ class ResilientPersistence implements Persistence {
     return this.active.deleteSession(sid);
   }
 
+  getPrivacyReportingSession(): Promise<PrivacyReportingSession | null> {
+    return this.active.getPrivacyReportingSession();
+  }
+
+  getPrivacyReportingSessionForAccount(accountId: string): Promise<PrivacyReportingSession | null> {
+    return this.active.getPrivacyReportingSessionForAccount(accountId);
+  }
+
+  listPrivacyReportingAccountsDue(now: number, defaultCycleDays: number, limit: number): Promise<PrivacyReportingAccount[]> {
+    return this.active.listPrivacyReportingAccountsDue(now, defaultCycleDays, limit);
+  }
+
+  recordPrivacyReportingRun(input: {
+    reportedAt: number;
+    cyclePeriodDays: number;
+    results: Array<{ accountId: string; ageSeconds: number; status: 'ok' | 'closed' | 'updated' }>;
+  }): Promise<void> {
+    return this.active.recordPrivacyReportingRun(input);
+  }
+
+  recordPrivacyReportingRunError(message: string, occurredAt: number): Promise<void> {
+    return this.active.recordPrivacyReportingRunError(message, occurredAt);
+  }
+
+  erasePersonalDataForAccount(accountId: string): Promise<{ sessionsDeleted: number }> {
+    return this.active.erasePersonalDataForAccount(accountId);
+  }
+
+  refreshPersonalDataForAccount(accountId: string, updates: { displayName?: string | null; retrievedAt: number }): Promise<{ sessionsUpdated: number }> {
+    return this.active.refreshPersonalDataForAccount(accountId, updates);
+  }
+
+  getPrivacyReportingStatus(defaultCycleDays: number, now: number): Promise<PrivacyReportingStatus> {
+    return this.active.getPrivacyReportingStatus(defaultCycleDays, now);
+  }
+
   appendAudit(event: Record<string, unknown>): Promise<void> {
     return this.active.appendAudit(event);
   }
@@ -183,6 +253,9 @@ class ResilientPersistence implements Persistence {
 class FileBackedPersistence implements Persistence {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly oauthStates = new Map<string, number>();
+  private readonly privacyStates = new Map<string, { lastReportedAt: number; lastCyclePeriodDays: number; lastStatus: 'ok' | 'closed' | 'updated'; lastReportedAgeSeconds: number }>();
+  private lastPrivacyRunAt: number | null = null;
+  private lastPrivacyRunError: string | null = null;
 
   constructor(private readonly auditFile: string, private readonly logger: Logger) {}
 
@@ -217,6 +290,103 @@ class FileBackedPersistence implements Persistence {
 
   async deleteSession(sid: string): Promise<void> {
     this.sessions.delete(sid);
+  }
+
+  async getPrivacyReportingSession(): Promise<PrivacyReportingSession | null> {
+    for (const [sid, session] of this.sessions.entries()) {
+      if (session.accountId && session.refreshToken) return { sid, session };
+    }
+    return null;
+  }
+
+  async getPrivacyReportingSessionForAccount(accountId: string): Promise<PrivacyReportingSession | null> {
+    for (const [sid, session] of this.sessions.entries()) {
+      if (session.accountId === accountId && session.refreshToken) return { sid, session };
+    }
+    return null;
+  }
+
+  async listPrivacyReportingAccountsDue(now: number, defaultCycleDays: number, limit: number): Promise<PrivacyReportingAccount[]> {
+    const accounts = new Map<string, PrivacyReportingAccount>();
+    for (const session of this.sessions.values()) {
+      if (!session.accountId) continue;
+      const retrievedAt = session.personalDataRetrievedAt || session.createdAt;
+      const existing = accounts.get(session.accountId);
+      if (!existing || retrievedAt < existing.retrievedAt) {
+        accounts.set(session.accountId, {
+          accountId: session.accountId,
+          displayName: session.displayName || session.user || null,
+          retrievedAt,
+        });
+      }
+    }
+    return Array.from(accounts.values())
+      .filter((account) => {
+        const state = this.privacyStates.get(account.accountId);
+        if (!state) return true;
+        return state.lastReportedAt + state.lastCyclePeriodDays * 86_400_000 <= now;
+      })
+      .sort((a, b) => a.retrievedAt - b.retrievedAt)
+      .slice(0, Math.max(1, limit));
+  }
+
+  async recordPrivacyReportingRun(input: {
+    reportedAt: number;
+    cyclePeriodDays: number;
+    results: Array<{ accountId: string; ageSeconds: number; status: 'ok' | 'closed' | 'updated' }>;
+  }): Promise<void> {
+    for (const result of input.results) {
+      this.privacyStates.set(result.accountId, {
+        lastReportedAt: input.reportedAt,
+        lastCyclePeriodDays: input.cyclePeriodDays,
+        lastStatus: result.status,
+        lastReportedAgeSeconds: result.ageSeconds,
+      });
+    }
+    this.lastPrivacyRunAt = input.reportedAt;
+    this.lastPrivacyRunError = null;
+  }
+
+  async recordPrivacyReportingRunError(message: string, occurredAt: number): Promise<void> {
+    this.lastPrivacyRunAt = occurredAt;
+    this.lastPrivacyRunError = message;
+  }
+
+  async erasePersonalDataForAccount(accountId: string): Promise<{ sessionsDeleted: number }> {
+    let sessionsDeleted = 0;
+    for (const [sid, session] of this.sessions.entries()) {
+      if (session.accountId === accountId) {
+        this.sessions.delete(sid);
+        sessionsDeleted += 1;
+      }
+    }
+    return { sessionsDeleted };
+  }
+
+  async refreshPersonalDataForAccount(accountId: string, updates: { displayName?: string | null; retrievedAt: number }): Promise<{ sessionsUpdated: number }> {
+    let sessionsUpdated = 0;
+    for (const session of this.sessions.values()) {
+      if (session.accountId !== accountId) continue;
+      session.displayName = updates.displayName || session.displayName || session.user;
+      session.user = updates.displayName || session.user;
+      session.personalDataRetrievedAt = updates.retrievedAt;
+      sessionsUpdated += 1;
+    }
+    return { sessionsUpdated };
+  }
+
+  async getPrivacyReportingStatus(defaultCycleDays: number, now: number): Promise<PrivacyReportingStatus> {
+    const storedAccountCount = new Set(Array.from(this.sessions.values()).map((session) => session.accountId).filter(Boolean)).size;
+    const dueAccountCount = (await this.listPrivacyReportingAccountsDue(now, defaultCycleDays, 10_000)).length;
+    return {
+      storedAccountCount,
+      dueAccountCount,
+      lastSuccessfulRunAt: this.lastPrivacyRunError ? null : this.lastPrivacyRunAt,
+      lastRunError: this.lastPrivacyRunError,
+      lastCyclePeriodDays: this.privacyStates.size
+        ? Math.max(...Array.from(this.privacyStates.values()).map((state) => state.lastCyclePeriodDays))
+        : defaultCycleDays,
+    };
   }
 
   async appendAudit(event: Record<string, unknown>): Promise<void> {
@@ -360,7 +530,7 @@ class PostgresPersistence implements Persistence {
 
   async getSession(sid: string): Promise<SessionRecord | null> {
     const result = await this.pool.query(
-      `SELECT access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, created_at, expires_at
+      `SELECT access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, account_id, display_name, personal_data_retrieved_at, created_at, expires_at
        FROM sessions
        WHERE sid = $1`,
       [sid]
@@ -374,6 +544,9 @@ class PostgresPersistence implements Persistence {
       resources: Array.isArray(row.resources_json) ? row.resources_json : [],
       selectedResource: row.selected_resource_json || null,
       user: row.user_name,
+      accountId: row.account_id || null,
+      displayName: row.display_name || null,
+      personalDataRetrievedAt: row.personal_data_retrieved_at ? Number(row.personal_data_retrieved_at) : null,
       createdAt: Number(row.created_at),
       expiresAt: row.expires_at ? Number(row.expires_at) : null,
     };
@@ -382,9 +555,9 @@ class PostgresPersistence implements Persistence {
   async setSession(sid: string, session: SessionRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO sessions (
-         sid, access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, created_at, expires_at, updated_at
+         sid, access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, account_id, display_name, personal_data_retrieved_at, created_at, expires_at, updated_at
        )
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, NOW())
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12, NOW())
        ON CONFLICT (sid) DO UPDATE SET
          access_token = EXCLUDED.access_token,
          refresh_token = EXCLUDED.refresh_token,
@@ -392,6 +565,9 @@ class PostgresPersistence implements Persistence {
          resources_json = EXCLUDED.resources_json,
          selected_resource_json = EXCLUDED.selected_resource_json,
          user_name = EXCLUDED.user_name,
+         account_id = EXCLUDED.account_id,
+         display_name = EXCLUDED.display_name,
+         personal_data_retrieved_at = EXCLUDED.personal_data_retrieved_at,
          created_at = EXCLUDED.created_at,
          expires_at = EXCLUDED.expires_at,
          updated_at = NOW()`,
@@ -403,6 +579,9 @@ class PostgresPersistence implements Persistence {
         JSON.stringify(session.resources || []),
         JSON.stringify(session.selectedResource || null),
         session.user,
+        session.accountId || null,
+        session.displayName || null,
+        session.personalDataRetrievedAt || session.createdAt,
         session.createdAt,
         session.expiresAt || null,
       ]
@@ -411,6 +590,191 @@ class PostgresPersistence implements Persistence {
 
   async deleteSession(sid: string): Promise<void> {
     await this.pool.query(`DELETE FROM sessions WHERE sid = $1`, [sid]);
+  }
+
+  async getPrivacyReportingSession(): Promise<PrivacyReportingSession | null> {
+    const result = await this.pool.query(
+      `SELECT sid, access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, account_id, display_name, personal_data_retrieved_at, created_at, expires_at
+       FROM sessions
+       WHERE account_id IS NOT NULL
+         AND refresh_token IS NOT NULL
+       ORDER BY updated_at DESC
+       LIMIT 1`
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      sid: row.sid,
+      session: {
+        accessToken: row.access_token,
+        refreshToken: row.refresh_token || undefined,
+        cloudId: row.cloud_id,
+        resources: Array.isArray(row.resources_json) ? row.resources_json : [],
+        selectedResource: row.selected_resource_json || null,
+        user: row.user_name,
+        accountId: row.account_id || null,
+        displayName: row.display_name || null,
+        personalDataRetrievedAt: row.personal_data_retrieved_at ? Number(row.personal_data_retrieved_at) : null,
+        createdAt: Number(row.created_at),
+        expiresAt: row.expires_at ? Number(row.expires_at) : null,
+      },
+    };
+  }
+
+  async getPrivacyReportingSessionForAccount(accountId: string): Promise<PrivacyReportingSession | null> {
+    const result = await this.pool.query(
+      `SELECT sid, access_token, refresh_token, cloud_id, resources_json, selected_resource_json, user_name, account_id, display_name, personal_data_retrieved_at, created_at, expires_at
+       FROM sessions
+       WHERE account_id = $1
+         AND refresh_token IS NOT NULL
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [accountId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      sid: row.sid,
+      session: {
+        accessToken: row.access_token,
+        refreshToken: row.refresh_token || undefined,
+        cloudId: row.cloud_id,
+        resources: Array.isArray(row.resources_json) ? row.resources_json : [],
+        selectedResource: row.selected_resource_json || null,
+        user: row.user_name,
+        accountId: row.account_id || null,
+        displayName: row.display_name || null,
+        personalDataRetrievedAt: row.personal_data_retrieved_at ? Number(row.personal_data_retrieved_at) : null,
+        createdAt: Number(row.created_at),
+        expiresAt: row.expires_at ? Number(row.expires_at) : null,
+      },
+    };
+  }
+
+  async listPrivacyReportingAccountsDue(now: number, defaultCycleDays: number, limit: number): Promise<PrivacyReportingAccount[]> {
+    const result = await this.pool.query(
+      `SELECT
+         s.account_id,
+         MAX(COALESCE(s.display_name, s.user_name)) AS display_name,
+         MIN(COALESCE(s.personal_data_retrieved_at, s.created_at)) AS retrieved_at
+       FROM sessions s
+       LEFT JOIN privacy_report_state prs ON prs.account_id = s.account_id
+       WHERE s.account_id IS NOT NULL
+         AND (
+           prs.last_reported_at IS NULL
+           OR prs.last_reported_at + (COALESCE(prs.last_cycle_period_days, $2) * INTERVAL '1 day') <= to_timestamp($1 / 1000.0)
+         )
+       GROUP BY s.account_id
+       ORDER BY MIN(COALESCE(s.personal_data_retrieved_at, s.created_at)) ASC
+       LIMIT $3`,
+      [now, defaultCycleDays, Math.max(1, limit)]
+    );
+    return result.rows.map((row) => ({
+      accountId: row.account_id,
+      displayName: row.display_name || null,
+      retrievedAt: Number(row.retrieved_at),
+    }));
+  }
+
+  async recordPrivacyReportingRun(input: {
+    reportedAt: number;
+    cyclePeriodDays: number;
+    results: Array<{ accountId: string; ageSeconds: number; status: 'ok' | 'closed' | 'updated' }>;
+  }): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const result of input.results) {
+        await client.query(
+          `INSERT INTO privacy_report_state (
+             account_id, last_reported_at, last_reported_age_seconds, last_action_required, last_cycle_period_days, updated_at
+           )
+           VALUES ($1, to_timestamp($2 / 1000.0), $3, $4, $5, NOW())
+           ON CONFLICT (account_id) DO UPDATE SET
+             last_reported_at = EXCLUDED.last_reported_at,
+             last_reported_age_seconds = EXCLUDED.last_reported_age_seconds,
+             last_action_required = EXCLUDED.last_action_required,
+             last_cycle_period_days = EXCLUDED.last_cycle_period_days,
+             updated_at = NOW()`,
+          [result.accountId, input.reportedAt, result.ageSeconds, result.status === 'ok' ? null : result.status, input.cyclePeriodDays]
+        );
+      }
+      await client.query(
+        `INSERT INTO privacy_reporting_meta (meta_key, meta_value_json, updated_at)
+         VALUES ('last_run', $1::jsonb, NOW())
+         ON CONFLICT (meta_key) DO UPDATE SET meta_value_json = EXCLUDED.meta_value_json, updated_at = NOW()`,
+        [
+          JSON.stringify({
+            lastSuccessfulRunAt: input.reportedAt,
+            lastRunError: null,
+            lastCyclePeriodDays: input.cyclePeriodDays,
+          }),
+        ]
+      );
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordPrivacyReportingRunError(message: string, occurredAt: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO privacy_reporting_meta (meta_key, meta_value_json, updated_at)
+       VALUES ('last_run', $1::jsonb, NOW())
+       ON CONFLICT (meta_key) DO UPDATE SET meta_value_json = EXCLUDED.meta_value_json, updated_at = NOW()`,
+      [
+        JSON.stringify({
+          lastSuccessfulRunAt: null,
+          lastRunError: message,
+          lastErrorAt: occurredAt,
+        }),
+      ]
+    );
+  }
+
+  async erasePersonalDataForAccount(accountId: string): Promise<{ sessionsDeleted: number }> {
+    const result = await this.pool.query(`DELETE FROM sessions WHERE account_id = $1`, [accountId]);
+    return { sessionsDeleted: result.rowCount || 0 };
+  }
+
+  async refreshPersonalDataForAccount(accountId: string, updates: { displayName?: string | null; retrievedAt: number }): Promise<{ sessionsUpdated: number }> {
+    const result = await this.pool.query(
+      `UPDATE sessions
+       SET display_name = COALESCE($2, display_name),
+           user_name = COALESCE($2, user_name),
+           personal_data_retrieved_at = $3,
+           updated_at = NOW()
+       WHERE account_id = $1`,
+      [accountId, updates.displayName || null, updates.retrievedAt]
+    );
+    return { sessionsUpdated: result.rowCount || 0 };
+  }
+
+  async getPrivacyReportingStatus(defaultCycleDays: number, now: number): Promise<PrivacyReportingStatus> {
+    const storedResult = await this.pool.query(`SELECT COUNT(DISTINCT account_id)::integer AS count FROM sessions WHERE account_id IS NOT NULL`);
+    const dueResult = await this.pool.query(
+      `SELECT COUNT(DISTINCT s.account_id)::integer AS count
+       FROM sessions s
+       LEFT JOIN privacy_report_state prs ON prs.account_id = s.account_id
+       WHERE s.account_id IS NOT NULL
+         AND (
+           prs.last_reported_at IS NULL
+           OR prs.last_reported_at + (COALESCE(prs.last_cycle_period_days, $2) * INTERVAL '1 day') <= to_timestamp($1 / 1000.0)
+         )`,
+      [now, defaultCycleDays]
+    );
+    const metaResult = await this.pool.query(`SELECT meta_value_json FROM privacy_reporting_meta WHERE meta_key = 'last_run'`);
+    const meta = (metaResult.rows[0]?.meta_value_json || {}) as Record<string, unknown>;
+    return {
+      storedAccountCount: storedResult.rows[0]?.count || 0,
+      dueAccountCount: dueResult.rows[0]?.count || 0,
+      lastSuccessfulRunAt: typeof meta.lastSuccessfulRunAt === 'number' ? meta.lastSuccessfulRunAt : null,
+      lastRunError: typeof meta.lastRunError === 'string' ? meta.lastRunError : null,
+      lastCyclePeriodDays: typeof meta.lastCyclePeriodDays === 'number' ? meta.lastCyclePeriodDays : defaultCycleDays,
+    };
   }
 
   async appendAudit(event: Record<string, unknown>): Promise<void> {

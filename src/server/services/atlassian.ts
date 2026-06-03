@@ -25,6 +25,27 @@ export interface AccessibleResource {
   url?: string;
 }
 
+export interface AtlassianCurrentUserProfile {
+  accountId: string;
+  displayName: string;
+  email?: string;
+}
+
+export interface PersonalDataReportRequestAccount {
+  accountId: string;
+  updatedAt: string;
+}
+
+export interface PersonalDataReportResultAccount {
+  accountId: string;
+  status: 'ok' | 'closed' | 'updated';
+}
+
+export interface PersonalDataReportResponse {
+  accounts: PersonalDataReportResultAccount[];
+  cyclePeriodDays: number | null;
+}
+
 export interface SimplifiedIssue {
   key: string;
   id?: string;
@@ -84,6 +105,53 @@ function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknow
           }
           const errorBody = parsedBody as { error_description?: string; error?: string };
           const error = new Error(errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`) as Error & {
+            statusCode?: number;
+          };
+          error.statusCode = res.statusCode;
+          reject(error);
+        });
+      }
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+function requestJsonWithHeaders<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const payload = body ? JSON.stringify(body) : null;
+    const req = https.request(
+      {
+        hostname: parsed.hostname,
+        path: `${parsed.pathname}${parsed.search}`,
+        method: options.method || 'GET',
+        headers: {
+          Accept: 'application/json',
+          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...(options.headers || {}),
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          let parsedBody: unknown = {};
+          try {
+            parsedBody = data ? JSON.parse(data) : {};
+          } catch {
+            reject(new Error(`Invalid JSON from ${url}: ${data.slice(0, 500)}`));
+            return;
+          }
+          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
+            resolve({ body: parsedBody as T, headers: res.headers, statusCode: res.statusCode || 200 });
+            return;
+          }
+          const errorBody = parsedBody as { error_description?: string; error?: string; errorMessage?: string };
+          const error = new Error(errorBody.errorMessage || errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`) as Error & {
             statusCode?: number;
           };
           error.statusCode = res.statusCode;
@@ -163,6 +231,48 @@ export async function getAccessibleResources(accessToken: string): Promise<Acces
   return requestJson<AccessibleResource[]>(`${ATLASSIAN_API_BASE}/oauth/token/accessible-resources`, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
+}
+
+export async function getCurrentUserProfile(accessToken: string): Promise<AtlassianCurrentUserProfile> {
+  const body = await requestJson<Record<string, unknown>>(`${ATLASSIAN_API_BASE}/me`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  return {
+    accountId: String(body.account_id || ''),
+    displayName: String(body.name || body.nickname || body.email || body.account_id || ''),
+    email: typeof body.email === 'string' ? body.email : undefined,
+  };
+}
+
+export async function reportPersonalData(accessToken: string, accounts: PersonalDataReportRequestAccount[]): Promise<PersonalDataReportResponse> {
+  const response = await requestJsonWithHeaders<{ accounts?: Array<{ accountId?: string; status?: string }> }>(
+    `${ATLASSIAN_API_BASE}/app/report-accounts/`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+    { accounts }
+  );
+
+  const cycleHeader = response.headers['cycle-period'];
+  const cycleValue = Array.isArray(cycleHeader) ? cycleHeader[0] : cycleHeader;
+  const parsedCycleDays = Number.parseInt(String(cycleValue || ''), 10);
+  const cyclePeriodDays = Number.isFinite(parsedCycleDays) && parsedCycleDays > 0 ? parsedCycleDays : null;
+
+  const resultAccounts = accounts.map((input) => {
+    const matched = Array.isArray(response.body.accounts)
+      ? response.body.accounts.find((candidate) => String(candidate.accountId || '') === input.accountId)
+      : null;
+    const rawStatus = String(matched?.status || '').toLowerCase();
+    const status: 'ok' | 'closed' | 'updated' =
+      rawStatus === 'closed' ? 'closed' : rawStatus === 'updated' ? 'updated' : 'ok';
+    return { accountId: input.accountId, status };
+  });
+
+  return {
+    accounts: resultAccounts,
+    cyclePeriodDays,
+  };
 }
 
 export function extractText(value: unknown): string {

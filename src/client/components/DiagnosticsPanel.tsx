@@ -37,6 +37,16 @@ export function DiagnosticsPanel({ diagnostics, lang }: DiagnosticsPanelProps) {
                   : t.noActiveSession}
               </div>
             </div>
+            <div className="context-item">
+              <span className="context-label">{t.privacy}</span>
+              <div className="context-value">
+                {t.privacySummary(
+                  diagnostics.privacy.storedAccountCount,
+                  diagnostics.privacy.dueAccountCount,
+                  diagnostics.privacy.lastCyclePeriodDays || 7
+                )}
+              </div>
+            </div>
           </div>
 
           <div className="summary">

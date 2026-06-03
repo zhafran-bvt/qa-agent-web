@@ -7,6 +7,7 @@ import {
   AtlassianClient,
   buildAuthUrl,
   exchangeCode,
+  getCurrentUserProfile,
   getAccessibleResources,
   refreshAccessToken,
   type AccessibleResource,
@@ -14,6 +15,7 @@ import {
 import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
 import { generateTestCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
+import { startPrivacyReportingLoop } from './services/privacy';
 import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
@@ -49,6 +51,8 @@ function normalizeAtlassianScopes(rawScopes: string): string {
     'read:page:confluence',
     'read:confluence-content.all',
     'read:confluence-space.summary',
+    'read:me',
+    'report:personal-data',
     'offline_access',
   ];
   const present = new Set(
@@ -210,6 +214,12 @@ async function refreshSessionToken(sid: string, session: SessionRecord, log = lo
   }
   const refreshed = await refreshAccessToken(config.atlassian, current.refreshToken);
   const resources = await getAccessibleResources(refreshed.access_token);
+  let profile: Awaited<ReturnType<typeof getCurrentUserProfile>> | null = null;
+  try {
+    profile = await getCurrentUserProfile(refreshed.access_token);
+  } catch (error) {
+    log.warn('auth.atlassian.profile_refresh_unavailable', errorDetails(error));
+  }
   const selectedResource = choosePrimaryResource(resources) || current.selectedResource || null;
   const updated: SessionRecord = {
     ...current,
@@ -218,6 +228,10 @@ async function refreshSessionToken(sid: string, session: SessionRecord, log = lo
     cloudId: selectedResource?.id || current.cloudId,
     resources,
     selectedResource,
+    user: profile?.displayName || current.user,
+    accountId: profile?.accountId || current.accountId || null,
+    displayName: profile?.displayName || current.displayName || current.user,
+    personalDataRetrievedAt: profile ? Date.now() : current.personalDataRetrievedAt || current.createdAt,
     expiresAt: refreshed.expires_in ? Date.now() + refreshed.expires_in * 1000 : current.expiresAt || null,
   };
   await persistence.setSession(sid, updated);
@@ -318,6 +332,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const body: ConfigResponse = {
       authenticated: Boolean(session),
       user: session?.user || null,
+      accountId: session?.accountId || null,
       session: session
         ? {
             expiresAt: session.expiresAt || null,
@@ -368,6 +383,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const body: DiagnosticsResponse = {
       auth: {
         configured: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
+        accountId: session?.accountId || null,
         selectedResource: session?.selectedResource
           ? {
               cloudId: session.selectedResource.id,
@@ -376,6 +392,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
             }
           : null,
         sessionExpiresAt: session?.expiresAt || null,
+      },
+      privacy: {
+        enabled: Boolean(process.env.PRIVACY_REPORTING_ENABLED !== 'false'),
+        ...(await persistence.getPrivacyReportingStatus(Number(process.env.PRIVACY_REPORTING_DEFAULT_CYCLE_DAYS || 7), Date.now())),
       },
       persistence: persistence.getDiagnostics(),
       readiness: {
@@ -766,6 +786,12 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
     });
     log.debug('auth.atlassian.accessible_resources.start');
     const resources = await getAccessibleResources(token.access_token);
+    let profile: Awaited<ReturnType<typeof getCurrentUserProfile>> | null = null;
+    try {
+      profile = await getCurrentUserProfile(token.access_token);
+    } catch (error) {
+      log.warn('auth.atlassian.profile_unavailable', errorDetails(error));
+    }
     log.info('auth.atlassian.accessible_resources.complete', {
       resourceCount: resources.length,
     });
@@ -792,14 +818,18 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       cloudId: resource.id,
       resources,
       selectedResource: resource,
-      user: resource.name || resource.url || resource.id,
+      user: profile?.displayName || resource.name || resource.url || resource.id,
+      accountId: profile?.accountId || null,
+      displayName: profile?.displayName || null,
+      personalDataRetrievedAt: profile ? Date.now() : null,
       createdAt: Date.now(),
       expiresAt: token.expires_in ? Date.now() + token.expires_in * 1000 : null,
     };
     await persistence.setSession(sid, sessionRecord);
     log.info('auth.atlassian.complete', {
       cloudId: resource.id,
-      user: resource.name || resource.url || resource.id,
+      user: profile?.displayName || resource.name || resource.url || resource.id,
+      accountId: profile?.accountId || null,
     });
     res.writeHead(302, {
       Location: '/',
@@ -861,6 +891,13 @@ async function startServer() {
   });
   validateStartupConfig();
   await persistence.initialize();
+  startPrivacyReportingLoop({
+    persistence,
+    atlassianConfig: config.atlassian,
+    logger,
+    enabled: Boolean(process.env.PRIVACY_REPORTING_ENABLED !== 'false'),
+    intervalMs: Number(process.env.PRIVACY_REPORTING_INTERVAL_MS || 6 * 60 * 60 * 1000),
+  });
   server.listen(PORT, '0.0.0.0', () => {
     const persistenceDiagnostics = persistence.getDiagnostics();
     logger.info('app.boot.ready', {

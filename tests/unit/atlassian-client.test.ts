@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AtlassianClient } from '../../src/server/services/atlassian';
+import { AtlassianClient, getCurrentUserProfile, reportPersonalData } from '../../src/server/services/atlassian';
 
 test('AtlassianClient retries Confluence page fetch across accessible resources', async () => {
   const client = new AtlassianClient({
@@ -70,5 +70,88 @@ test('AtlassianClient retries Confluence page fetch across accessible resources'
   } finally {
     (https.default as any).request = originalRequest;
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('getCurrentUserProfile reads Atlassian /me response', async () => {
+  const https = await import('node:https');
+  const originalRequest = https.default.request;
+
+  (https.default as any).request = ((options: any, callback: any) => {
+    const handlers: Record<string, Function> = {};
+    const response = {
+      statusCode: 200,
+      headers: {},
+      on(event: string, handler: Function) {
+        handlers[event] = handler;
+      },
+    };
+    queueMicrotask(() => {
+      callback(response);
+      handlers.data?.(
+        Buffer.from(
+          JSON.stringify({
+            account_id: 'acct-123',
+            name: 'QA User',
+            email: 'qa@example.com',
+          })
+        )
+      );
+      handlers.end?.();
+    });
+    return { on() { return this; }, write() { return this; }, end() { return this; } };
+  }) as any;
+
+  try {
+    const profile = await getCurrentUserProfile('token');
+    assert.deepEqual(profile, {
+      accountId: 'acct-123',
+      displayName: 'QA User',
+      email: 'qa@example.com',
+    });
+  } finally {
+    (https.default as any).request = originalRequest;
+  }
+});
+
+test('reportPersonalData maps statuses and cycle-period header', async () => {
+  const https = await import('node:https');
+  const originalRequest = https.default.request;
+
+  (https.default as any).request = ((options: any, callback: any) => {
+    const handlers: Record<string, Function> = {};
+    const response = {
+      statusCode: 200,
+      headers: { 'cycle-period': '9' },
+      on(event: string, handler: Function) {
+        handlers[event] = handler;
+      },
+    };
+    queueMicrotask(() => {
+      callback(response);
+      handlers.data?.(
+        Buffer.from(
+          JSON.stringify({
+            accounts: [{ accountId: 'acct-2', status: 'updated' }],
+          })
+        )
+      );
+      handlers.end?.();
+    });
+    return { on() { return this; }, write() { return this; }, end() { return this; } };
+  }) as any;
+
+  try {
+    const report = await reportPersonalData('token', [
+      { accountId: 'acct-1', updatedAt: '2026-06-01T00:00:00.000Z' },
+      { accountId: 'acct-2', updatedAt: '2026-06-01T00:00:00.000Z' },
+    ]);
+    assert.equal(report.cyclePeriodDays, 9);
+    assert.deepEqual(report.accounts, [
+      { accountId: 'acct-1', status: 'ok' },
+      { accountId: 'acct-2', status: 'updated' },
+    ]);
+  } finally {
+    (https.default as any).request = originalRequest;
   }
 });
