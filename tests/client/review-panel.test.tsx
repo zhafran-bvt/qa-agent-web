@@ -1,10 +1,9 @@
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import { ContextPanel } from '../../src/client/components/ContextPanel';
-import type { QaContext } from '../../src/shared/contracts';
+import { ReviewPanel } from '../../src/client/components/ReviewPanel';
+import type { CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../../src/shared/contracts';
 
-const baseContext: QaContext = {
+const context: QaContext = {
   ticketKey: 'ORB-3157',
   epic: 'AI Assistance',
   mainIssue: {
@@ -25,7 +24,7 @@ const baseContext: QaContext = {
     pageId: '950075398',
     title: 'AI Powered Assistance',
     url: 'https://example.test/prd#AI-Summary-NO-SCORE',
-    anchor: 'AI-Assistance-Summary-Result',
+    anchor: 'AI-Summary-NO-SCORE',
     matchedHeading: 'AI Summary NO SCORE',
     matched: true,
     reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
@@ -45,14 +44,13 @@ const baseContext: QaContext = {
     {
       id: 'AC-1',
       text: 'The AI Summary tab is available for analysis results with no score.',
-      source: 'parent_story_confluence_section synthesized',
       sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
       sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
       sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
       sourceExcerptKind: 'prd',
     },
   ],
-  userStories: [{ id: 'US-1', text: 'AI Assistance Summary Result', source: 'ORB-1248 summary' }],
+  userStories: [],
   acceptanceCriteriaSource: 'parent_story_confluence_section',
   confidenceLevel: 'high',
   confidenceReasons: ['Main Jira scope was insufficient, so the matched PRD subsection was used.'],
@@ -61,55 +59,84 @@ const baseContext: QaContext = {
     allIssueUserStories: [],
     allIssueCriteria: [],
     confluenceCriteria: [],
-    selectedAcceptanceCriteriaSource: 'parent_story_confluence_section',
-    selectedAcceptanceCriteriaReason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
-    ignoredSources: [],
-    ignoredMetadataLabels: [],
-    thinTicketFallbackUsed: true,
-    prdSubsectionMatchQuality: 'confident',
-    matchedPrdSubsectionHeading: 'AI Summary NO SCORE',
-    matchedPrdSubsectionConfidence: 1,
-    userStoryFragmentsDiscardedCount: 2,
   },
-  constraints: {
-    feOnly: true,
-    beAlreadyTested: false,
-  },
+  constraints: { feOnly: true, beAlreadyTested: false },
   actualDevScopeGuidance: 'Use scoped PRD for thin tickets.',
 };
 
-describe('ContextPanel', () => {
-  it('renders scope diagnostics and triggers the Indonesian display option', async () => {
-    const onLanguageChange = vi.fn();
+const testCases: GeneratedTestCase[] = [
+  {
+    id: 'TC-ORB-3157-001',
+    title: '[Web][AI Assistance][ORB-3157] Show AI Summary for no-score analysis results',
+    type: 'BDD',
+    jiraReference: 'ORB-3157',
+    preconditions: 'User has a no-score analysis result.',
+    bddScenario: 'Feature: AI Summary\nScenario: View summary\nGiven x\nWhen y\nThen z',
+    coversAcceptanceCriteria: ['AC-1'],
+    sourceScope: ['ORB-3157', 'AI Summary NO SCORE'],
+    evidence: {
+      prdSectionTitle: 'AI Summary NO SCORE',
+      acceptanceCriteria: [
+        {
+          id: 'AC-1',
+          text: 'The AI Summary tab is available for analysis results with no score.',
+          sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
+          sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
+          sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
+          sourceExcerptKind: 'prd',
+        },
+      ],
+      coverageNote: 'Covers no-score AI Summary availability.',
+    },
+  },
+];
+
+const validation: ValidationEntry[] = [
+  {
+    index: 0,
+    id: 'TC-ORB-3157-001',
+    valid: true,
+    errors: [],
+    warnings: [],
+    normalized: {
+      coversAcceptanceCriteria: ['AC-1'],
+      sourceScope: ['ORB-3157', 'AI Summary NO SCORE'],
+    },
+  },
+];
+
+const coverage: CoverageSummary = {
+  enforced: true,
+  totalCriteria: 1,
+  coveredCriteria: 1,
+  uncoveredCriteria: [],
+  byCriterion: [
+    {
+      id: 'AC-1',
+      text: 'The AI Summary tab is available for analysis results with no score.',
+      coveredBy: ['TC-ORB-3157-001'],
+    },
+  ],
+  unmappedCases: [],
+};
+
+describe('ReviewPanel', () => {
+  it('renders quoted AC evidence inline in traceability details', () => {
     render(
-      <ContextPanel
-        context={baseContext}
-        translation={null}
-        translating={false}
-        permissionApproved={false}
-        overrideReason=""
-        busy={false}
+      <ReviewPanel
+        context={context}
+        testCases={testCases}
+        validation={validation}
+        coverage={coverage}
+        coverageEnforced={true}
+        manualScopeOverride={false}
         lang="en"
-        onLanguageChange={onLanguageChange}
-        onPermissionApprovedChange={vi.fn()}
-        onOverrideReasonChange={vi.fn()}
-        onGenerate={vi.fn()}
+        onCaseChange={vi.fn()}
       />
     );
 
-    expect(screen.getByText('Scope Snapshot')).toBeTruthy();
-    expect(screen.getAllByText('AI Summary NO SCORE').length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-quote')?.textContent).toMatch(/Analysis Summary window/);
     expect(screen.getAllByText(/PRD: AI Summary NO SCORE/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
-
-    await userEvent.click(screen.getByText('Scope Diagnostics'));
-    expect(screen.getByText('Thin-ticket fallback')).toBeTruthy();
-    expect(screen.getByText('PRD match quality')).toBeTruthy();
-    expect(screen.getByText('Discarded story fragments')).toBeTruthy();
-    expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1);
-
-    await userEvent.click(screen.getByRole('button', { name: 'ID' }));
-    expect(onLanguageChange).toHaveBeenCalledWith('id');
   });
 });

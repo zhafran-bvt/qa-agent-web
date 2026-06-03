@@ -6,6 +6,7 @@ import {
   loadDiagnostics,
   loadHistoryRun,
   loadHistoryRuns,
+  loadTicketSuggestions,
   logout,
   pushCases,
   translateScopeSnapshot,
@@ -28,6 +29,7 @@ import type {
   GeneratedTestCase,
   QaContext,
   ScopeSnapshotTranslation,
+  SuggestedTicket,
   ValidationEntry,
   WorkflowHistoryDetail,
   WorkflowHistorySummary,
@@ -38,7 +40,6 @@ const initialForm: AnalyzeRequest = {
   feOnly: true,
   beAlreadyTested: false,
   includeComments: true,
-  notes: '',
 };
 
 type PendingGeneration = GenerateResponse;
@@ -80,18 +81,24 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [generatedRunId, setGeneratedRunId] = useState<string>('');
   const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration | null>(null);
+  const [ticketSuggestions, setTicketSuggestions] = useState<SuggestedTicket[]>([]);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState('');
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const skipNextValidation = useRef(false);
   const nextToastId = useRef(1);
 
   async function refreshAuxiliaryData() {
     try {
-      const [history, diag] = await Promise.all([loadHistoryRuns(), loadDiagnostics()]);
+      const [history, diag, suggestions] = await Promise.all([loadHistoryRuns(), loadDiagnostics(), loadTicketSuggestions()]);
       setHistoryRuns(history.runs);
       setDiagnostics(diag);
+      setTicketSuggestions(suggestions.tickets || []);
+      setSuggestionsError('');
     } catch (loadError) {
       const message = (loadError as Error).message;
       setError(message);
+      setSuggestionsError(message);
       pushToast('error', toastText.refreshErrorTitle, message);
     }
   }
@@ -101,7 +108,14 @@ export default function App() {
       .then(async (response) => {
         setConfig(response);
         setSectionId(response.defaults.testrailSectionId || '');
-        if (response.authenticated) await refreshAuxiliaryData();
+        if (response.authenticated) {
+          setLoadingSuggestions(true);
+          try {
+            await refreshAuxiliaryData();
+          } finally {
+            setLoadingSuggestions(false);
+          }
+        }
       })
       .catch((loadError) => {
         const message = (loadError as Error).message;
@@ -250,6 +264,10 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
+  }
+
+  function handleSuggestionSelect(ticketKey: string) {
+    setForm((current) => ({ ...current, jiraKey: ticketKey }));
   }
 
   async function handlePush() {
@@ -455,7 +473,17 @@ export default function App() {
 
         <div className="workflow-top">
           <div className="workflow-main-column">
-            <AnalyzePanel lang="en" form={form} busy={analyzing} onChange={(patch) => setForm((current) => ({ ...current, ...patch }))} onAnalyze={handleAnalyze} />
+            <AnalyzePanel
+              lang={lang}
+              form={form}
+              busy={analyzing}
+              suggestions={ticketSuggestions}
+              suggestionsLoading={loadingSuggestions}
+              suggestionsError={suggestionsError}
+              onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
+              onSuggestionSelect={handleSuggestionSelect}
+              onAnalyze={handleAnalyze}
+            />
           </div>
           <ApprovalPanel
             lang="en"

@@ -6,7 +6,6 @@ interface QaContextOptions {
   feOnly?: boolean;
   beAlreadyTested?: boolean;
   includeComments?: boolean;
-  notes?: string;
   logger?: Logger;
 }
 
@@ -1611,7 +1610,6 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
           ? 'Parent Story AC ignored because main Jira AC exists.'
           : 'Scoped PRD AC ignored because main Jira AC exists.'
       ),
-      ...selection.ignoredMetadataLabels.map((label) => `Story metadata ignored: ${label}.`),
       ...(qualifierUnconfirmed
         ? [
             `Scope qualifier "${detectedScopeQualifier}" was detected in the ticket title, but the matched PRD scope did not confirm it. Review the ranked scope candidates before trusting acceptance criteria coverage.`,
@@ -1637,7 +1635,6 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     constraints: {
       feOnly: Boolean(options.feOnly),
       beAlreadyTested: Boolean(options.beAlreadyTested),
-      notes: options.notes || '',
     },
     actualDevScopeGuidance:
       'Use the main Jira issue for implementation-specific acceptance criteria, then the linked parent Story and its targeted PRD subsection for canonical scope. Blocking and BE tickets are context only.',

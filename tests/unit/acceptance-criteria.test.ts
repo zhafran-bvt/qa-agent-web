@@ -30,7 +30,7 @@ function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
     scopeConfluenceSection: {
       pageId: '1228177422',
       title: 'Spatial Analysis Functional Improvement',
-      url: 'https://example.test/prd',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
       anchor: '3.-As-User,-I-want-to-select-spatial-input-based-on-BVT-Data',
       matchedHeading: 'As User, I want to select spatial input based on BVT Data',
       matched: true,
@@ -74,8 +74,7 @@ function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
     constraints: {
       feOnly: true,
       beAlreadyTested: false,
-      notes: '',
-    },
+      },
     actualDevScopeGuidance:
       'Use the main Jira issue for implementation-specific acceptance criteria, then the linked parent Story and its targeted PRD subsection for canonical scope. Blocking and BE tickets are context only.',
     ...overrides,
@@ -171,6 +170,9 @@ test('preserves strong explicit acceptance criteria through canonical synthesis'
   );
   assert.equal(finalized.acceptanceCriteriaDiagnostics.synthesisUsed, true);
   assert.equal(finalized.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality, 'strong');
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerpt, 'Adm Area filter is required before Add Dataset button is enabled');
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptLocation, 'Main Jira');
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptKind, 'jira');
 });
 
 test('repairs over-merged thin-ticket PRD synthesis into medium-granularity criteria', async () => {
@@ -186,7 +188,7 @@ test('repairs over-merged thin-ticket PRD synthesis into medium-granularity crit
     scopeConfluenceSection: {
       pageId: '950075398',
       title: 'AI Powered Assistance',
-      url: 'https://example.test/prd',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
       anchor: 'AI-Assistance-Summary-Result',
       matchedHeading: 'AI Summary NO SCORE',
       matched: true,
@@ -260,7 +262,7 @@ test('repairs label-style over-merged thin-ticket PRD synthesis', async () => {
     scopeConfluenceSection: {
       pageId: '950075398',
       title: 'AI Powered Assistance',
-      url: 'https://example.test/prd',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
       anchor: 'AI-Assistance-Summary-Result',
       matchedHeading: 'AI Summary NO SCORE',
       matched: true,
@@ -303,4 +305,179 @@ test('repairs label-style over-merged thin-ticket PRD synthesis', async () => {
   assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Narrative style:/i.test(criterion.text)), true);
   assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Risk warnings:/i.test(criterion.text)), true);
   assert.equal(finalized.acceptanceCriteria.some((criterion) => /^Recommendations:/i.test(criterion.text)), true);
+});
+
+test('attaches PRD-scoped source excerpts without leaking neighboring sections', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3157',
+    mainIssue: {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - Generate executive summary for analysis results with no scoring',
+      description: '',
+    },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body:
+        'AI Summary NO SCORE\nAcceptance Criteria\n1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.\n2. The no-score AI Summary includes landmark context and environment risk indication.\n3. Strategic Takeaways remain available for the no-score variant.\nWITH SCORE nearby text should not leak here.',
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+      anchor: 'AI-Summary-NO-SCORE',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body:
+        'AI Summary NO SCORE\nAcceptance Criteria\n1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.\n2. The no-score AI Summary includes landmark context and environment risk indication.\n3. Strategic Takeaways remain available for the no-score variant.',
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The AI Summary tab is available for analysis results with no score.' },
+      { id: 'AC-2', text: 'The no-score AI Summary includes landmark context and environment risk indication.' },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptLocation, 'PRD: AI Summary NO SCORE');
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptUrl, 'https://example.test/prd#AI-Summary-NO-SCORE');
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptKind, 'prd');
+  assert.match(finalized.acceptanceCriteria[0].sourceExcerpt || '', /Analysis Summary window/i);
+  assert.doesNotMatch(finalized.acceptanceCriteria[0].sourceExcerpt || '', /WITH SCORE/i);
+});
+
+test('source excerpts reject schema noise, pick the specific line, and suppress shared boilerplate', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3157',
+    mainIssue: { key: 'ORB-3157', summary: '[FE] AI Summary - executive summary with no scoring', description: '' },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body: [
+        'AI Summary NO SCORE',
+        'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
+        'The no-score AI Summary uses an absolute profiling-based narrative and describes the area characteristics, defining signals, and zone type.',
+        'The no-score AI Summary includes landmark context and environment risk indication.',
+        'Strategic Takeaways remain available for the no-score variant.',
+        'feedback_table ├── feedback_id ← unique ID (Primary Key) ├── response_id ← foreign key → ai_response_table ├── surface ← "ai_summary" / "ai_chat"',
+      ].join('\n'),
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+      anchor: 'AI-Summary-NO-SCORE',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body: 'unused',
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The no-score summary must describe the area using absolute characteristics, defining signals, and zone type.' },
+      { id: 'AC-2', text: 'The no-score summary must include landmark context and an environment risk warning for the area.' },
+      { id: 'AC-3', text: 'Strategic Takeaways must remain available as a separate section.' },
+      { id: 'AC-4', text: 'Strategic Takeaways in the no-score variant must remain actionable.' },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+  const acs = finalized.acceptanceCriteria;
+  const find = (re: RegExp) => acs.find((criterion) => re.test(criterion.text));
+
+  // Schema/table dumps are never offered as evidence.
+  assert.equal(acs.every((criterion) => !/feedback_table|├|←/.test(criterion.sourceExcerpt || '')), true);
+  // F1 scoring picks the specific justifying line, not a high-overlap blob.
+  assert.match(find(/absolute characteristics|defining signals/i)?.sourceExcerpt || '', /absolute profiling-based narrative/i);
+  assert.match(find(/landmark/i)?.sourceExcerpt || '', /landmark context and environment risk indication/i);
+  assert.equal(find(/landmark/i)?.sourceExcerptUrl, 'https://example.test/prd#AI-Summary-NO-SCORE');
+  assert.equal(find(/landmark/i)?.sourceExcerptKind, 'prd');
+  // Two ACs that resolve to the same single line are generic boilerplate -> suppressed.
+  const takeaways = acs.filter((criterion) => /Strategic Takeaways/i.test(criterion.text));
+  assert.equal(takeaways.length, 2);
+  assert.equal(takeaways.every((criterion) => !criterion.sourceExcerpt), true);
+});
+
+test('short high-signal PRD bullets still attach as excerpts when they match specific AC tokens', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3157',
+    mainIssue: { key: 'ORB-3157', summary: '[FE] AI Summary - executive summary with no scoring', description: '' },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body: [
+        'Analysis result with NO Score should have AI summary',
+        'Add landmark and environment risk',
+        'Strategic Takeaways',
+      ].join('\n'),
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    scopeConfluenceSection: {
+      pageId: '950075398',
+      title: 'AI Powered Assistance',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+      anchor: 'AI-Summary-NO-SCORE',
+      matchedHeading: 'AI Summary NO SCORE',
+      matched: true,
+      reason: 'Parent Story was resolved and its linked PRD subsection was matched successfully.',
+      sourceIssueKey: 'ORB-1248',
+      body: 'unused',
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The Analysis Summary view must show an AI Summary for analysis results that do not produce a score, using the no-score variant rather than a ranking-based summary.',
+      },
+      {
+        id: 'AC-3',
+        text: 'The no-score AI Summary must include landmark context and an environment risk/warning for the area.',
+      },
+      {
+        id: 'AC-4',
+        text: 'The no-score AI Summary must include a Strategic Takeaways section.',
+      },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+  assert.match(finalized.acceptanceCriteria.find((criterion) => /analysis results.*score|no-score variant/i.test(criterion.text))?.sourceExcerpt || '', /NO Score should have AI summary/i);
+  assert.match(finalized.acceptanceCriteria.find((criterion) => /landmark context|environment risk/i.test(criterion.text))?.sourceExcerpt || '', /landmark and environment risk/i);
+  assert.match(finalized.acceptanceCriteria.find((criterion) => /Strategic Takeaways/i.test(criterion.text))?.sourceExcerpt || '', /Strategic Takeaways/i);
 });

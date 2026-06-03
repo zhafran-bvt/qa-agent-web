@@ -1,4 +1,4 @@
-import type { AnalyzeRequest } from '../../shared/contracts';
+import type { AnalyzeRequest, SuggestedTicket } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
 
@@ -6,11 +6,25 @@ interface AnalyzePanelProps {
   form: AnalyzeRequest;
   busy: boolean;
   lang: UiLanguage;
+  suggestions: SuggestedTicket[];
+  suggestionsLoading: boolean;
+  suggestionsError: string;
   onChange: (patch: Partial<AnalyzeRequest>) => void;
+  onSuggestionSelect: (ticketKey: string) => void;
   onAnalyze: () => void;
 }
 
-export function AnalyzePanel({ form, busy, lang, onChange, onAnalyze }: AnalyzePanelProps) {
+export function AnalyzePanel({
+  form,
+  busy,
+  lang,
+  suggestions,
+  suggestionsLoading,
+  suggestionsError,
+  onChange,
+  onSuggestionSelect,
+  onAnalyze,
+}: AnalyzePanelProps) {
   const t = uiText[lang].analyze;
   return (
     <section className="panel panel-stack panel-control">
@@ -44,14 +58,31 @@ export function AnalyzePanel({ form, busy, lang, onChange, onAnalyze }: AnalyzeP
         </label>
       </div>
 
-      <label className="field">
-        <span>{t.scopeNotes}</span>
-        <textarea
-          value={form.notes}
-          placeholder={t.scopeNotesPlaceholder}
-          onChange={(event) => onChange({ notes: event.target.value })}
-        />
-      </label>
+      <div className="suggestions-panel">
+        <div className="suggestions-header">
+          <strong>{t.suggestedTickets}</strong>
+          <span className="muted">
+            {suggestionsLoading ? t.loadingSuggestions : suggestionsError ? t.suggestionsUnavailable : t.suggestedSubtitle}
+          </span>
+        </div>
+        {suggestionsError ? (
+          <div className="muted">{suggestionsError}</div>
+        ) : suggestions.length ? (
+          <div className="suggestions-list">
+            {suggestions.map((ticket) => (
+              <button key={ticket.key} className="suggestion-item" type="button" onClick={() => onSuggestionSelect(ticket.key)}>
+                <span className="suggestion-key">{ticket.key}</span>
+                <span className="suggestion-summary">{ticket.summary || t.noSummary}</span>
+                <span className="suggestion-meta">
+                  {[ticket.issueType, ticket.status].filter(Boolean).join(' · ')}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="muted">{t.noSuggestedTickets}</div>
+        )}
+      </div>
 
       <button className="button" type="button" disabled={busy} onClick={onAnalyze}>
         {busy ? t.analyzing : t.action}

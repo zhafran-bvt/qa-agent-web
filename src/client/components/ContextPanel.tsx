@@ -1,6 +1,7 @@
 import type { QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
+import { SourceExcerpt } from './SourceExcerpt';
 
 interface ContextPanelProps {
   context: QaContext | null;
@@ -54,8 +55,6 @@ export function ContextPanel({
 }: ContextPanelProps) {
   const t = uiText[lang].context;
   const displayConfidenceReasons = translation?.confidenceReasons?.length ? translation.confidenceReasons : context?.confidenceReasons || [];
-  const displaySelectedReason =
-    translation?.selectedAcceptanceCriteriaReason || context?.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '';
   const displayAcceptanceCriteria = translation?.acceptanceCriteria?.length ? translation.acceptanceCriteria : context?.acceptanceCriteria || [];
   const displayUserStories = translation?.userStories?.length ? translation.userStories : context?.userStories || [];
   const diagnostics = context?.acceptanceCriteriaDiagnostics;
@@ -112,25 +111,6 @@ export function ContextPanel({
             <div>{context.requiresConfidencePermission ? t.qaPermissionRequired : t.noConfidenceOverride}</div>
           </div>
 
-          {displaySelectedReason || context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels?.length ? (
-            <details className="summary summary-detail">
-              <summary>{t.scopeResolutionDetails}</summary>
-              <div className="summary-detail-body">
-              <ul>
-                {displaySelectedReason ? (
-                  <li>{displaySelectedReason}</li>
-                ) : null}
-                {(context.acceptanceCriteriaDiagnostics.ignoredSources || []).map((source) => (
-                  <li key={source}>{t.ignoredSource(source)}</li>
-                ))}
-                {(context.acceptanceCriteriaDiagnostics.ignoredMetadataLabels || []).map((label) => (
-                  <li key={label}>{t.ignoredStoryMetadata(label)}</li>
-                ))}
-              </ul>
-              </div>
-            </details>
-          ) : null}
-
           {scopeDiagnosticsRows.length ? (
             <details className="summary summary-detail">
               <summary>{t.scopeDiagnostics}</summary>
@@ -153,7 +133,18 @@ export function ContextPanel({
                   {displayAcceptanceCriteria.map((criterion) => (
                     <li className="criteria-item" key={criterion.id}>
                       <span className="criteria-id">{criterion.id}</span>
-                      <div className="criteria-text">{criterion.text}</div>
+                      <div className="criteria-text-block">
+                        <div className="criteria-text">{criterion.text}</div>
+                        <SourceExcerpt
+                          criterionText={criterion.text}
+                          excerpt={criterion.sourceExcerpt}
+                          location={criterion.sourceExcerptLocation}
+                          url={criterion.sourceExcerptUrl}
+                          kind={criterion.sourceExcerptKind}
+                          confidence={criterion.sourceExcerptConfidence}
+                          lang={lang}
+                        />
+                      </div>
                     </li>
                   ))}
                 </ul>

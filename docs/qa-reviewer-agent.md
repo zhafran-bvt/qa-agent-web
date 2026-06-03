@@ -83,3 +83,24 @@ Recommended verification:
 - Tests should assert QA-facing behavior, not just implementation details.
 - Regression tests should cover cross-stage agreement, not only individual stage correctness.
 - Fixture-specific examples are acceptable in tests, but production prompts and generic logic should stay ticket-neutral.
+## Required workflow
+
+For any non-trivial code change, run the QA reviewer gate before commit:
+
+```bash
+npm run review:qa
+```
+
+That command:
+- runs `npm test`
+- runs `npm run typecheck`
+- runs `npm run build`
+- records a review stamp for the current staged tree
+
+The repo installs a `pre-commit` hook and will block commits if the staged tree
+has not been QA-reviewed or if staged content changed after the review stamp was
+recorded.
+
+Limit:
+- this hook cannot literally spawn a Codex subagent from git. What it enforces
+  is the repo-level QA review gate and the reviewer guidance in this document.

@@ -41,11 +41,13 @@ export interface SimplifiedIssue {
   renderedDescription: string;
   comments: string[];
   subtasks: Array<{ key: string; summary?: string; status?: string }>;
-  linkedIssues: Array<{ key: string; relation?: string; summary?: string; status?: string; issueType?: string }>;
+  linkedIssues: Array<{ key: string; webUrl?: string; relation?: string; summary?: string; status?: string; issueType?: string }>;
   labels: string[];
   components: string[];
   priority?: string;
   assignee?: string;
+  updatedAt?: string;
+  createdAt?: string;
 }
 
 function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<T> {
@@ -98,6 +100,25 @@ function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknow
 const ATLASSIAN_AUTH_URL = 'https://auth.atlassian.com/authorize';
 const ATLASSIAN_TOKEN_URL = 'https://auth.atlassian.com/oauth/token';
 const ATLASSIAN_API_BASE = 'https://api.atlassian.com';
+
+function normalizeSiteUrl(siteUrl?: string | null): string {
+  return String(siteUrl || '').trim().replace(/\/$/, '');
+}
+
+function buildJiraIssueWebUrl(siteUrl: string | null | undefined, issueKey?: string): string {
+  const base = normalizeSiteUrl(siteUrl);
+  if (!base || !issueKey) return '';
+  return `${base}/browse/${issueKey}`;
+}
+
+function buildConfluenceWebUrl(siteUrl: string | null | undefined, webUi?: string | null): string | null {
+  const raw = String(webUi || '').trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+  const base = normalizeSiteUrl(siteUrl);
+  if (!base) return raw;
+  return `${base}${raw.startsWith('/') ? '' : '/'}${raw}`;
+}
 
 export function buildAuthUrl(config: AtlassianAuthConfig, state: string): string {
   const url = new URL(ATLASSIAN_AUTH_URL);
@@ -336,7 +357,27 @@ export class AtlassianClient {
         headers: this.headers(),
       })
     );
-    return simplifyIssue(issue);
+    return simplifyIssue(issue, this.selectedResource?.url || null);
+  }
+
+  async searchIssues(jql: string, maxResults = 10): Promise<SimplifiedIssue[]> {
+    const fields = ['summary', 'issuetype', 'status', 'assignee', 'created', 'updated'];
+    const result = await this.requestWithRefresh(() =>
+      requestJson<Record<string, any>>(
+        this.jiraUrl('/search/jql'),
+        {
+          method: 'POST',
+          headers: this.headers(),
+        },
+        {
+          jql,
+          fields,
+          maxResults: Math.max(1, Math.min(maxResults, 50)),
+          fieldsByKeys: false,
+        }
+      )
+    );
+    return Array.isArray(result.issues) ? result.issues.map((issue) => simplifyIssue(issue, this.selectedResource?.url || null)) : [];
   }
 
   async getRemoteLinks(issueKey: string): Promise<Array<Record<string, unknown>>> {
@@ -387,7 +428,7 @@ export class AtlassianClient {
           id: String(page.id),
           title: page.title,
           status: page.status,
-          webUrl: page._links && page._links.webui ? page._links.webui : null,
+          webUrl: buildConfluenceWebUrl(this.selectedResource?.url || null, page._links && page._links.webui ? page._links.webui : null),
           body: extractText(adfValue),
           adf,
         };
@@ -421,7 +462,7 @@ export class AtlassianClient {
   }
 }
 
-function simplifyIssue(issue: Record<string, any>): SimplifiedIssue {
+function simplifyIssue(issue: Record<string, any>, siteUrl?: string | null): SimplifiedIssue {
   const fields = issue.fields || {};
   const descriptionText = extractText(fields.description);
   const renderedDescription = (issue.renderedFields && issue.renderedFields.description) || '';
@@ -429,6 +470,7 @@ function simplifyIssue(issue: Record<string, any>): SimplifiedIssue {
     const linked = link.inwardIssue || link.outwardIssue || {};
     return {
       key: linked.key,
+      webUrl: buildJiraIssueWebUrl(siteUrl, linked.key),
       relation: link.inwardIssue ? link.type && link.type.inward : link.type && link.type.outward,
       summary: linked.fields && linked.fields.summary,
       status: linked.fields && linked.fields.status && linked.fields.status.name,
@@ -439,7 +481,7 @@ function simplifyIssue(issue: Record<string, any>): SimplifiedIssue {
   return {
     key: issue.key,
     id: issue.id,
-    webUrl: issue.self,
+    webUrl: buildJiraIssueWebUrl(siteUrl, issue.key) || issue.self,
     summary: fields.summary,
     issueType: fields.issuetype && fields.issuetype.name,
     status: fields.status && fields.status.name,
@@ -463,5 +505,7 @@ function simplifyIssue(issue: Record<string, any>): SimplifiedIssue {
     components: (fields.components || []).map((component: Record<string, string>) => component.name),
     priority: fields.priority && fields.priority.name,
     assignee: fields.assignee && fields.assignee.displayName,
+    updatedAt: fields.updated || undefined,
+    createdAt: fields.created || undefined,
   };
 }

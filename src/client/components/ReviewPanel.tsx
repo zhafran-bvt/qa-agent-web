@@ -1,6 +1,7 @@
 import type { CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
+import { SourceExcerpt } from './SourceExcerpt';
 
 interface ReviewPanelProps {
   context: QaContext | null;
@@ -198,6 +199,15 @@ export function ReviewPanel({
                         {testCase.evidence.acceptanceCriteria.map((criterion) => (
                           <li key={criterion.id}>
                             <strong>{criterion.id}</strong> {criterion.text}
+                            <SourceExcerpt
+                              criterionText={criterion.text}
+                              excerpt={criterion.sourceExcerpt}
+                              location={criterion.sourceExcerptLocation}
+                              url={criterion.sourceExcerptUrl}
+                              kind={criterion.sourceExcerptKind}
+                              confidence={criterion.sourceExcerptConfidence}
+                              lang={lang}
+                            />
                           </li>
                         ))}
                       </ul>

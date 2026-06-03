@@ -28,6 +28,7 @@ import type {
   QaContext,
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
+  TicketSuggestionsResponse,
   ValidateRequest,
 } from '../shared/contracts';
 
@@ -99,6 +100,8 @@ const persistence = createPersistence({
   migrationsDir: MIGRATIONS_DIR,
   allowFallbackOnInitError: !process.env.RAILWAY_PUBLIC_DOMAIN && process.env.NODE_ENV !== 'production',
 });
+
+const QA_ASSIGNEE_JQL_FIELD = process.env.QA_ASSIGNEE_JQL_FIELD || '"qa assignee[user picker (single user)]"';
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -394,6 +397,36 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  if (req.method === 'GET' && url.pathname === '/api/suggestions/tickets') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { sid, session } = sessionEnvelope;
+  const jql = [
+    `${QA_ASSIGNEE_JQL_FIELD} = currentUser()`,
+    'AND type IN (Bug, Task)',
+    'AND statusCategory != Done',
+    'AND labels = frontend',
+    'AND sprint in openSprints()',
+    'ORDER BY updated DESC, created DESC',
+  ].join(' ');
+    const issues = await createClient(sid, session, log).searchIssues(jql, 12);
+    const body: TicketSuggestionsResponse = {
+      jql,
+      tickets: issues.map((issue) => ({
+        key: issue.key,
+        summary: issue.summary || '',
+        status: issue.status || '',
+        issueType: issue.issueType || '',
+        assignee: issue.assignee || '',
+        webUrl: issue.webUrl || '',
+        updatedAt: issue.updatedAt || '',
+        createdAt: issue.createdAt || '',
+      })),
+    };
+    sendJson(res, 200, body);
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname.startsWith('/api/history/runs/')) {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -435,7 +468,6 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       feOnly: body.feOnly !== false,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
-      notes: body.notes || '',
       logger: log,
     });
     const finalizedContext = await finalizeAcceptanceCriteria(context, {

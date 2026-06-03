@@ -12,8 +12,19 @@ function resolvePrdSectionTitle(context: QaContext): string {
 }
 
 function resolveEvidenceAcceptanceCriteria(testCase: GeneratedTestCase, context: QaContext): TestCaseEvidenceAcceptanceCriterion[] {
-  const criteriaById = new Map(
-    (context.acceptanceCriteria || []).map((criterion) => [normalizeAcceptanceCriteriaId(criterion.id), { id: criterion.id, text: criterion.text }])
+  const criteriaById = new Map<string, TestCaseEvidenceAcceptanceCriterion>(
+    (context.acceptanceCriteria || []).map((criterion) => [
+      normalizeAcceptanceCriteriaId(criterion.id),
+      {
+        id: criterion.id,
+        text: criterion.text,
+        sourceExcerpt: criterion.sourceExcerpt,
+        sourceExcerptLocation: criterion.sourceExcerptLocation,
+        sourceExcerptUrl: criterion.sourceExcerptUrl,
+        sourceExcerptKind: criterion.sourceExcerptKind,
+        sourceExcerptConfidence: criterion.sourceExcerptConfidence,
+      } satisfies TestCaseEvidenceAcceptanceCriterion,
+    ])
   );
 
   return normalizeList(testCase.coversAcceptanceCriteria)

@@ -502,7 +502,15 @@ Known regression fixtures include ticket shapes such as:
 
 ## QA-focused reviewer agent
 
-Before pushing changes to scope resolution, generation, validation, review UI, or TestRail behavior, use the reviewer prompt in [`docs/qa-reviewer-agent.md`](docs/qa-reviewer-agent.md).
+Before committing non-trivial changes to scope resolution, generation, validation, review UI, or TestRail behavior, run:
+
+```bash
+npm run review:qa
+```
+
+This repo installs a `pre-commit` hook that blocks commits until the current
+staged tree has passed the QA review gate. The reviewer guidance lives in
+[`docs/qa-reviewer-agent.md`](docs/qa-reviewer-agent.md).
 
 Required team rule:
 

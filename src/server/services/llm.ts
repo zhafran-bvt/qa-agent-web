@@ -291,17 +291,106 @@ export function normalizeBddScenario(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function normalizeScopedItems(value: unknown, fallback: Array<{ id: string; text: string }>): Array<{ id: string; text: string }> {
+function normalizeScopedItems(
+  value: unknown,
+  fallback: Array<{
+    id: string;
+    text: string;
+    sourceExcerpt?: string;
+    sourceExcerptLocation?: string;
+    sourceExcerptUrl?: string;
+    sourceExcerptKind?: 'jira' | 'prd';
+    sourceExcerptConfidence?: 'verbatim' | 'closest';
+  }>
+): Array<{
+  id: string;
+  text: string;
+  sourceExcerpt?: string;
+  sourceExcerptLocation?: string;
+  sourceExcerptUrl?: string;
+  sourceExcerptKind?: 'jira' | 'prd';
+}> {
   if (!Array.isArray(value)) return fallback;
-  return value
-    .map((item, index) => {
-      const record = (item || {}) as Record<string, unknown>;
+  const fallbackById = new Map(fallback.map((item) => [item.id, item]));
+  const localizedItems = value.map((item) => ((item || {}) as Record<string, unknown>));
+
+  if (fallback.length) {
+    return fallback
+      .map((fallbackItem, index) => {
+        const byId = localizedItems.find((item) => String(item.id || '').trim() === fallbackItem.id);
+        const byIndex = localizedItems[index];
+        const localizedText = String((byId?.text ?? byIndex?.text ?? '') || '').trim();
       return {
-        id: String(record.id || fallback[index]?.id || ''),
+        id: fallbackItem.id,
+        text: localizedText || fallbackItem.text,
+        ...(fallbackItem.sourceExcerpt
+          ? {
+              sourceExcerpt: fallbackItem.sourceExcerpt,
+              sourceExcerptLocation: fallbackItem.sourceExcerptLocation,
+              sourceExcerptUrl: fallbackItem.sourceExcerptUrl,
+              sourceExcerptKind: fallbackItem.sourceExcerptKind,
+              sourceExcerptConfidence: fallbackItem.sourceExcerptConfidence,
+            }
+          : {}),
+      };
+      })
+      .filter((item) => item.id && item.text);
+  }
+
+  return localizedItems
+    .map((record, index) => {
+      const fallbackId = String(record.id || fallback[index]?.id || '');
+      const fallbackItem = fallbackById.get(fallbackId) || fallback[index];
+      return {
+        id: fallbackId,
         text: String(record.text || '').trim(),
+        ...(fallbackItem?.sourceExcerpt
+          ? {
+              sourceExcerpt: fallbackItem.sourceExcerpt,
+              sourceExcerptLocation: fallbackItem.sourceExcerptLocation,
+              sourceExcerptUrl: fallbackItem.sourceExcerptUrl,
+              sourceExcerptKind: fallbackItem.sourceExcerptKind,
+              sourceExcerptConfidence: fallbackItem.sourceExcerptConfidence,
+            }
+          : {}),
       };
     })
     .filter((item) => item.id && item.text);
+}
+
+function normalizeLocalizedString(value: unknown, fallback: string): string {
+  const localized = String(value || '').trim();
+  return localized || fallback;
+}
+
+function normalizeLocalizedTextList(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return fallback;
+  const localized = value.map((item) => String(item || '').trim());
+  if (fallback.length) {
+    return fallback.map((original, index) => localized[index] || original);
+  }
+  return localized.filter(Boolean);
+}
+
+export function normalizeScopeSnapshotTranslation(
+  parsed: Record<string, unknown>,
+  context: QaContext
+): ScopeSnapshotTranslation {
+  return {
+    mainSummary: normalizeLocalizedString(parsed.mainSummary, context.mainIssue.summary || ''),
+    parentStorySummary: normalizeLocalizedString(parsed.parentStorySummary, context.scopeParentIssue?.summary || ''),
+    scopedPrdSection: normalizeLocalizedString(
+      parsed.scopedPrdSection,
+      context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || ''
+    ),
+    confidenceReasons: normalizeLocalizedTextList(parsed.confidenceReasons, context.confidenceReasons || []),
+    selectedAcceptanceCriteriaReason: normalizeLocalizedString(
+      parsed.selectedAcceptanceCriteriaReason,
+      context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || ''
+    ) || undefined,
+    userStories: normalizeScopedItems(parsed.userStories, context.userStories || []),
+    acceptanceCriteria: normalizeScopedItems(parsed.acceptanceCriteria, context.acceptanceCriteria || []),
+  };
 }
 
 export function normalizeCase(testCase: Record<string, unknown>, index: number): GeneratedTestCase {
@@ -551,10 +640,14 @@ async function translateScopeSnapshotWithProvider(
   targetLanguage: 'id'
 ): Promise<ProviderScopeTranslationResult> {
   const systemPrompt = [
-    'You translate a QA scope snapshot for UI display only.',
-    'Translate to casual, friendly, clear Indonesian.',
+    'You localize a QA scope snapshot for UI display only.',
+    'Translate to natural Indonesian used by internal QA and product teams.',
+    'This is not literal translation. Rewrite awkward English into clear Indonesian while preserving the exact meaning.',
+    'Prefer short, direct sentences. Split dense sentences when needed.',
+    'Avoid stiff, textbook, legalistic, or robotic wording.',
     'Do not change scope, meaning, acceptance-criteria ids, or user-story ids.',
     'Keep technical tokens and identifiers intact when needed: Jira keys, AC ids, US ids, dataset_id, catchment.datasets[], BY_DATASET, Polygon, MultiPolygon, Jira, Confluence, TestRail.',
+    'It is acceptable to keep common product and QA terms in English when that reads more naturally, for example: Acceptance Criteria, Scope, Main Jira, Parent Story, Analysis Summary, Strategic Takeaways.',
     'Do not translate generated test case titles or BDD scenarios because they are not part of this task.',
     'Return strict JSON only.',
     'Use this exact top-level shape: {"mainSummary":"","parentStorySummary":"","scopedPrdSection":"","confidenceReasons":[""],"selectedAcceptanceCriteriaReason":"","userStories":[{"id":"US-1","text":""}],"acceptanceCriteria":[{"id":"AC-1","text":""}]}',
@@ -573,7 +666,7 @@ async function translateScopeSnapshotWithProvider(
           role: 'user',
           content: JSON.stringify(
             {
-              instruction: `Translate the Scope Snapshot display content to ${targetLanguage}.`,
+              instruction: `Localize the Scope Snapshot display content to ${targetLanguage} for Indonesian QA users.`,
               source: {
                 mainSummary: context.mainIssue.summary || '',
                 parentStorySummary: context.scopeParentIssue?.summary || '',
@@ -599,17 +692,7 @@ async function translateScopeSnapshotWithProvider(
   return {
     provider: provider.name,
     model: provider.model,
-    translation: {
-      mainSummary: String(parsed.mainSummary || '').trim(),
-      parentStorySummary: String(parsed.parentStorySummary || '').trim(),
-      scopedPrdSection: String(parsed.scopedPrdSection || '').trim(),
-      confidenceReasons: Array.isArray(parsed.confidenceReasons)
-        ? parsed.confidenceReasons.map((item) => String(item || '').trim()).filter(Boolean)
-        : [],
-      selectedAcceptanceCriteriaReason: String(parsed.selectedAcceptanceCriteriaReason || '').trim() || undefined,
-      userStories: normalizeScopedItems(parsed.userStories, context.userStories || []),
-      acceptanceCriteria: normalizeScopedItems(parsed.acceptanceCriteria, context.acceptanceCriteria || []),
-    },
+    translation: normalizeScopeSnapshotTranslation(parsed, context),
   };
 }
 

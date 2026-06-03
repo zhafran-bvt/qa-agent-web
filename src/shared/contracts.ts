@@ -27,16 +27,32 @@ export interface ConfigResponse {
   };
 }
 
+export interface SuggestedTicket {
+  key: string;
+  summary: string;
+  status?: string;
+  issueType?: string;
+  assignee?: string;
+  webUrl?: string;
+  updatedAt?: string;
+  createdAt?: string;
+}
+
+export interface TicketSuggestionsResponse {
+  tickets: SuggestedTicket[];
+  jql: string;
+}
+
 export interface AnalyzeRequest {
   jiraKey: string;
   feOnly: boolean;
   beAlreadyTested: boolean;
   includeComments: boolean;
-  notes: string;
 }
 
 export interface LinkedIssueSummary {
   key: string;
+  webUrl?: string;
   summary?: string;
   status?: string;
   issueType?: string;
@@ -75,6 +91,11 @@ export interface ScopedItem {
   id: string;
   text: string;
   source?: string;
+  sourceExcerpt?: string;
+  sourceExcerptLocation?: string;
+  sourceExcerptUrl?: string;
+  sourceExcerptKind?: 'jira' | 'prd';
+  sourceExcerptConfidence?: 'verbatim' | 'closest';
 }
 
 export interface ParentIssueSummary {
@@ -175,7 +196,6 @@ export interface QaContext {
   constraints: {
     feOnly: boolean;
     beAlreadyTested: boolean;
-    notes: string;
   };
   actualDevScopeGuidance: string;
 }
@@ -218,6 +238,11 @@ export interface GeneratedTestCase {
 export interface TestCaseEvidenceAcceptanceCriterion {
   id: string;
   text: string;
+  sourceExcerpt?: string;
+  sourceExcerptLocation?: string;
+  sourceExcerptUrl?: string;
+  sourceExcerptKind?: 'jira' | 'prd';
+  sourceExcerptConfidence?: 'verbatim' | 'closest';
 }
 
 export interface TestCaseEvidence {

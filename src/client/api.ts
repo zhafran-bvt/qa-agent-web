@@ -9,6 +9,7 @@ import type {
   PushResponse,
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
+  TicketSuggestionsResponse,
   ValidateRequest,
   ValidateResponse,
   WorkflowHistoryDetailResponse,
@@ -32,6 +33,10 @@ async function requestJson<T>(path: string, options: RequestInit = {}): Promise<
 
 export function loadConfig(): Promise<ConfigResponse> {
   return requestJson<ConfigResponse>('/api/config');
+}
+
+export function loadTicketSuggestions(): Promise<TicketSuggestionsResponse> {
+  return requestJson<TicketSuggestionsResponse>('/api/suggestions/tickets');
 }
 
 export function analyzeContext(payload: AnalyzeRequest): Promise<AnalyzeResponse> {

@@ -7,6 +7,7 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
+    "prepare": "node scripts/install-hooks.mjs",
     "dev": "QA_AGENT_PORT=5180 QA_AGENT_BASE_URL=http://localhost:5180 ATLASSIAN_REDIRECT_URI=http://localhost:5180/auth/atlassian/callback concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
     "dev:client": "vite",
@@ -15,6 +16,8 @@
     "build:client": "vite build",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.app.json",
     "start": "npm run build && node dist/src/server/index.js",
+    "setup:hooks": "node scripts/install-hooks.mjs",
+    "review:qa": "node scripts/review-qa.mjs",
     "test": "npm run test:server && npm run test:client",
     "test:server": "tsx --test tests/unit/*.test.ts",
     "test:client": "vitest run --config vitest.client.config.ts"

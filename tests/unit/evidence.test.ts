@@ -20,7 +20,7 @@ const context: QaContext = {
   scopeConfluenceSection: {
     pageId: '897351682',
     title: 'Handling Administrative Area Filter',
-    url: 'https://example.test/wiki/pages/897351682',
+    url: 'https://example.test/wiki/pages/897351682#5-story',
     anchor: '5-story',
     matchedHeading: '5. As a PM, I want the filter function can handle data contain multiple administrative area list',
     matched: true,
@@ -38,7 +38,15 @@ const context: QaContext = {
     pageId: '897351682',
   },
   acceptanceCriteria: [
-    { id: 'AC-1', text: 'Matching: A row is included when any administrative area matches the filter selection.' },
+    {
+      id: 'AC-1',
+      text: 'Matching: A row is included when any administrative area matches the filter selection.',
+      sourceExcerpt: 'A row is included when any administrative area matches the filter selection.',
+      sourceExcerptLocation: 'PRD: 5. As a PM, I want the filter function can handle data contain multiple administrative area list',
+      sourceExcerptUrl: 'https://example.test/wiki/pages/897351682#5-story',
+      sourceExcerptKind: 'prd',
+      sourceExcerptConfidence: 'verbatim',
+    },
     { id: 'AC-2', text: 'Integrity: The system returns the original record with no row splitting.' },
   ],
   userStories: [{ id: 'US-1', text: 'As a PM, I want...' }],
@@ -54,7 +62,6 @@ const context: QaContext = {
   constraints: {
     feOnly: true,
     beAlreadyTested: false,
-    notes: '',
   },
   actualDevScopeGuidance: 'Use the main Jira issue and scoped Story PRD section.',
 };
@@ -80,6 +87,9 @@ test('builds deterministic evidence from PRD section and mapped ACs', () => {
   assert.equal(evidence.prdSectionTitle, '5. As a PM, I want the filter function can handle data contain multiple administrative area list');
   assert.deepEqual(evidence.acceptanceCriteria, [context.acceptanceCriteria[0]]);
   assert.equal(evidence.coverageNote, testCase.evidence.coverageNote);
+  assert.equal(evidence.acceptanceCriteria[0].sourceExcerptKind, 'prd');
+  assert.equal(evidence.acceptanceCriteria[0].sourceExcerptUrl, 'https://example.test/wiki/pages/897351682#5-story');
+  assert.match(evidence.acceptanceCriteria[0].sourceExcerpt || '', /administrative area matches/i);
 });
 
 test('falls back to story summary when scoped PRD heading is unavailable', () => {

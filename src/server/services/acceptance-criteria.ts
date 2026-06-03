@@ -293,6 +293,246 @@ function mergeConfidenceReasons(context: QaContext, synthesisUsed: boolean, synt
   return Array.from(new Set(merged));
 }
 
+function tokenizeExcerptText(value: string): string[] {
+  return normalizeInlineText(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s[\]_-]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token.length >= 3 && !new Set(['the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'must', 'when']).has(token));
+}
+
+function overlapExcerptTokens(criterionText: string, candidate: string): string[] {
+  const criterionTokens = new Set(tokenizeExcerptText(criterionText));
+  return Array.from(new Set(tokenizeExcerptText(candidate))).filter((token) => criterionTokens.has(token));
+}
+
+function trimExcerpt(value: string, maxLength = 200): string {
+  const text = normalizeInlineText(value);
+  if (text.length <= maxLength) return text;
+  const slice = text.slice(0, maxLength);
+  const boundary = Math.max(slice.lastIndexOf('. '), slice.lastIndexOf('; '), slice.lastIndexOf(', '), slice.lastIndexOf(' '));
+  const cut = boundary > maxLength * 0.6 ? slice.slice(0, boundary) : slice;
+  return `${cut.trimEnd().replace(/[,;:]$/, '')}…`;
+}
+
+// Schema dumps, table/tree diagrams, and code-like lines are layout, not
+// requirements — they must never be offered as evidence.
+function isStructuralNoise(line: string): boolean {
+  const text = String(line || '');
+  if (!text.trim()) return true;
+  if (/[├└│┌┐┘┤┬┴┼─←→↔↦]/.test(text)) return true;
+  if (/\b(primary key|foreign key|unique id|nullable|varchar|integer|boolean|enum)\b/i.test(text)) return true;
+  if (/\b[a-z][a-z0-9]*_(table|id|key|column|schema|flag)\b/i.test(text)) return true;
+  const symbols = (text.match(/["'`/|<>{}()=]/g) || []).length;
+  if (symbols >= 5) return true;
+  const letters = (text.match(/[A-Za-z]/g) || []).length;
+  const compact = text.replace(/\s/g, '').length;
+  if (compact > 0 && letters / compact < 0.55) return true;
+  return false;
+}
+
+function splitAuthorityIntoExcerptCandidates(text: string): string[] {
+  const normalized = normalizeMultilineText(text);
+  if (!normalized) return [];
+
+  const candidates: string[] = [];
+  const lines = normalized
+    .split('\n')
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (isStructuralNoise(line)) continue;
+    const stripped = normalizeInlineText(line.replace(/^[-*•]\s*/, '').replace(/^\d+[\.)]\s*/, ''));
+    if (!stripped || isStructuralNoise(stripped)) continue;
+    candidates.push(stripped);
+    // A long line may pack several requirements; offer each sentence on its own
+    // so the most specific one can win, but never the whole joined paragraph.
+    if (stripped.length > 120) {
+      const sentences = stripped.split(/(?<=[.!?])\s+/).map((value) => normalizeInlineText(value)).filter(Boolean);
+      for (const sentence of sentences) {
+        if (sentence && !isStructuralNoise(sentence)) candidates.push(sentence);
+      }
+    }
+  }
+
+  return Array.from(new Set(candidates.map((value) => normalizeInlineText(value)).filter(Boolean)));
+}
+
+function withAnchor(url?: string, anchor?: string): string | undefined {
+  const base = String(url || '').trim();
+  const fragment = String(anchor || '').trim().replace(/^#/, '');
+  if (!base) return undefined;
+  if (!fragment) return base;
+  return `${base.replace(/#.*$/, '')}#${fragment}`;
+}
+
+function resolveAuthorityExcerptSource(context: QaContext): { body: string; location: string; url?: string; kind: 'jira' | 'prd' } | null {
+  switch (context.scopeAuthority.type) {
+    case 'main_jira_description':
+      return {
+        body: context.mainIssue.description || context.mainIssue.renderedDescription || context.scopeAuthority.body || '',
+        location: 'Main Jira',
+        url: context.mainIssue.webUrl || undefined,
+        kind: 'jira',
+      };
+    case 'main_jira_acceptance_criteria':
+      return {
+        body: context.mainIssue.description || context.mainIssue.renderedDescription || context.scopeAuthority.body || '',
+        location: 'Main Jira',
+        url: context.mainIssue.webUrl || undefined,
+        kind: 'jira',
+      };
+    case 'matched_prd_subsection':
+      return {
+        body: context.scopeAuthority.body || '',
+        location: context.scopeAuthority.title ? `PRD: ${context.scopeAuthority.title}` : 'PRD',
+        url: withAnchor(context.scopeConfluenceSection?.url, context.scopeConfluenceSection?.anchor),
+        kind: 'prd',
+      };
+    case 'broad_prd_section':
+      return {
+        body: context.scopeAuthority.body || '',
+        location: context.scopeAuthority.title ? `PRD: ${context.scopeAuthority.title}` : 'PRD',
+        url: withAnchor(context.scopeConfluenceSection?.url, context.scopeConfluenceSection?.anchor),
+        kind: 'prd',
+      };
+    case 'parent_story_jira': {
+      const parentIssue = context.scopeParentIssue as unknown as { description?: string; renderedDescription?: string; summary?: string; webUrl?: string } | null;
+      return {
+        body: parentIssue?.description || parentIssue?.renderedDescription || context.scopeAuthority.body || '',
+        location: context.scopeParentIssue?.key ? `Parent Story Jira: ${context.scopeParentIssue.key}` : 'Parent Story Jira',
+        url: parentIssue?.webUrl || undefined,
+        kind: 'jira',
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+// Score by F1 of token overlap, not raw count: a long block is a token superset
+// of any single line and would always win on raw overlap (the "schema dump"
+// failure). F1 rewards a candidate that is both on-point (precision) and covers
+// the criterion (recall), so the specific justifying line wins.
+function scoreExcerptCandidate(criterionText: string, candidate: string): number {
+  if (isStructuralNoise(candidate)) return 0;
+  const criterionTokens = new Set(tokenizeExcerptText(criterionText));
+  const candidateTokens = new Set(tokenizeExcerptText(candidate));
+  if (!criterionTokens.size || !candidateTokens.size) return 0;
+
+  let overlap = 0;
+  for (const token of candidateTokens) {
+    if (criterionTokens.has(token)) overlap += 1;
+  }
+  if (!overlap) return 0;
+
+  const precision = overlap / candidateTokens.size;
+  const recall = overlap / criterionTokens.size;
+  let score = (2 * precision * recall) / (precision + recall);
+
+  const criterionNormalized = canonicalize(criterionText);
+  const candidateNormalized = canonicalize(candidate);
+  if (criterionNormalized.includes(candidateNormalized) || candidateNormalized.includes(criterionNormalized)) {
+    score = Math.min(1, score + 0.15);
+  }
+
+  const overlapTokens = overlapExcerptTokens(criterionText, candidate);
+  if (candidateTokens.size <= 10 && overlapTokens.length >= 3) {
+    score = Math.min(1, score + 0.08);
+  }
+  return score;
+}
+
+const EXCERPT_SCORE_GATE = 0.34;
+
+function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
+  const authority = resolveAuthorityExcerptSource(context);
+  if (!authority || !normalizeInlineText(authority.body)) {
+    logger?.info('context.ac_excerpt_selection', {
+      jiraKey: context.ticketKey,
+      authority: context.scopeAuthority?.type || 'none',
+      reason: 'no_authority_body',
+      items: [],
+    });
+    return criteria;
+  }
+
+  const candidates = splitAuthorityIntoExcerptCandidates(authority.body);
+  if (!candidates.length) {
+    logger?.info('context.ac_excerpt_selection', {
+      jiraKey: context.ticketKey,
+      authority: authority.kind,
+      reason: 'no_candidates',
+      candidateCount: 0,
+      items: [],
+    });
+    return criteria;
+  }
+
+  // Pass 1: best candidate per criterion (ungated; gate is applied below).
+  const picks = criteria.map((criterion) => {
+    let bestCandidate = '';
+    let bestScore = 0;
+    for (const candidate of candidates) {
+      const score = scoreExcerptCandidate(criterion.text, candidate);
+      if (score <= 0) continue;
+      if (score > bestScore || (score === bestScore && candidate.length < bestCandidate.length)) {
+        bestScore = score;
+        bestCandidate = candidate;
+      }
+    }
+    return { candidate: bestCandidate, score: bestScore };
+  });
+
+  // Pass 2: a line that is the best match for more than one criterion is
+  // generic boilerplate, not specific evidence — count gated picks to detect it.
+  const frequency = new Map<string, number>();
+  for (const pick of picks) {
+    if (pick.candidate && pick.score >= EXCERPT_SCORE_GATE) {
+      frequency.set(pick.candidate, (frequency.get(pick.candidate) || 0) + 1);
+    }
+  }
+
+  const trace: Array<{ id: string; score: number; reason: string; bestCandidate: string }> = [];
+
+  const result: ScopedItem[] = criteria.map((criterion, index) => {
+    const { candidate, score } = picks[index];
+    let reason: 'attached' | 'below_gate' | 'deduped' | 'no_candidate';
+    if (!candidate || score <= 0) reason = 'no_candidate';
+    else if (score < EXCERPT_SCORE_GATE) reason = 'below_gate';
+    else if ((frequency.get(candidate) || 0) > 1) reason = 'deduped';
+    else reason = 'attached';
+
+    trace.push({ id: criterion.id, score: Number(score.toFixed(2)), reason, bestCandidate: candidate ? trimExcerpt(candidate, 90) : '' });
+
+    if (reason !== 'attached') return criterion;
+
+    const criterionNormalized = canonicalize(criterion.text);
+    const pickNormalized = canonicalize(candidate);
+    const verbatim = pickNormalized.includes(criterionNormalized) || criterionNormalized.includes(pickNormalized);
+
+    return {
+      ...criterion,
+      sourceExcerpt: trimExcerpt(candidate),
+      sourceExcerptLocation: authority.location,
+      sourceExcerptUrl: authority.url,
+      sourceExcerptKind: authority.kind,
+      sourceExcerptConfidence: verbatim ? 'verbatim' : 'closest',
+    };
+  });
+
+  logger?.info('context.ac_excerpt_selection', {
+    jiraKey: context.ticketKey,
+    authority: authority.kind,
+    candidateCount: candidates.length,
+    gate: EXCERPT_SCORE_GATE,
+    items: trace,
+  });
+
+  return result;
+}
+
 export async function finalizeAcceptanceCriteria(
   context: QaContext,
   options: AcceptanceCriteriaFinalizationOptions = {}
@@ -356,6 +596,7 @@ export async function finalizeAcceptanceCriteria(
   }
 
   finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);
+  finalCriteria = attachSourceExcerpts(finalCriteria, context, options.logger);
 
   return {
     ...context,

@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Evidence UX — sample</title>
+<style>
+  :root{
+    --blue:#2563eb; --blue-soft:#eef2ff; --ink:#0f172a; --muted:#64748b;
+    --line:#e2e8f0; --bg:#f1f5f9; --card:#ffffff; --hi:#fef08a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.5;padding:32px 20px;}
+  .wrap{max-width:920px;margin:0 auto;}
+  .compare{display:grid;grid-template-columns:1fr;gap:28px;}
+  h1{font-size:15px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin:0 0 4px;}
+  .lead{color:var(--muted);font-size:14px;margin:0 0 20px;}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 22px 8px;}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;}
+  .panel-head h2{font-size:17px;margin:0;font-weight:700;}
+  .expandall{font-size:12.5px;color:var(--blue);background:none;border:none;cursor:pointer;font-weight:600;}
+  .ac{border:1px solid var(--line);border-radius:14px;padding:16px 18px;margin-bottom:14px;background:#fafbff;}
+  .ac-top{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+  .chip{font-weight:700;font-size:12px;color:var(--blue);background:var(--blue-soft);
+    border-radius:999px;padding:4px 12px;letter-spacing:.02em;}
+  .ac-text{font-size:15px;margin:0 0 12px;}
+  /* source disclosure */
+  .src{border-top:1px dashed var(--line);padding-top:10px;}
+  .src-toggle{display:flex;align-items:center;gap:8px;background:none;border:none;cursor:pointer;
+    font:inherit;color:var(--muted);font-size:12.5px;font-weight:600;padding:2px 0;}
+  .src-toggle .caret{transition:transform .15s;color:var(--blue);}
+  .src.open .caret{transform:rotate(90deg);}
+  .loc-tag{color:var(--muted);font-weight:500;}
+  .badge{font-size:10.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;
+    border-radius:6px;padding:2px 7px;}
+  .badge.verbatim{background:#dcfce7;color:#166534;}
+  .badge.closest{background:#fef3c7;color:#92400e;}
+  .badge.none{background:#f1f5f9;color:#64748b;}
+  .src-body{display:none;margin-top:10px;}
+  .src.open .src-body{display:block;}
+  blockquote{margin:0;border-left:3px solid var(--blue);background:#f8faff;
+    border-radius:0 10px 10px 0;padding:10px 14px;font-size:13.5px;color:#1e293b;}
+  mark{background:var(--hi);border-radius:3px;padding:0 2px;}
+  .src-foot{display:flex;align-items:center;gap:10px;margin-top:8px;font-size:12px;}
+  .src-foot a{color:var(--blue);text-decoration:none;font-weight:600;}
+  .src-foot a:hover{text-decoration:underline;}
+  .more{background:none;border:none;color:var(--blue);font-weight:600;cursor:pointer;font-size:12px;}
+  /* honest empty state */
+  .empty{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;font-style:italic;padding-top:10px;border-top:1px dashed var(--line);}
+  .empty a{color:var(--blue);font-style:normal;font-weight:600;text-decoration:none;}
+  .note{font-size:12px;color:var(--muted);margin:18px 2px 0;}
+  .before{opacity:.96}
+  .before .badblock{border-left:3px solid #cbd5e1;background:#eef1f6;border-radius:0 10px 10px 0;
+    padding:10px 14px;font-size:12.5px;color:#475569;font-family:ui-monospace,Menlo,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .before .loc{font-size:11px;color:#94a3b8;font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-top:6px;}
+  .tag{display:inline-block;font-size:11px;font-weight:700;color:#fff;border-radius:6px;padding:3px 9px;margin-bottom:10px;}
+  .tag.bad{background:#dc2626;}
+  .tag.good{background:#16a34a;}
+</style>
+</head>
+<body>
+<div class="wrap compare">
+
+  <!-- ===================== AFTER (proposed) ===================== -->
+  <div>
+    <h1>QA Agent · Scope snapshot</h1>
+    <p class="lead">Proposed evidence UX — confident, specific, scannable.</p>
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Acceptance Criteria</h2>
+        <button class="expandall" onclick="toggleAll(this)">Expand all sources</button>
+      </div>
+
+      <!-- AC-1 collapsed, verbatim -->
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-1</span></div>
+        <p class="ac-text">When an analysis result has no score, the AI Summary tab is still available and displays a dedicated no-score summary variant instead of a ranking-based summary.</p>
+        <div class="src">
+          <button class="src-toggle" onclick="toggleSrc(this)">
+            <span class="caret">▸</span> Source
+            <span class="loc-tag">· PRD: AI Summary NO SCORE</span>
+            <span class="badge verbatim">verbatim</span>
+          </button>
+          <div class="src-body">
+            <blockquote>The <mark>AI Summary tab is available</mark> in the Analysis Summary window and <mark>displays an executive summary for results with no score</mark>.</blockquote>
+            <div class="src-foot"><a href="#">PRD: AI Summary NO SCORE ↗</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AC-2 expanded, verbatim, correct line (NOT the schema dump) -->
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-2</span></div>
+        <p class="ac-text">The no-score summary must describe the area using absolute characteristics from the available analysis inputs, so users understand what kind of area it is, which signals define it, and what zone type it represents without relying on comparative scoring.</p>
+        <div class="src open">
+          <button class="src-toggle" onclick="toggleSrc(this)">
+            <span class="caret">▸</span> Source
+            <span class="loc-tag">· PRD: AI Summary NO SCORE</span>
+            <span class="badge verbatim">verbatim</span>
+          </button>
+          <div class="src-body">
+            <blockquote>The no-score AI Summary uses an <mark>absolute profiling-based narrative</mark> and <mark>describes the area characteristics, defining signals, and zone type</mark>.</blockquote>
+            <div class="src-foot"><a href="#">PRD: AI Summary NO SCORE ↗</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AC-3 expanded, verbatim, highlighted -->
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-3</span></div>
+        <p class="ac-text">The no-score summary must include landmark context and an environment risk warning for the area, so the output surfaces both recognizable location context and a caution that the assessment is indicative rather than ground truth.</p>
+        <div class="src open">
+          <button class="src-toggle" onclick="toggleSrc(this)">
+            <span class="caret">▸</span> Source
+            <span class="loc-tag">· PRD: AI Summary NO SCORE</span>
+            <span class="badge verbatim">verbatim</span>
+          </button>
+          <div class="src-body">
+            <blockquote>The no-score AI Summary includes <mark>landmark context</mark> and <mark>environment risk indication</mark>.</blockquote>
+            <div class="src-foot"><a href="#">PRD: AI Summary NO SCORE ↗</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AC-4 collapsed, closest match -->
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-4</span></div>
+        <p class="ac-text">The no-score summary must still include Strategic Takeaways as a separate section.</p>
+        <div class="src">
+          <button class="src-toggle" onclick="toggleSrc(this)">
+            <span class="caret">▸</span> Source
+            <span class="loc-tag">· PRD: AI Summary NO SCORE</span>
+            <span class="badge closest">closest match</span>
+          </button>
+          <div class="src-body">
+            <blockquote><mark>Strategic Takeaways</mark> remain available for the no-score variant.</blockquote>
+            <div class="src-foot"><a href="#">PRD: AI Summary NO SCORE ↗</a></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- AC-5 honest empty state -->
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-5</span></div>
+        <p class="ac-text">Strategic Takeaways in the no-score variant must remain actionable and focused on what worked, what to avoid, and which opportunities are most viable to pursue.</p>
+        <div class="empty">
+          <span>No specific source line matched —</span>
+          <a href="#">open PRD: AI Summary NO SCORE ↗</a>
+        </div>
+      </div>
+
+    </div>
+    <p class="note">Collapsed by default · matched phrase highlighted · location is a link · honest empty state when no confident line exists · <b>verbatim</b> vs <b>closest match</b> badge sets expectations.</p>
+  </div>
+
+  <!-- ===================== BEFORE (current) ===================== -->
+  <div class="before">
+    <span class="tag bad">Current</span>
+    <div class="panel">
+      <div class="panel-head"><h2>Acceptance Criteria</h2></div>
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-2</span></div>
+        <p class="ac-text">The no-score summary must describe the area using absolute characteristics…</p>
+        <div class="badblock">feedback_table ├── feedback_id ← unique ID (Primary Key) ├── response_id ← foreign key → ai_response_table ├── user_id ├── surface ← "ai_summary" / "ai_chat" ├── rating ← "positive" / "negative" / null (if reset) ├── re…</div>
+        <div class="loc">Source location · PRD: 2. AI for Analysis Summary</div>
+      </div>
+      <div class="ac">
+        <div class="ac-top"><span class="chip">AC-3</span></div>
+        <p class="ac-text">The no-score summary must include landmark context and an environment risk warning…</p>
+        <div class="badblock">Design: JIRA: 1. AI Capability for Executive Summary Automatically generate a high-level summary based on the completed analysis results, without requiring user questions 1. Summarizing overall analysis results - AI is…</div>
+        <div class="loc">Source location · PRD: 2. AI for Analysis Summary</div>
+      </div>
+    </div>
+    <p class="note">Schema dump as “evidence”, identical boilerplate reused across ACs, truncated mid-token.</p>
+  </div>
+
+</div>
+
+<script>
+  function toggleSrc(btn){ btn.parentElement.classList.toggle('open'); }
+  function toggleAll(btn){
+    const panel = btn.closest('.panel');
+    const sources = panel.querySelectorAll('.src');
+    const anyClosed = [...sources].some(s => !s.classList.contains('open'));
+    sources.forEach(s => s.classList.toggle('open', anyClosed));
+    btn.textContent = anyClosed ? 'Collapse all sources' : 'Expand all sources';
+  }
+</script>
+</body>
+</html>

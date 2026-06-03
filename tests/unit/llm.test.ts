@@ -9,6 +9,7 @@ import {
   normalizeBddScenario,
   normalizeCase,
   normalizeJiraReference,
+  normalizeScopeSnapshotTranslation,
   normalizeTextList,
 } from '../../src/server/services/llm';
 
@@ -164,7 +165,7 @@ test('prefers main ticket description over story context when description is mea
     confidenceReasons: [],
     requiresConfidencePermission: false,
     acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [], confluenceCriteria: [] },
-    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    constraints: { feOnly: true, beAlreadyTested: false },
     actualDevScopeGuidance: 'Use the main Jira issue first.',
     coverageEnforced: true,
     manualScopeOverride: false,
@@ -203,7 +204,7 @@ test('falls back to acceptance criteria when description is only AC content', ()
     confidenceReasons: [],
     requiresConfidencePermission: false,
     acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [], confluenceCriteria: [] },
-    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    constraints: { feOnly: true, beAlreadyTested: false },
     actualDevScopeGuidance: 'Use the main Jira issue first.',
     coverageEnforced: true,
     manualScopeOverride: false,
@@ -230,7 +231,7 @@ test('uses matched PRD subsection as primary authority for thin-ticket PRD fallb
     scopeConfluenceSection: {
       pageId: '950075398',
       title: 'AI Powered Assistance',
-      url: 'https://example.test/prd',
+      url: 'https://example.test/prd#AI-Summary-NO-SCORE',
       anchor: 'AI-Summary-NO-SCORE',
       matchedHeading: 'AI Summary NO SCORE',
       matched: true,
@@ -260,7 +261,7 @@ test('uses matched PRD subsection as primary authority for thin-ticket PRD fallb
       thinTicketFallbackUsed: true,
       prdSubsectionMatchQuality: 'confident',
     },
-    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    constraints: { feOnly: true, beAlreadyTested: false },
     actualDevScopeGuidance: 'Use the matched PRD subsection for thin tickets.',
     coverageEnforced: true,
     manualScopeOverride: false,
@@ -292,7 +293,7 @@ test('P3: the no-scopeAuthority fallback emits the unified main_jira_* authority
     confidenceReasons: [],
     requiresConfidencePermission: false,
     acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [], confluenceCriteria: [] },
-    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    constraints: { feOnly: true, beAlreadyTested: false },
     actualDevScopeGuidance: 'Use the main Jira issue first.',
     coverageEnforced: true,
     manualScopeOverride: false,
@@ -353,7 +354,7 @@ test('builds a slim generation prompt context without noisy diagnostics criteria
     confidenceReasons: [],
     requiresConfidencePermission: false,
     acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [{ id: 'AC-99', text: 'Noisy raw criterion' }], confluenceCriteria: [] },
-    constraints: { feOnly: true, beAlreadyTested: false, notes: '' },
+    constraints: { feOnly: true, beAlreadyTested: false },
     actualDevScopeGuidance: 'Use the main Jira issue first.',
     coverageEnforced: true,
     manualScopeOverride: false,
@@ -363,4 +364,61 @@ test('builds a slim generation prompt context without noisy diagnostics criteria
   assert.equal('acceptanceCriteriaDiagnostics' in payload, false);
   assert.deepEqual(payload.acceptanceCriteria, [{ id: 'AC-1', text: 'Canonical acceptance criterion' }]);
   assert.equal(payload.scopeAuthority?.type, 'main_jira_description');
+});
+
+test('localizes scope snapshot with field-by-field fallback and preserves ids', () => {
+  const context: any = {
+    mainIssue: { summary: '[FE] AI Summary - no scoring' },
+    scopeParentIssue: { summary: 'AI Assistance Summary Result' },
+    scopeConfluenceSection: { matchedHeading: 'AI Summary NO SCORE', title: 'AI Powered Assistance' },
+    confidenceReasons: [
+      'Acceptance criteria were synthesized from structured technical design because deterministic extraction was weak.',
+      'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+    ],
+    acceptanceCriteriaDiagnostics: {
+      selectedAcceptanceCriteriaReason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+    },
+    userStories: [{ id: 'US-1', text: 'AI Assistance Summary Result' }],
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The AI Summary tab is available for analysis results with no score.',
+        sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window.',
+        sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
+        sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
+        sourceExcerptKind: 'prd',
+      },
+      {
+        id: 'AC-2',
+        text: 'Strategic Takeaways remain available for the no-score variant.',
+      },
+    ],
+  };
+
+  const localized = normalizeScopeSnapshotTranslation(
+    {
+      mainSummary: 'AI Summary untuk hasil tanpa score',
+      parentStorySummary: '',
+      scopedPrdSection: 'AI Summary NO SCORE',
+      confidenceReasons: ['AC final dibentuk dari penjelasan teknis karena hasil ekstraksi otomatisnya kurang kuat.'],
+      selectedAcceptanceCriteriaReason: '',
+      userStories: [{ id: 'US-1', text: 'Ringkasan hasil AI Assistance' }],
+      acceptanceCriteria: [{ id: 'AC-1', text: 'Tab AI Summary tersedia untuk hasil analisis tanpa score.' }],
+    },
+    context
+  );
+
+  assert.equal(localized.mainSummary, 'AI Summary untuk hasil tanpa score');
+  assert.equal(localized.parentStorySummary, 'AI Assistance Summary Result');
+  assert.equal(localized.confidenceReasons.length, 2);
+  assert.equal(localized.confidenceReasons[1], 'Main Jira scope was insufficient, so the matched PRD subsection was used.');
+  assert.equal(localized.selectedAcceptanceCriteriaReason, 'Main Jira scope was insufficient, so the matched PRD subsection was used.');
+  assert.deepEqual(localized.userStories, [{ id: 'US-1', text: 'Ringkasan hasil AI Assistance' }]);
+  assert.equal(localized.acceptanceCriteria.length, 2);
+  assert.equal(localized.acceptanceCriteria[0].id, 'AC-1');
+  assert.equal(localized.acceptanceCriteria[0].text, 'Tab AI Summary tersedia untuk hasil analisis tanpa score.');
+  assert.equal(localized.acceptanceCriteria[0].sourceExcerptLocation, 'PRD: AI Summary NO SCORE');
+  assert.equal(localized.acceptanceCriteria[0].sourceExcerptUrl, 'https://example.test/prd#AI-Summary-NO-SCORE');
+  assert.equal(localized.acceptanceCriteria[1].id, 'AC-2');
+  assert.equal(localized.acceptanceCriteria[1].text, 'Strategic Takeaways remain available for the no-score variant.');
 });
