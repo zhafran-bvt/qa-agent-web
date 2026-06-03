@@ -6,6 +6,7 @@ interface AnalyzePanelProps {
   form: AnalyzeRequest;
   busy: boolean;
   lang: UiLanguage;
+  suggestionsEnabled: boolean;
   suggestions: SuggestedTicket[];
   suggestionsLoading: boolean;
   suggestionsError: string;
@@ -18,6 +19,7 @@ export function AnalyzePanel({
   form,
   busy,
   lang,
+  suggestionsEnabled,
   suggestions,
   suggestionsLoading,
   suggestionsError,
@@ -62,10 +64,21 @@ export function AnalyzePanel({
         <div className="suggestions-header">
           <strong>{t.suggestedTickets}</strong>
           <span className="muted">
-            {suggestionsLoading ? t.loadingSuggestions : suggestionsError ? t.suggestionsUnavailable : t.suggestedSubtitle}
+            {!suggestionsEnabled
+              ? t.suggestionsLoginHint
+              : suggestionsLoading
+                ? t.loadingSuggestions
+                : suggestionsError
+                  ? t.suggestionsUnavailable
+                  : t.suggestedSubtitle}
           </span>
         </div>
-        {suggestionsError ? (
+        {!suggestionsEnabled ? (
+          <div className="suggestions-empty-state">
+            <strong>{t.suggestionsLockedTitle}</strong>
+            <span className="muted">{t.suggestionsLockedBody}</span>
+          </div>
+        ) : suggestionsError ? (
           <div className="muted">{suggestionsError}</div>
         ) : suggestions.length ? (
           <div className="suggestions-list">

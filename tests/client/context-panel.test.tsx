@@ -84,6 +84,7 @@ describe('ContextPanel', () => {
     render(
       <ContextPanel
         context={baseContext}
+        analyzing={false}
         translation={null}
         translating={false}
         permissionApproved={false}
@@ -111,5 +112,27 @@ describe('ContextPanel', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'ID' }));
     expect(onLanguageChange).toHaveBeenCalledWith('id');
+  });
+
+  it('shows an explicit loading state while analysis is running', () => {
+    render(
+      <ContextPanel
+        context={null}
+        analyzing
+        translation={null}
+        translating={false}
+        permissionApproved={false}
+        overrideReason=""
+        busy={false}
+        lang="en"
+        onLanguageChange={vi.fn()}
+        onPermissionApprovedChange={vi.fn()}
+        onOverrideReasonChange={vi.fn()}
+        onGenerate={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Analyzing Jira and Confluence...')).toBeTruthy();
+    expect(screen.getByText('Resolving scope authority, acceptance criteria, and supporting evidence for this ticket.')).toBeTruthy();
   });
 });

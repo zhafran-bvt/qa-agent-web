@@ -125,6 +125,7 @@ describe('ReviewPanel', () => {
     render(
       <ReviewPanel
         context={context}
+        generating={false}
         testCases={testCases}
         validation={validation}
         coverage={coverage}
@@ -138,5 +139,25 @@ describe('ReviewPanel', () => {
     expect(document.querySelector('.source-quote')?.textContent).toMatch(/Analysis Summary window/);
     expect(screen.getAllByText(/PRD: AI Summary NO SCORE/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
+  });
+
+  it('shows an explicit generation state before cases are ready', () => {
+    render(
+      <ReviewPanel
+        context={context}
+        generating
+        testCases={[]}
+        validation={[]}
+        coverage={null}
+        coverageEnforced={true}
+        manualScopeOverride={false}
+        lang="en"
+        onCaseChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Generating test cases...')).toBeTruthy();
+    expect(screen.getByText('Building BDD cases from the resolved scope authority and final acceptance criteria.')).toBeTruthy();
+    expect(screen.getByText('Coverage will appear after generation finishes.')).toBeTruthy();
   });
 });

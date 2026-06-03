@@ -403,7 +403,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const { sid, session } = sessionEnvelope;
   const jql = [
     `${QA_ASSIGNEE_JQL_FIELD} = currentUser()`,
-    'AND type IN (Bug, Task)',
+    'AND type = Task',
     'AND statusCategory != Done',
     'AND labels = frontend',
     'AND sprint in openSprints()',

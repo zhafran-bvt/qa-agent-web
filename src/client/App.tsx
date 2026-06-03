@@ -477,6 +477,7 @@ export default function App() {
               lang={lang}
               form={form}
               busy={analyzing}
+              suggestionsEnabled={Boolean(config?.authenticated)}
               suggestions={ticketSuggestions}
               suggestionsLoading={loadingSuggestions}
               suggestionsError={suggestionsError}
@@ -502,6 +503,7 @@ export default function App() {
           <ContextPanel
             lang={lang}
             context={context}
+            analyzing={analyzing}
             translation={lang === 'id' ? scopeTranslation : null}
             translating={translatingScope}
             permissionApproved={confidenceApproved}
@@ -529,6 +531,7 @@ export default function App() {
           <ReviewPanel
             lang="en"
             context={context}
+            generating={generating}
             testCases={testCases}
             validation={validation}
             coverage={coverage}

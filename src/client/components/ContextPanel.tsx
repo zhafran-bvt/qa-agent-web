@@ -5,6 +5,7 @@ import { SourceExcerpt } from './SourceExcerpt';
 
 interface ContextPanelProps {
   context: QaContext | null;
+  analyzing: boolean;
   translation: ScopeSnapshotTranslation | null;
   translating: boolean;
   permissionApproved: boolean;
@@ -42,6 +43,7 @@ function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTransl
 
 export function ContextPanel({
   context,
+  analyzing,
   translation,
   translating,
   permissionApproved,
@@ -89,7 +91,34 @@ export function ContextPanel({
       </div>
 
       {!context ? (
-        <div className="summary muted">{t.noContext}</div>
+        analyzing ? (
+          <div className="context-loading">
+            <div className="summary">
+              <strong>{t.loadingTitle}</strong>
+              <div className="muted">{t.loadingBody}</div>
+            </div>
+            <div className="context-grid context-grid-compact">
+              {Array.from({ length: 6 }).map((_, index) => (
+                <div className="context-item context-item-loading" key={index}>
+                  <span className="context-label skeleton-block skeleton-label" />
+                  <div className="context-value">
+                    <span className="skeleton-block skeleton-line" />
+                    <span className="skeleton-block skeleton-line skeleton-line-short" />
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="summary summary-status">
+              <div className="skeleton-stack">
+                <span className="skeleton-block skeleton-line" />
+                <span className="skeleton-block skeleton-line" />
+                <span className="skeleton-block skeleton-line skeleton-line-short" />
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="summary muted">{t.noContext}</div>
+        )
       ) : (
         <>
           <div className="context-grid context-grid-compact">

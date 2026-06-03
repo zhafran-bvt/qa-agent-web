@@ -30,8 +30,9 @@ export const uiText = {
       steps: [
         {
           title: '1. Analyze Jira + Confluence',
-          body: 'The app reads the main Jira ticket first, then uses the linked Story and scoped PRD section as supporting context when needed.',
+          body: 'You can type a Jira key manually or pick a suggested ticket after logging in. The app reads the main Jira ticket first, then uses linked Story and scoped PRD context only when needed.',
           details: [
+            'Suggested tickets are filtered to active-sprint frontend bugs and tasks assigned to the logged-in QA user.',
             'If the main Jira ticket already has clear acceptance criteria, that becomes the primary scope source.',
             'If the main ticket is thin or empty, the app falls back to the linked Story and then tries to isolate the most relevant PRD subsection.',
             'Scope toggles such as FE-only, BE already tested, and include comments shape what the run is allowed to cover.',
@@ -39,16 +40,17 @@ export const uiText = {
         },
         {
           title: '2. Build the scope snapshot',
-          body: 'It resolves the final acceptance criteria, user stories, scope confidence, and the exact source used for that run.',
+          body: 'It resolves one scope authority, one final acceptance-criteria set, and the supporting Jira or PRD evidence for that run.',
           details: [
             'The app chooses one canonical acceptance-criteria set before generation starts.',
             'It records where that scope came from: main Jira, parent Story, or scoped PRD subsection.',
+            'Quoted source excerpts are attached to acceptance criteria when a credible supporting line is found.',
             'If the extracted scope looks weak or ambiguous, the confidence section explains why before generation is allowed.',
           ],
         },
         {
           title: '3. Generate BDD test cases',
-          body: 'The LLM generates test cases only from the resolved scope. Each case is mapped to the final acceptance-criteria set.',
+          body: 'The LLM generates test cases only from the resolved scope authority and final acceptance criteria. Each case is mapped back to that same AC set.',
           details: [
             'Generated titles, Jira references, BDD steps, and AC mappings must all point back to the same ticket run.',
             'The app is supposed to avoid broadening scope just because related Story or PRD content exists nearby.',
@@ -57,11 +59,12 @@ export const uiText = {
         },
         {
           title: '4. Validate and review',
-          body: 'Validation checks title format, Jira reference, BDD structure, FE scope, AC mapping, and overall coverage before approval.',
+          body: 'Validation checks title format, Jira reference, BDD structure, FE scope, AC mapping, evidence, and overall coverage before approval.',
           details: [
             'Each case is checked for title format, exact main-ticket Jira reference, and usable BDD structure.',
             'FE-only validation blocks backend-heavy wording when the run is meant to stay on frontend scope.',
             'Coverage tracks which acceptance criteria are covered, missing, or mapped incorrectly so approval does not happen blindly.',
+            'Review surfaces source excerpts and source links so QA can inspect the supporting Jira or PRD wording directly.',
           ],
         },
         {
@@ -107,6 +110,9 @@ export const uiText = {
       includeComments: 'Include comments',
       suggestedTickets: 'Suggested for you',
       suggestedSubtitle: 'Tickets assigned to you in the active sprint.',
+      suggestionsLoginHint: 'Recommendations appear after you log in with Atlassian.',
+      suggestionsLockedTitle: 'Recommendations unavailable',
+      suggestionsLockedBody: 'Log in with Atlassian first to load tickets assigned to you in the active sprint.',
       loadingSuggestions: 'Loading assigned tickets...',
       suggestionsUnavailable: 'Assigned ticket suggestions are unavailable right now.',
       noSuggestedTickets: 'No active sprint tickets assigned to you.',
@@ -127,6 +133,8 @@ export const uiText = {
       title: 'Scope Snapshot',
       subtitle: 'Review the resolved Jira scope, final acceptance criteria, and generation readiness.',
       noContext: 'No context loaded.',
+      loadingTitle: 'Analyzing Jira and Confluence...',
+      loadingBody: 'Resolving scope authority, acceptance criteria, and supporting evidence for this ticket.',
       ticket: 'Ticket',
       epic: 'Epic',
       acSource: 'AC Source',
@@ -165,6 +173,9 @@ export const uiText = {
       title: 'Review Test Cases',
       subtitle: 'This is the main workspace after generation. Edit cases inline while validation and AC coverage update automatically.',
       noGeneratedCases: 'No test cases generated.',
+      generatingTitle: 'Generating test cases...',
+      generatingBody: 'Building BDD cases from the resolved scope authority and final acceptance criteria.',
+      generatingCoverage: 'Coverage will appear after generation finishes.',
       needsFixes: (count: number) => `${count} case(s) need fixes before approval.`,
       casesValid: (count: number) => `${count} case(s) valid.`,
       noGeneratedCasesYet: 'No generated cases yet.',
@@ -285,8 +296,9 @@ export const uiText = {
       steps: [
         {
           title: '1. Analisis Jira + Confluence',
-          body: 'App baca tiket Jira utama dulu, lalu pakai Story yang terhubung dan bagian PRD yang relevan sebagai context pendukung kalau memang dibutuhin.',
+          body: 'Kamu bisa isi key Jira manual atau pilih tiket saran setelah login. App baca tiket Jira utama dulu, lalu pakai Story dan PRD yang terhubung hanya kalau memang dibutuhin.',
           details: [
+            'Tiket saran difilter ke bug dan task frontend di sprint aktif yang di-assign ke user QA yang sedang login.',
             'Kalau tiket Jira utama sudah punya acceptance criteria yang jelas, itu jadi sumber scope utama.',
             'Kalau tiket utama tipis atau kosong, app fallback ke Story yang terhubung lalu coba nyari subsection PRD yang paling relevan.',
             'Toggle seperti FE-only, BE already tested, dan include comments ikut nentuin batas scope run tersebut.',
@@ -294,16 +306,17 @@ export const uiText = {
         },
         {
           title: '2. Susun scope snapshot',
-          body: 'App nentuin acceptance criteria final, user story, confidence scope, dan sumber scope yang dipakai untuk run itu.',
+          body: 'App nentuin satu scope authority, satu set acceptance criteria final, dan evidence dari Jira atau PRD untuk run itu.',
           details: [
             'App milih satu set acceptance criteria final dulu sebelum generate dimulai.',
             'Sumber scope-nya dicatat jelas: main Jira, parent Story, atau subsection PRD yang dipilih.',
+            'Cuplikan source akan ditempel ke acceptance criteria kalau ada baris pendukung yang cukup kuat.',
             'Kalau scope yang keambil kelihatan lemah atau ambigu, bagian confidence bakal jelasin dulu sebelum generate boleh jalan.',
           ],
         },
         {
           title: '3. Generate BDD test case',
-          body: 'LLM generate test case cuma dari scope yang sudah diselesaikan. Setiap case dimapping ke acceptance-criteria final yang sama.',
+          body: 'LLM generate test case cuma dari scope authority dan acceptance criteria final yang sudah dipilih. Setiap case dimapping ke set AC yang sama.',
           details: [
             'Title, referensi Jira, langkah BDD, dan mapping AC yang digenerate harus tetap nyambung ke run tiket yang sama.',
             'App seharusnya nggak memperlebar scope cuma gara-gara ada isi Story atau PRD lain yang berdekatan.',
@@ -312,11 +325,12 @@ export const uiText = {
         },
         {
           title: '4. Validasi dan review',
-          body: 'Validasi ngecek format title, referensi Jira, struktur BDD, scope FE, mapping AC, dan coverage sebelum bisa di-approve.',
+          body: 'Validasi ngecek format title, referensi Jira, struktur BDD, scope FE, mapping AC, evidence, dan coverage sebelum bisa di-approve.',
           details: [
             'Setiap case dicek dari format title, referensi Jira yang harus exact ke tiket utama, dan struktur BDD yang masih kepakai.',
             'Validasi FE-only bakal blok wording yang terlalu backend kalau run-nya memang harus tetap di frontend scope.',
             'Coverage nunjukkin AC mana yang sudah ke-cover, belum ke-cover, atau salah mapping supaya approval nggak buta.',
+            'Review juga nunjukkin cuplikan source dan link source supaya QA bisa cek wording Jira atau PRD langsung.',
           ],
         },
         {
@@ -362,6 +376,9 @@ export const uiText = {
       includeComments: 'Ikut ambil komentar',
       suggestedTickets: 'Saran tiket buat kamu',
       suggestedSubtitle: 'Tiket aktif di sprint berjalan yang di-assign ke kamu.',
+      suggestionsLoginHint: 'Rekomendasi baru muncul setelah kamu login pakai Atlassian.',
+      suggestionsLockedTitle: 'Rekomendasi belum tersedia',
+      suggestionsLockedBody: 'Login ke Atlassian dulu untuk lihat tiket sprint aktif yang di-assign ke kamu.',
       loadingSuggestions: 'Lagi ambil tiket yang di-assign ke kamu...',
       suggestionsUnavailable: 'Saran tiket lagi belum bisa dimuat.',
       noSuggestedTickets: 'Belum ada tiket sprint aktif yang di-assign ke kamu.',
@@ -382,6 +399,8 @@ export const uiText = {
       title: 'Ringkasan Scope',
       subtitle: 'Lihat hasil scope Jira, AC final, dan kesiapan sebelum generate.',
       noContext: 'Context belum dimuat.',
+      loadingTitle: 'Lagi analisis Jira dan Confluence...',
+      loadingBody: 'Lagi nentuin scope authority, acceptance criteria, dan evidence pendukung untuk tiket ini.',
       ticket: 'Tiket',
       epic: 'Epic',
       acSource: 'Sumber AC',
@@ -420,6 +439,9 @@ export const uiText = {
       title: 'Review Test Case',
       subtitle: 'Ini workspace utama setelah generate. Kamu bisa edit case langsung, dan validasi plus coverage AC bakal ikut update otomatis.',
       noGeneratedCases: 'Belum ada test case yang digenerate.',
+      generatingTitle: 'Lagi generate test case...',
+      generatingBody: 'Lagi bikin case BDD dari scope authority dan acceptance criteria final yang sudah dipilih.',
+      generatingCoverage: 'Coverage akan muncul setelah generate selesai.',
       needsFixes: (count: number) => `${count} case masih perlu dibenerin sebelum bisa di-approve.`,
       casesValid: (count: number) => `${count} case sudah valid.`,
       noGeneratedCasesYet: 'Belum ada case hasil generate.',

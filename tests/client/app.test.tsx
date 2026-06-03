@@ -50,6 +50,9 @@ describe('App utility UI', () => {
   it('opens the workflow and status modals from the left utility triggers', async () => {
     render(<App />);
 
+    await waitFor(() => expect(screen.getByText('Recommendations unavailable')).toBeTruthy());
+    expect(screen.getByText('Log in with Atlassian first to load tickets assigned to you in the active sprint.')).toBeTruthy();
+
     await userEvent.click(screen.getByRole('button', { name: /How it works/i }));
     expect(screen.getByRole('dialog', { name: /How QA Agent works/i })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));

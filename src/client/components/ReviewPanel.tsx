@@ -5,6 +5,7 @@ import { SourceExcerpt } from './SourceExcerpt';
 
 interface ReviewPanelProps {
   context: QaContext | null;
+  generating: boolean;
   testCases: GeneratedTestCase[];
   validation: ValidationEntry[];
   coverage: CoverageSummary | null;
@@ -97,6 +98,7 @@ function coverageSummaryText(
 
 export function ReviewPanel({
   context,
+  generating,
   testCases,
   validation,
   coverage,
@@ -121,11 +123,14 @@ export function ReviewPanel({
       </div>
 
       <div className={`summary summary-status ${invalidCount ? 'summary-warn' : ''}`}>
-        {testCases.length === 0 ? t.noGeneratedCases : invalidCount ? t.needsFixes(invalidCount) : t.casesValid(testCases.length)}
+        {generating ? t.generatingTitle : testCases.length === 0 ? t.noGeneratedCases : invalidCount ? t.needsFixes(invalidCount) : t.casesValid(testCases.length)}
       </div>
 
       <div className="summary summary-generated">
-        {generatedSummaryText(testCases, coverage, context, coverageEnforced, lang).map((line) => (
+        {(generating
+          ? [t.generatingBody]
+          : generatedSummaryText(testCases, coverage, context, coverageEnforced, lang)
+        ).map((line) => (
           <div key={line}>{line}</div>
         ))}
       </div>
@@ -133,12 +138,36 @@ export function ReviewPanel({
       <details className="summary summary-detail">
         <summary>{t.coverageDetails}</summary>
         <div className="summary-detail-body">
-        {coverageSummaryText(coverage, context, coverageEnforced, manualScopeOverride, lang).map((line) => (
-          <div key={line}>{line}</div>
-        ))}
+          {(generating
+            ? [t.generatingCoverage]
+            : coverageSummaryText(coverage, context, coverageEnforced, manualScopeOverride, lang)
+          ).map((line) => (
+            <div key={line}>{line}</div>
+          ))}
         </div>
       </details>
 
+      {generating && testCases.length === 0 ? (
+        <div className="case-list case-list-loading">
+          {Array.from({ length: 2 }).map((_, index) => (
+            <article className="case-card case-card-loading" key={index}>
+              <div className="case-header">
+                <div className="case-title-block">
+                  <div className="case-title-meta">
+                    <div className="case-id skeleton-block skeleton-pill" />
+                    <div className="skeleton-block skeleton-line skeleton-line-short" />
+                  </div>
+                </div>
+              </div>
+              <div className="skeleton-stack">
+                <span className="skeleton-block skeleton-line" />
+                <span className="skeleton-block skeleton-line" />
+                <span className="skeleton-block skeleton-line skeleton-line-short" />
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
       <div className="case-list">
         {testCases.map((testCase, index) => {
           const validationEntry = validation[index];
@@ -251,6 +280,7 @@ export function ReviewPanel({
           );
         })}
       </div>
+      )}
     </section>
   );
 }
