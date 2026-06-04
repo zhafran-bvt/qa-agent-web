@@ -181,7 +181,9 @@ describe('ReviewPanel', () => {
         coverage={coverage}
         coverageEnforced={true}
         manualScopeOverride={false}
+        generateBlocker=""
         lang="en"
+        onGenerate={vi.fn()}
         onCaseChange={vi.fn()}
       />
     );
@@ -202,7 +204,9 @@ describe('ReviewPanel', () => {
         coverage={null}
         coverageEnforced={true}
         manualScopeOverride={false}
+        generateBlocker=""
         lang="en"
+        onGenerate={vi.fn()}
         onCaseChange={vi.fn()}
       />
     );
@@ -210,6 +214,29 @@ describe('ReviewPanel', () => {
     expect(screen.getByText('Generating test cases...')).toBeTruthy();
     expect(screen.getByText('Building BDD cases from the resolved scope authority and final acceptance criteria.')).toBeTruthy();
     expect(screen.getByText('Coverage will appear after generation finishes.')).toBeTruthy();
+  });
+
+  it('shows task-aware empty guidance before generation starts', () => {
+    render(
+      <ReviewPanel
+        context={context}
+        generating={false}
+        testCases={[]}
+        validation={[]}
+        coverage={null}
+        coverageEnforced={true}
+        manualScopeOverride={false}
+        generateBlocker=""
+        lang="en"
+        onGenerate={vi.fn()}
+        onCaseChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Generate cases to begin review')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate BDD with AI' })).toBeTruthy();
+    expect(screen.getByText('Review AC coverage')).toBeTruthy();
+    expect(screen.getByText('Approve cases for TestRail')).toBeTruthy();
   });
 
   it('summarizes positive, negative, and edge-case mix', () => {
@@ -226,7 +253,9 @@ describe('ReviewPanel', () => {
         coverage={coverage}
         coverageEnforced={true}
         manualScopeOverride={false}
+        generateBlocker=""
         lang="en"
+        onGenerate={vi.fn()}
         onCaseChange={vi.fn()}
       />
     );

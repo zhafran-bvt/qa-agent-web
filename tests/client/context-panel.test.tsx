@@ -110,7 +110,6 @@ describe('ContextPanel', () => {
         onLanguageChange={onLanguageChange}
         onPermissionApprovedChange={vi.fn()}
         onOverrideReasonChange={vi.fn()}
-        onGenerate={vi.fn()}
       />
     );
 
@@ -146,11 +145,32 @@ describe('ContextPanel', () => {
         onLanguageChange={vi.fn()}
         onPermissionApprovedChange={vi.fn()}
         onOverrideReasonChange={vi.fn()}
-        onGenerate={vi.fn()}
       />
     );
 
     expect(screen.getByText('Analyzing Jira and Confluence...')).toBeTruthy();
     expect(screen.getByText('Resolving scope authority, acceptance criteria, and supporting evidence for this ticket.')).toBeTruthy();
+  });
+
+  it('shows next steps when no scope has been loaded yet', () => {
+    render(
+      <ContextPanel
+        context={null}
+        analyzing={false}
+        translation={null}
+        translating={false}
+        permissionApproved={false}
+        overrideReason=""
+        busy={false}
+        lang="en"
+        onLanguageChange={vi.fn()}
+        onPermissionApprovedChange={vi.fn()}
+        onOverrideReasonChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Load scope before generation')).toBeTruthy();
+    expect(screen.getByText('Connect Atlassian')).toBeTruthy();
+    expect(screen.getByText('Run Analyze Jira + Confluence')).toBeTruthy();
   });
 });

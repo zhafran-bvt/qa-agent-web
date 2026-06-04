@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -16,7 +15,6 @@ interface ContextPanelProps {
   onLanguageChange: (value: UiLanguage) => void;
   onPermissionApprovedChange: (value: boolean) => void;
   onOverrideReasonChange: (value: string) => void;
-  onGenerate: () => void;
 }
 
 function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTranslation | null, lang: UiLanguage) {
@@ -42,6 +40,18 @@ function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTransl
   ];
 }
 
+function contextSourceRows(context: QaContext, lang: UiLanguage) {
+  const t = uiText[lang].context;
+  return [
+    ['Issue', '1'],
+    ['Linked issues', String(context.linkedIssues.length)],
+    ['Parent', context.scopeParentIssue ? '1' : t.none],
+    ['Docs', String(context.confluencePages.length)],
+    ['Comments', String(context.mainIssue.comments?.length || 0)],
+    ['PRD', context.scopeConfluenceSection ? '1' : t.none],
+  ];
+}
+
 export function ContextPanel({
   context,
   analyzing,
@@ -54,11 +64,8 @@ export function ContextPanel({
   onLanguageChange,
   onPermissionApprovedChange,
   onOverrideReasonChange,
-  onGenerate,
 }: ContextPanelProps) {
   const t = uiText[lang].context;
-  const s = uiText[lang].stepper;
-  const [collapsed, setCollapsed] = useState(false);
   const displayConfidenceReasons = translation?.confidenceReasons?.length ? translation.confidenceReasons : context?.confidenceReasons || [];
   const displayAcceptanceCriteria = translation?.acceptanceCriteria?.length ? translation.acceptanceCriteria : context?.acceptanceCriteria || [];
   const displayUserStories = translation?.userStories?.length ? translation.userStories : context?.userStories || [];
@@ -74,14 +81,11 @@ export function ContextPanel({
       ]
     : [];
   return (
-    <section className={`panel panel-stack panel-context${collapsed ? ' panel-collapsed' : ''}`}>
-      <div className="panel-heading">
-        <div className="panel-heading-main">
-          <span className="panel-step">2</span>
-          <div>
-            <h2>{t.title}</h2>
-            <p>{t.subtitle}</p>
-          </div>
+    <section className="panel scope-workspace">
+      <div className="panel-header">
+        <div>
+          <h3>{t.title}</h3>
+          <p>{t.subtitle}</p>
         </div>
         <div className="panel-actions">
           <button className={`button button-secondary button-small ${lang === 'en' ? 'active-filter' : ''}`} type="button" onClick={() => onLanguageChange('en')}>
@@ -91,7 +95,6 @@ export function ContextPanel({
             {translating ? '...' : 'ID'}
           </button>
         </div>
-        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
       </div>
 
       {!context ? (
@@ -101,11 +104,11 @@ export function ContextPanel({
               <strong>{t.loadingTitle}</strong>
               <div className="muted">{t.loadingBody}</div>
             </div>
-            <div className="context-grid context-grid-compact">
+            <div className="scope-metric-grid">
               {Array.from({ length: 6 }).map((_, index) => (
-                <div className="context-item context-item-loading" key={index}>
-                  <span className="context-label skeleton-block skeleton-label" />
-                  <div className="context-value">
+                <div className="scope-metric context-item-loading" key={index}>
+                  <span className="skeleton-block skeleton-label" />
+                  <div>
                     <span className="skeleton-block skeleton-line" />
                     <span className="skeleton-block skeleton-line skeleton-line-short" />
                   </div>
@@ -121,76 +124,55 @@ export function ContextPanel({
             </div>
           </div>
         ) : (
-          <div className="summary muted">{t.noContext}</div>
+          <div className="empty-snapshot empty-next-steps">
+            <strong>{t.emptyTitle}</strong>
+            <p>{t.emptyBody}</p>
+            <ol>
+              {t.emptySteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
         )
       ) : (
         <>
-          <div className="context-grid context-grid-compact">
-            {renderKeyValueRows(context, translation, lang).map(([label, value]) => (
-              <div className="context-item" key={label}>
-                <span className="context-label">{label}</span>
-                <div className="context-value">{value}</div>
+          <div className="scope-metric-grid">
+            {renderKeyValueRows(context, translation, lang).slice(0, 4).map(([label, value]) => (
+              <div className="scope-metric" key={label}>
+                <span>{label}</span>
+                <strong>{value}</strong>
               </div>
             ))}
           </div>
 
-          <div className={`summary summary-status ${context.requiresConfidencePermission ? 'summary-warn' : ''}`}>
-            <strong>{t.confidenceSummary}</strong>
-            <ul>
-              {displayConfidenceReasons.map((reason) => (
-                <li key={reason}>{reason}</li>
-              ))}
-            </ul>
-            <div>{context.requiresConfidencePermission ? t.qaPermissionRequired : t.noConfidenceOverride}</div>
+          <div className={`trust-banner ${context.requiresConfidencePermission ? 'is-warning' : ''}`}>
+            <div>
+              <strong>{t.confidenceSummary}</strong>
+              <span>{displayConfidenceReasons[0] || context.scopeAuthority?.reason || t.noConfidenceOverride}</span>
+            </div>
+            <span className={`status-badge ${context.requiresConfidencePermission ? 'warning' : 'success'}`}>
+              {context.requiresConfidencePermission ? t.qaPermissionRequired : t.noConfidenceOverride}
+            </span>
           </div>
 
-          {scopeDiagnosticsRows.length ? (
-            <details className="summary summary-detail">
-              <summary>{t.scopeDiagnostics}</summary>
-              <div className="scope-diagnostics-grid">
-                {scopeDiagnosticsRows.map(([label, value]) => (
-                  <div className="scope-diagnostic-item" key={label}>
+          <div className="scope-body-grid">
+            <div className="scope-source-card">
+              <h4>Context</h4>
+              <div className="source-row-list">
+                {contextSourceRows(context, lang).map(([label, value]) => (
+                  <div className="source-row-item" key={label}>
+                    <span className="source-icon">{label.slice(0, 1)}</span>
                     <span>{label}</span>
                     <strong>{value}</strong>
                   </div>
                 ))}
               </div>
-            </details>
-          ) : null}
-
-          <div className="details-grid">
-            <div className="detail-card detail-card-primary">
-              <h3>{t.acceptanceCriteria}</h3>
-              {displayAcceptanceCriteria.length ? (
-                <ul className="criteria-list">
-                  {displayAcceptanceCriteria.map((criterion) => (
-                    <li className="criteria-item" key={criterion.id}>
-                      <span className="criteria-id">{criterion.id}</span>
-                      <div className="criteria-text-block">
-                        <div className="criteria-text">{criterion.text}</div>
-                        <SourceExcerpt
-                          criterionText={criterion.text}
-                          excerpts={criterion.sourceExcerpts}
-                          excerpt={criterion.sourceExcerpt}
-                          location={criterion.sourceExcerptLocation}
-                          url={criterion.sourceExcerptUrl}
-                          kind={criterion.sourceExcerptKind}
-                          confidence={criterion.sourceExcerptConfidence}
-                          lang={lang}
-                        />
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">{t.noAcceptanceCriteria}</p>
-              )}
             </div>
 
-            <div className="detail-card">
+            <div className="scope-source-card">
               <h3>{t.userStories}</h3>
               {displayUserStories.length ? (
-                <ul>
+                <ul className="story-list">
                   {displayUserStories.map((story) => (
                     <li key={story.id}>
                       <strong>{story.id}</strong> {story.text}
@@ -202,6 +184,51 @@ export function ContextPanel({
               )}
             </div>
           </div>
+
+          <div className="acceptance-workspace">
+            <h3>{t.acceptanceCriteria}</h3>
+            {displayAcceptanceCriteria.length ? (
+              <ul className="criteria-list">
+                {displayAcceptanceCriteria.map((criterion) => (
+                  <li className="criteria-item" key={criterion.id}>
+                    <div className="criterion-head">
+                      <span className="criteria-id">{criterion.id}</span>
+                      <span className="status-badge success">Evidence</span>
+                    </div>
+                    <div className="criteria-text-block">
+                      <div className="criteria-text">{criterion.text}</div>
+                      <SourceExcerpt
+                        criterionText={criterion.text}
+                        excerpts={criterion.sourceExcerpts}
+                        excerpt={criterion.sourceExcerpt}
+                        location={criterion.sourceExcerptLocation}
+                        url={criterion.sourceExcerptUrl}
+                        kind={criterion.sourceExcerptKind}
+                        confidence={criterion.sourceExcerptConfidence}
+                        lang={lang}
+                      />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="muted">{t.noAcceptanceCriteria}</p>
+            )}
+          </div>
+
+          {scopeDiagnosticsRows.length ? (
+            <details className="summary summary-detail scope-diagnostics-detail">
+              <summary>{t.scopeDiagnostics}</summary>
+              <div className="scope-diagnostics-grid">
+                {scopeDiagnosticsRows.map(([label, value]) => (
+                  <div className="scope-diagnostic-item" key={label}>
+                    <span>{label}</span>
+                    <strong>{value}</strong>
+                  </div>
+                ))}
+              </div>
+            </details>
+          ) : null}
 
           {context.requiresConfidencePermission ? (
             <div className="override-box">
@@ -224,9 +251,7 @@ export function ContextPanel({
             </div>
           ) : null}
 
-          <button className="button button-generate" type="button" disabled={busy || (context.requiresConfidencePermission && !permissionApproved)} onClick={onGenerate}>
-            {busy ? t.generating : t.generate}
-          </button>
+          {busy ? <div className="action-hint">{t.blockerGenerating}</div> : null}
         </>
       )}
     </section>
