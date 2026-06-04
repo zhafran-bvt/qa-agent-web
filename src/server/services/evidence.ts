@@ -18,6 +18,7 @@ function resolveEvidenceAcceptanceCriteria(testCase: GeneratedTestCase, context:
       {
         id: criterion.id,
         text: criterion.text,
+        sourceExcerpts: criterion.sourceExcerpts,
         sourceExcerpt: criterion.sourceExcerpt,
         sourceExcerptLocation: criterion.sourceExcerptLocation,
         sourceExcerptUrl: criterion.sourceExcerptUrl,

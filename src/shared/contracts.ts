@@ -92,11 +92,20 @@ export interface ScopedItem {
   id: string;
   text: string;
   source?: string;
+  sourceExcerpts?: SourceExcerptMatch[];
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
   sourceExcerptKind?: 'jira' | 'prd';
-  sourceExcerptConfidence?: 'verbatim' | 'closest';
+  sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
+}
+
+export interface SourceExcerptMatch {
+  text: string;
+  location?: string;
+  url?: string;
+  kind?: 'jira' | 'prd';
+  confidence?: 'verbatim' | 'closest' | 'weak';
 }
 
 export interface ParentIssueSummary {
@@ -228,6 +237,7 @@ export interface GeneratedTestCase {
   id: string;
   title: string;
   type: string;
+  caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference: string;
   preconditions: string;
   bddScenario: string;
@@ -239,11 +249,12 @@ export interface GeneratedTestCase {
 export interface TestCaseEvidenceAcceptanceCriterion {
   id: string;
   text: string;
+  sourceExcerpts?: SourceExcerptMatch[];
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
   sourceExcerptKind?: 'jira' | 'prd';
-  sourceExcerptConfidence?: 'verbatim' | 'closest';
+  sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
 }
 
 export interface TestCaseEvidence {

@@ -445,6 +445,53 @@ function scoreExcerptCandidate(criterionText: string, candidate: string): number
 }
 
 const EXCERPT_SCORE_GATE = 0.34;
+const EXCERPT_SUPPORT_GATE = 0.2;
+const EXCERPT_MULTI_COVERAGE_GATE = 0.4;
+const MAX_SOURCE_EXCERPTS_PER_CRITERION = 3;
+
+type ScoredExcerptCandidate = {
+  candidate: string;
+  score: number;
+  overlapTokens: string[];
+  verbatim: boolean;
+};
+
+function selectSourceExcerptMatches(
+  criterionText: string,
+  scoredCandidates: ScoredExcerptCandidate[],
+  sharedCandidateCounts: Map<string, number>
+): ScoredExcerptCandidate[] {
+  const criterionTokens = new Set(tokenizeExcerptText(criterionText));
+  if (!criterionTokens.size) return [];
+
+  const viable = scoredCandidates.filter((entry) => entry.score >= EXCERPT_SUPPORT_GATE);
+  if (!viable.length) return [];
+
+  const selected: ScoredExcerptCandidate[] = [];
+  const coveredTokens = new Set<string>();
+
+  for (const entry of viable) {
+    if (selected.length >= MAX_SOURCE_EXCERPTS_PER_CRITERION) break;
+    if ((sharedCandidateCounts.get(entry.candidate) || 0) > 1) continue;
+    const newOverlap = entry.overlapTokens.filter((token) => !coveredTokens.has(token));
+    if (!newOverlap.length) continue;
+    selected.push(entry);
+    for (const token of newOverlap) coveredTokens.add(token);
+    if (entry.score >= EXCERPT_SCORE_GATE) continue;
+    const coverage = coveredTokens.size / criterionTokens.size;
+    if (selected.length >= 2 && coverage >= EXCERPT_MULTI_COVERAGE_GATE) break;
+  }
+
+  if (!selected.length) return [];
+
+  const hasStrongSingle = selected.some((entry) => entry.score >= EXCERPT_SCORE_GATE);
+  const coverage = coveredTokens.size / criterionTokens.size;
+  if (!hasStrongSingle && !(selected.length >= 2 && coverage >= EXCERPT_MULTI_COVERAGE_GATE)) {
+    return [];
+  }
+
+  return selected;
+}
 
 function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
   const authority = resolveAuthorityExcerptSource(context);
@@ -470,55 +517,80 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
     return criteria;
   }
 
-  // Pass 1: best candidate per criterion (ungated; gate is applied below).
-  const picks = criteria.map((criterion) => {
-    let bestCandidate = '';
-    let bestScore = 0;
-    for (const candidate of candidates) {
-      const score = scoreExcerptCandidate(criterion.text, candidate);
-      if (score <= 0) continue;
-      if (score > bestScore || (score === bestScore && candidate.length < bestCandidate.length)) {
-        bestScore = score;
-        bestCandidate = candidate;
-      }
-    }
-    return { candidate: bestCandidate, score: bestScore };
-  });
+  // Pass 1: rank all candidates per criterion.
+  const ranked = criteria.map((criterion) =>
+    candidates
+      .map((candidate) => {
+        const score = scoreExcerptCandidate(criterion.text, candidate);
+        const overlapTokens = score > 0 ? overlapExcerptTokens(criterion.text, candidate) : [];
+        const criterionNormalized = canonicalize(criterion.text);
+        const candidateNormalized = canonicalize(candidate);
+        const verbatim = Boolean(candidateNormalized && (criterionNormalized.includes(candidateNormalized) || candidateNormalized.includes(criterionNormalized)));
+        return {
+          candidate,
+          score,
+          overlapTokens,
+          verbatim,
+        } satisfies ScoredExcerptCandidate;
+      })
+      .filter((entry) => entry.score > 0)
+      .sort((left, right) => right.score - left.score || left.candidate.length - right.candidate.length)
+  );
 
-  // Pass 2: a line that is the best match for more than one criterion is
-  // generic boilerplate, not specific evidence — count gated picks to detect it.
-  const frequency = new Map<string, number>();
-  for (const pick of picks) {
-    if (pick.candidate && pick.score >= EXCERPT_SCORE_GATE) {
-      frequency.set(pick.candidate, (frequency.get(pick.candidate) || 0) + 1);
-    }
+  // Pass 2: a line that looks useful for many criteria is still generic boilerplate.
+  const sharedCandidateCounts = new Map<string, number>();
+  for (const entries of ranked) {
+    const topViable = entries.find((item) => item.score >= EXCERPT_SUPPORT_GATE);
+    if (!topViable) continue;
+    sharedCandidateCounts.set(topViable.candidate, (sharedCandidateCounts.get(topViable.candidate) || 0) + 1);
   }
 
   const trace: Array<{ id: string; score: number; reason: string; bestCandidate: string }> = [];
 
   const result: ScopedItem[] = criteria.map((criterion, index) => {
-    const { candidate, score } = picks[index];
+    const entries = ranked[index] || [];
+    const best = entries[0];
+    const selected = selectSourceExcerptMatches(criterion.text, entries, sharedCandidateCounts);
     let reason: 'attached' | 'below_gate' | 'deduped' | 'no_candidate';
-    if (!candidate || score <= 0) reason = 'no_candidate';
-    else if (score < EXCERPT_SCORE_GATE) reason = 'below_gate';
-    else if ((frequency.get(candidate) || 0) > 1) reason = 'deduped';
-    else reason = 'attached';
+    if (!best || best.score <= 0) reason = 'no_candidate';
+    else if (selected.length) reason = 'attached';
+    else if ((sharedCandidateCounts.get(best.candidate) || 0) > 1) reason = 'deduped';
+    else reason = 'below_gate';
 
-    trace.push({ id: criterion.id, score: Number(score.toFixed(2)), reason, bestCandidate: candidate ? trimExcerpt(candidate, 90) : '' });
+    trace.push({
+      id: criterion.id,
+      score: Number((best?.score || 0).toFixed(2)),
+      reason,
+      bestCandidate: best?.candidate ? trimExcerpt(best.candidate, 90) : '',
+    });
 
-    if (reason !== 'attached') return criterion;
+    const weakFallback =
+      !selected.length &&
+      best &&
+      best.score >= EXCERPT_SUPPORT_GATE &&
+      (sharedCandidateCounts.get(best.candidate) || 0) <= 1
+        ? [best]
+        : [];
 
-    const criterionNormalized = canonicalize(criterion.text);
-    const pickNormalized = canonicalize(candidate);
-    const verbatim = pickNormalized.includes(criterionNormalized) || criterionNormalized.includes(pickNormalized);
+    if (!selected.length && !weakFallback.length) return criterion;
+
+    const excerptMatches: NonNullable<ScopedItem['sourceExcerpts']> = (selected.length ? selected : weakFallback).map((entry) => ({
+      text: trimExcerpt(entry.candidate),
+      location: authority.location,
+      url: authority.url,
+      kind: authority.kind,
+      confidence: selected.length ? (entry.verbatim ? 'verbatim' : 'closest') : 'weak',
+    }));
+    const primary = excerptMatches[0];
 
     return {
       ...criterion,
-      sourceExcerpt: trimExcerpt(candidate),
-      sourceExcerptLocation: authority.location,
-      sourceExcerptUrl: authority.url,
-      sourceExcerptKind: authority.kind,
-      sourceExcerptConfidence: verbatim ? 'verbatim' : 'closest',
+      sourceExcerpts: excerptMatches,
+      sourceExcerpt: primary?.text,
+      sourceExcerptLocation: primary?.location,
+      sourceExcerptUrl: primary?.url,
+      sourceExcerptKind: primary?.kind,
+      sourceExcerptConfidence: primary?.confidence,
     };
   });
 

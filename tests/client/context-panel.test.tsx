@@ -46,6 +46,22 @@ const baseContext: QaContext = {
       id: 'AC-1',
       text: 'The AI Summary tab is available for analysis results with no score.',
       source: 'parent_story_confluence_section synthesized',
+      sourceExcerpts: [
+        {
+          text: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
+          location: 'PRD: AI Summary NO SCORE',
+          url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+          kind: 'prd',
+          confidence: 'closest',
+        },
+        {
+          text: 'Results with no score should still render the no-score summary variant.',
+          location: 'PRD: AI Summary NO SCORE',
+          url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+          kind: 'prd',
+          confidence: 'weak',
+        },
+      ],
       sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
       sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
       sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
@@ -100,7 +116,9 @@ describe('ContextPanel', () => {
 
     expect(screen.getByText('Scope Snapshot')).toBeTruthy();
     expect(screen.getAllByText('AI Summary NO SCORE').length).toBeGreaterThanOrEqual(1);
+    expect(document.querySelectorAll('.source-quote').length).toBe(2);
     expect(document.querySelector('.source-quote')?.textContent).toMatch(/Analysis Summary window/);
+    expect(screen.getByText('weak match')).toBeTruthy();
     expect(screen.getAllByText(/PRD: AI Summary NO SCORE/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
 

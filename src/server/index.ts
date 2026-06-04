@@ -16,6 +16,7 @@ import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
 import { generateTestCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
+import { buildTicketSuggestionsJql } from './services/suggestions';
 import { pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
@@ -171,8 +172,14 @@ async function requireSession(req: IncomingMessage, res: ServerResponse) {
 }
 
 async function readBody<T>(req: IncomingMessage): Promise<T> {
+  const maxBodyBytes = Number(process.env.MAX_REQUEST_BODY_BYTES || 1_000_000);
   let body = '';
-  for await (const chunk of req) body += chunk;
+  for await (const chunk of req) {
+    body += chunk;
+    if (Buffer.byteLength(body) > maxBodyBytes) {
+      throw new Error(`Request body exceeds ${maxBodyBytes} bytes.`);
+    }
+  }
   return (body ? JSON.parse(body) : {}) as T;
 }
 
@@ -421,14 +428,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
     const { sid, session } = sessionEnvelope;
-  const jql = [
-    `${QA_ASSIGNEE_JQL_FIELD} = currentUser()`,
-    'AND type = Task',
-    'AND statusCategory != Done',
-    'AND labels = frontend',
-    'AND sprint in openSprints()',
-    'ORDER BY updated DESC, created DESC',
-  ].join(' ');
+    const jql = buildTicketSuggestionsJql(QA_ASSIGNEE_JQL_FIELD);
     const issues = await createClient(sid, session, log).searchIssues(jql, 12);
     const body: TicketSuggestionsResponse = {
       jql,

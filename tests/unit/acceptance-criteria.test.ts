@@ -481,3 +481,100 @@ test('short high-signal PRD bullets still attach as excerpts when they match spe
   assert.match(finalized.acceptanceCriteria.find((criterion) => /landmark context|environment risk/i.test(criterion.text))?.sourceExcerpt || '', /landmark and environment risk/i);
   assert.match(finalized.acceptanceCriteria.find((criterion) => /Strategic Takeaways/i.test(criterion.text))?.sourceExcerpt || '', /Strategic Takeaways/i);
 });
+
+test('composite AC can attach multiple supporting excerpts from the same authority', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3079',
+    mainIssue: {
+      key: 'ORB-3079',
+      summary: '[FE] Integration API - Run Analysis with BVT Polygon Catchment Datasets',
+      description: [
+        'Polygon rows must preserve original Polygon or MultiPolygon geometry as-is.',
+        'Do not explode MultiPolygon rows into multiple locations.',
+        'Run analysis payload maps each polygon dataset row into one marker with polygon as WKT.',
+        'Point-on-feature must be calculated from the original geometry.',
+      ].join('\n'),
+    },
+    acceptanceCriteriaSource: 'main_jira',
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'Main Jira description',
+      body: [
+        'Polygon rows must preserve original Polygon or MultiPolygon geometry as-is.',
+        'Do not explode MultiPolygon rows into multiple locations.',
+        'Run analysis payload maps each polygon dataset row into one marker with polygon as WKT.',
+        'Point-on-feature must be calculated from the original geometry.',
+      ].join('\n'),
+      reason: 'Main Jira provided the clearest technical scope.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3079',
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text:
+          'Run Analysis payload mapping must convert polygon dataset rows into markers with the expected shape: each item includes coordinate, polygon as WKT for the original Polygon or MultiPolygon geometry, and point-on-feature calculation must operate on the original geometry without splitting MultiPolygon rows.',
+      },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerpts?.length, 3);
+  assert.equal(
+    finalized.acceptanceCriteria[0].sourceExcerpts?.some((item) => /polygon dataset row into one marker/i.test(item.text)),
+    true
+  );
+  assert.equal(
+    finalized.acceptanceCriteria[0].sourceExcerpts?.some((item) => /original Polygon or MultiPolygon geometry/i.test(item.text)),
+    true
+  );
+  assert.equal(
+    finalized.acceptanceCriteria[0].sourceExcerpts?.some((item) => /Point-on-feature must be calculated/i.test(item.text)),
+    true
+  );
+});
+
+test('below-gate excerpt candidates are still shown as weak evidence', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3079',
+    mainIssue: {
+      key: 'ORB-3079',
+      summary: '[FE] Integration API - Run Analysis with BVT Polygon Catchment Datasets',
+      description: [
+        'Save Config',
+      ].join('\n'),
+    },
+    acceptanceCriteriaSource: 'main_jira',
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'Main Jira description',
+      body: [
+        'Save Config',
+      ].join('\n'),
+      reason: 'Main Jira provided the clearest technical scope.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3079',
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-5',
+        text: 'Save Config payload mapping must convert selected polygon dataset features into catchment.locations entries with preserved geometry, matching sequence numbers, and Location layer polygon naming across the saved dataset set.',
+      },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+    },
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'weak');
+  assert.match(finalized.acceptanceCriteria[0].sourceExcerpt || '', /Save Config/i);
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerpts?.[0].confidence, 'weak');
+});

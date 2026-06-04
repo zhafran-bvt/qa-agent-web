@@ -41,6 +41,22 @@ const context: QaContext = {
     {
       id: 'AC-1',
       text: 'Matching: A row is included when any administrative area matches the filter selection.',
+      sourceExcerpts: [
+        {
+          text: 'A row is included when any administrative area matches the filter selection.',
+          location: 'PRD: 5. As a PM, I want the filter function can handle data contain multiple administrative area list',
+          url: 'https://example.test/wiki/pages/897351682#5-story',
+          kind: 'prd',
+          confidence: 'verbatim',
+        },
+        {
+          text: 'The original record remains intact with no row splitting.',
+          location: 'PRD: 5. As a PM, I want the filter function can handle data contain multiple administrative area list',
+          url: 'https://example.test/wiki/pages/897351682#5-story',
+          kind: 'prd',
+          confidence: 'closest',
+        },
+      ],
       sourceExcerpt: 'A row is included when any administrative area matches the filter selection.',
       sourceExcerptLocation: 'PRD: 5. As a PM, I want the filter function can handle data contain multiple administrative area list',
       sourceExcerptUrl: 'https://example.test/wiki/pages/897351682#5-story',
@@ -89,6 +105,7 @@ test('builds deterministic evidence from PRD section and mapped ACs', () => {
   assert.equal(evidence.coverageNote, testCase.evidence.coverageNote);
   assert.equal(evidence.acceptanceCriteria[0].sourceExcerptKind, 'prd');
   assert.equal(evidence.acceptanceCriteria[0].sourceExcerptUrl, 'https://example.test/wiki/pages/897351682#5-story');
+  assert.equal(evidence.acceptanceCriteria[0].sourceExcerpts?.length, 2);
   assert.match(evidence.acceptanceCriteria[0].sourceExcerpt || '', /administrative area matches/i);
 });
 

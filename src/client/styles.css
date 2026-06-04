@@ -1473,6 +1473,11 @@ details[open] .source-caret { transform: rotate(90deg); }
 }
 .source-badge.verbatim { background: #dcfce7; color: #166534; }
 .source-badge.closest { background: #fef3c7; color: #92400e; }
+.source-badge.weak { background: #fee2e2; color: #991b1b; }
+.source-quotes {
+  display: grid;
+  gap: 8px;
+}
 .source-quote {
   margin: 8px 0 0;
   border-left: 3px solid #2563eb;
@@ -1493,3 +1498,32 @@ details[open] .source-caret { transform: rotate(90deg); }
 }
 .source-link { color: #2563eb; text-decoration: none; font-weight: 600; }
 .source-link:hover { text-decoration: underline; }
+
+/* --- Workflow stepper (indicator only) --- */
+.workflow-stepper{display:flex;list-style:none;margin:0;padding:14px 18px;background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);}
+.workflow-step{flex:1;display:flex;flex-direction:column;align-items:center;position:relative;text-align:center;}
+.workflow-step:not(:last-child)::after{content:"";position:absolute;top:16px;left:calc(50% + 20px);right:calc(-50% + 20px);height:2px;background:var(--line);}
+.workflow-step.is-done:not(:last-child)::after{background:var(--primary);}
+.workflow-step-dot{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;background:#fff;border:2px solid var(--line);color:var(--subtle);z-index:1;}
+.workflow-step.is-done .workflow-step-dot{background:var(--primary);border-color:var(--primary);color:#fff;}
+.workflow-step.is-active .workflow-step-dot{background:#fff;border-color:var(--primary);color:var(--primary);box-shadow:0 0 0 4px var(--primary-soft);}
+.workflow-step-label{margin-top:7px;font-size:12.5px;font-weight:600;color:var(--subtle);}
+.workflow-step.is-active .workflow-step-label,.workflow-step.is-done .workflow-step-label{color:var(--text);}
+
+/* --- Panel collapse --- */
+.panel-collapse-toggle{margin-left:auto;flex:0 0 auto;align-self:flex-start;background:transparent;border:1px solid var(--line);border-radius:8px;width:28px;height:28px;color:var(--subtle);cursor:pointer;font-size:12px;line-height:1;}
+.panel-collapse-toggle:hover{color:var(--primary);border-color:var(--line-strong);}
+.panel-collapsed > :not(.panel-heading){display:none;}
+
+/* --- Push gate checklist --- */
+.push-gates{background:var(--surface-alt);border:1px solid var(--line);border-radius:12px;padding:12px 14px;}
+.push-gates-title{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--subtle);font-weight:700;margin-bottom:8px;}
+.push-gates ul{list-style:none;margin:0;padding:0;display:grid;gap:4px;}
+.push-gates li{display:flex;align-items:center;gap:9px;font-size:12.5px;}
+.push-gates li.gate-bad{color:var(--subtle);}
+.push-gates .gate-mark{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex:0 0 auto;}
+.push-gates li.gate-ok .gate-mark{background:var(--ok-soft);color:var(--ok);}
+.push-gates li.gate-bad .gate-mark{background:var(--danger-soft);color:var(--danger);}
+.gate-hint{font-size:11.5px;color:var(--warn);margin:0;}
+.gate-hint-ready{color:var(--ok);}
+.field-hint{font-size:11.5px;color:var(--subtle);margin:-4px 0 0;}

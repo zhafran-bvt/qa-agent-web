@@ -1,5 +1,5 @@
-import https from 'node:https';
 import type { GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
+import { requestHttpsJson } from './http';
 
 interface TestRailConfig {
   baseUrl: string;
@@ -12,11 +12,16 @@ function delay(ms: number): Promise<void> {
 }
 
 function addCase(config: TestRailConfig, sectionId: string, testCase: GeneratedTestCase): Promise<Record<string, unknown>> {
-  return new Promise((resolve, reject) => {
-    const baseUrl = config.baseUrl.replace(/\/$/, '');
-    const url = new URL(`/index.php?/api/v2/add_case/${sectionId}`, baseUrl);
-    const auth = Buffer.from(`${config.user}:${config.apiKey}`).toString('base64');
-    const payload = JSON.stringify({
+  const baseUrl = config.baseUrl.replace(/\/$/, '');
+  const url = new URL(`/index.php?/api/v2/add_case/${sectionId}`, baseUrl);
+  const auth = Buffer.from(`${config.user}:${config.apiKey}`).toString('base64');
+  return requestHttpsJson<Record<string, unknown>>({
+    url: url.toString(),
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+    },
+    body: {
       title: testCase.title,
       template_id: 4,
       type_id: mapType(testCase.type),
@@ -24,43 +29,13 @@ function addCase(config: TestRailConfig, sectionId: string, testCase: GeneratedT
       refs: testCase.jiraReference,
       custom_preconds: testCase.preconditions,
       custom_testrail_bdd_scenario: [{ content: testCase.bddScenario }],
-    });
-
-    const req = https.request(
-      {
-        hostname: url.hostname,
-        path: `${url.pathname}${url.search}`,
-        method: 'POST',
-        headers: {
-          Authorization: `Basic ${auth}`,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-      },
-      (res) => {
-        let body = '';
-        res.on('data', (chunk) => {
-          body += chunk;
-        });
-        res.on('end', () => {
-          let parsed: Record<string, unknown>;
-          try {
-            parsed = body ? JSON.parse(body) : {};
-          } catch {
-            reject(new Error(`Invalid JSON response (${res.statusCode}): ${body}`));
-            return;
-          }
-          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
-            resolve(parsed);
-            return;
-          }
-          reject(new Error(String(parsed.error || `HTTP ${res.statusCode}`)));
-        });
-      }
-    );
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
+    },
+    upstream: 'TestRail',
+    timeoutMs: Number(process.env.TESTRAIL_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+  }).then((response) => {
+    if (response.statusCode >= 200 && response.statusCode < 300) return response.body;
+    const parsed = response.body || {};
+    throw new Error(String((parsed as Record<string, unknown>).error || `HTTP ${response.statusCode}`));
   });
 }
 

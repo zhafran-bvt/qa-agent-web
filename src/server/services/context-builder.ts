@@ -72,6 +72,24 @@ interface QaClient {
   getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>>;
 }
 
+async function mapWithConcurrency<T, R>(items: T[], limit: number, iteratee: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const safeLimit = Math.max(1, Math.min(limit, items.length || 1));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (true) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= items.length) return;
+      results[currentIndex] = await iteratee(items[currentIndex], currentIndex);
+    }
+  }
+
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  return results;
+}
+
 function normalizeInlineText(value: unknown): string {
   return String(value || '')
     .replace(/\r/g, '')
@@ -488,17 +506,24 @@ function addIssueTextPageRefs(pageRefs: Map<string, PageRef>, issue: SimplifiedI
   }
 }
 
-async function addRemoteLinkPageRefs(client: QaClient, pageRefs: Map<string, PageRef>, issueKey: string, sourceType: string): Promise<void> {
+async function getRemoteLinkPageRefs(client: QaClient, issueKey: string, sourceType: string): Promise<ConfluenceReference[]> {
   const remoteLinks = await client.getRemoteLinks(issueKey).catch(() => []);
+  const refs: Array<ConfluenceReference & { title?: string }> = [];
   for (const link of remoteLinks || []) {
     const object = link.object || {};
     const ref = parseConfluenceReference(object.url, issueKey, sourceType, link.relationship);
     if (!ref) continue;
-    addPageRef(pageRefs, {
+    refs.push({
       ...ref,
       title: object.title,
     });
   }
+  return refs;
+}
+
+async function addRemoteLinkPageRefs(client: QaClient, pageRefs: Map<string, PageRef>, issueKey: string, sourceType: string): Promise<void> {
+  const refs = await getRemoteLinkPageRefs(client, issueKey, sourceType);
+  for (const ref of refs) addPageRef(pageRefs, ref);
 }
 
 function mergeIssueMetadata(mainIssue: SimplifiedIssue, fetchedIssue: SimplifiedIssue): SimplifiedIssue & LinkedIssueSummary {
@@ -1305,6 +1330,8 @@ function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIss
 
 export async function buildQaContext(client: QaClient, jiraKey: string, options: QaContextOptions = {}): Promise<QaContext> {
   const log = options.logger;
+  const linkedIssueFetchConcurrency = Number(process.env.QA_CONTEXT_ISSUE_CONCURRENCY || 4);
+  const confluenceFetchConcurrency = Number(process.env.QA_CONTEXT_CONFLUENCE_CONCURRENCY || 4);
   const mainIssue = await client.getIssue(jiraKey);
   const linkedIssueKeys = new Set<string>();
 
@@ -1315,31 +1342,37 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     if (subtask.key) linkedIssueKeys.add(subtask.key);
   }
 
-  const linkedIssues: LinkedIssueSummary[] = [];
-  for (const key of linkedIssueKeys) {
+  const linkedIssues = await mapWithConcurrency(Array.from(linkedIssueKeys), linkedIssueFetchConcurrency, async (key) => {
     try {
       const fetched = await client.getIssue(key);
-      linkedIssues.push(mergeIssueMetadata(mainIssue, fetched));
+      return mergeIssueMetadata(mainIssue, fetched);
     } catch (error) {
       const meta = (mainIssue.linkedIssues || []).find((issue) => issue.key === key);
-      linkedIssues.push({
+      return {
         key,
         fetchError: (error as Error).message,
         linkRelation: meta?.relation,
         issueType: meta?.issueType,
         summary: meta?.summary,
-      });
+      } as LinkedIssueSummary;
     }
-  }
+  });
 
   const pageRefs = new Map<string, PageRef>();
   addIssueTextPageRefs(pageRefs, mainIssue, 'main');
-  await addRemoteLinkPageRefs(client, pageRefs, mainIssue.key, 'main-remote-link');
+  for (const ref of await getRemoteLinkPageRefs(client, mainIssue.key, 'main-remote-link')) addPageRef(pageRefs, ref);
 
   for (const issue of linkedIssues) {
     if (issue.fetchError) continue;
     addIssueTextPageRefs(pageRefs, issue as SimplifiedIssue, 'linked');
-    await addRemoteLinkPageRefs(client, pageRefs, issue.key, 'linked-remote-link');
+  }
+  const linkedRemoteLinkRefs = await mapWithConcurrency(
+    linkedIssues.filter((issue) => !issue.fetchError),
+    linkedIssueFetchConcurrency,
+    async (issue) => getRemoteLinkPageRefs(client, issue.key, 'linked-remote-link')
+  );
+  for (const refs of linkedRemoteLinkRefs) {
+    for (const ref of refs) addPageRef(pageRefs, ref);
   }
 
   const confluencePages: ConfluencePageSummary[] = [];
@@ -1347,20 +1380,27 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   // scope resolution; it is intentionally NOT attached to confluencePages so it
   // never bloats the client-facing context payload.
   const pageAdfById = new Map<string, unknown>();
-  for (const ref of pageRefs.values()) {
+  const fetchedConfluencePages = await mapWithConcurrency(Array.from(pageRefs.values()), confluenceFetchConcurrency, async (ref) => {
     try {
       const page = await client.getConfluencePage(ref.pageId);
       const comments = options.includeComments ? await client.getConfluenceComments(ref.pageId) : [];
-      const { adf, ...pageRest } = page as typeof page & { adf?: unknown };
-      if (adf) pageAdfById.set(String(page.id), adf);
-      confluencePages.push({ ...pageRest, sourceRefs: ref.sources, sourceUrl: ref.url, comments });
+      return { ref, page, comments, error: null as Error | null };
     } catch (error) {
+      return { ref, page: null, comments: [] as Array<{ id: string; body: string }>, error: error as Error };
+    }
+  });
+  for (const entry of fetchedConfluencePages) {
+    if (entry.page) {
+      const { adf, ...pageRest } = entry.page as typeof entry.page & { adf?: unknown };
+      if (adf) pageAdfById.set(String(entry.page.id), adf);
+      confluencePages.push({ ...pageRest, sourceRefs: entry.ref.sources, sourceUrl: entry.ref.url, comments: entry.comments });
+    } else {
       confluencePages.push({
-        id: ref.pageId,
-        title: ref.title,
-        sourceRefs: ref.sources,
-        sourceUrl: ref.url,
-        fetchError: (error as Error).message,
+        id: entry.ref.pageId,
+        title: entry.ref.title,
+        sourceRefs: entry.ref.sources,
+        sourceUrl: entry.ref.url,
+        fetchError: entry.error?.message || 'Failed to fetch Confluence page',
       });
     }
   }

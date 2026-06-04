@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -29,6 +30,32 @@ function evidenceSummary(testCase: GeneratedTestCase, coverageEnforced: boolean,
   ].join(' · ');
 }
 
+type CaseIntent = 'positive' | 'negative' | 'edge';
+
+function classifyCaseIntent(testCase: GeneratedTestCase): CaseIntent {
+  if (testCase.caseIntent === 'positive' || testCase.caseIntent === 'negative' || testCase.caseIntent === 'edge') {
+    return testCase.caseIntent;
+  }
+  const haystack = [
+    testCase.type,
+    testCase.title,
+    testCase.bddScenario,
+  ]
+    .filter(Boolean)
+    .join(' \n ')
+    .toLowerCase();
+
+  if (/\b(edge|boundary|boundaries|limit|limits|maximum|max(?:imum)?|minimum|min(?:imum)?|empty|zero|null|duplicate|overflow|large dataset|single item)\b/.test(haystack)) {
+    return 'edge';
+  }
+
+  if (/\b(negative|invalid|error|errors|fail(?:s|ed|ure)?|reject(?:ed|s|ion)?|deny|denied|blocked|disabled|unavailable|missing permission|missing field|unauthorized|forbidden)\b/.test(haystack)) {
+    return 'negative';
+  }
+
+  return 'positive';
+}
+
 function generatedSummaryText(
   testCases: GeneratedTestCase[],
   coverage: CoverageSummary | null,
@@ -49,12 +76,22 @@ function generatedSummaryText(
     .map(([type, count]) => `${type}: ${count}`)
     .join(' · ');
 
+  const intentCounts: Record<CaseIntent, number> = {
+    positive: 0,
+    negative: 0,
+    edge: 0,
+  };
+  for (const testCase of testCases) {
+    intentCounts[classifyCaseIntent(testCase)] += 1;
+  }
+
   const covered = coverage?.byCriterion.filter((criterion) => criterion.coveredBy.length).map((criterion) => criterion.id) || [];
   const missing = coverage?.uncoveredCriteria || [];
 
   return [
     t.generatedCases(testCases.length),
     typeSummary ? t.typeMix(typeSummary) : '',
+    t.caseIntentMix(intentCounts.positive, intentCounts.negative, intentCounts.edge),
     context?.acceptanceCriteria.length
       ? coverageEnforced
         ? t.acceptanceCriteriaCovered(covered.length ? covered.join(', ') : 'none', missing.join(', '))
@@ -108,10 +145,12 @@ export function ReviewPanel({
   onCaseChange,
 }: ReviewPanelProps) {
   const t = uiText[lang].review;
+  const s = uiText[lang].stepper;
+  const [collapsed, setCollapsed] = useState(false);
   const invalidCount = validation.filter((item) => !item.valid).length;
 
   return (
-    <section className="panel panel-stack panel-wide panel-review">
+    <section className={`panel panel-stack panel-wide panel-review${collapsed ? ' panel-collapsed' : ''}`}>
       <div className="panel-heading">
         <div className="panel-heading-main">
           <span className="panel-step">3</span>
@@ -120,6 +159,7 @@ export function ReviewPanel({
             <p>{t.subtitle}</p>
           </div>
         </div>
+        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
       </div>
 
       <div className={`summary summary-status ${invalidCount ? 'summary-warn' : ''}`}>
@@ -230,6 +270,7 @@ export function ReviewPanel({
                             <strong>{criterion.id}</strong> {criterion.text}
                             <SourceExcerpt
                               criterionText={criterion.text}
+                              excerpts={criterion.sourceExcerpts}
                               excerpt={criterion.sourceExcerpt}
                               location={criterion.sourceExcerptLocation}
                               url={criterion.sourceExcerptUrl}

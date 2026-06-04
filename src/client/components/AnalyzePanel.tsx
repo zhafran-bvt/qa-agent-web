@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { AnalyzeRequest, SuggestedTicket } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -28,8 +29,10 @@ export function AnalyzePanel({
   onAnalyze,
 }: AnalyzePanelProps) {
   const t = uiText[lang].analyze;
+  const s = uiText[lang].stepper;
+  const [collapsed, setCollapsed] = useState(false);
   return (
-    <section className="panel panel-stack panel-control">
+    <section className={`panel panel-stack panel-control${collapsed ? ' panel-collapsed' : ''}`}>
       <div className="panel-heading">
         <div className="panel-heading-main">
           <span className="panel-step">1</span>
@@ -38,6 +41,7 @@ export function AnalyzePanel({
             <p>{t.subtitle}</p>
           </div>
         </div>
+        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
       </div>
 
       <label className="field">

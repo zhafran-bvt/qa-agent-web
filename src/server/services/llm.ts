@@ -1,7 +1,7 @@
-import https from 'node:https';
 import type { GeneratedTestCase, QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import { buildCoverage } from './validation';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
+import { requestHttpsJson } from './http';
 
 interface ProviderConfig {
   name: string;
@@ -144,49 +144,21 @@ export function buildScopePriorityContext(context: GenerateContext) {
 }
 
 function requestJson<T>(url: string, headers: Record<string, string>, body: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const payload = JSON.stringify(body);
-    const req = https.request(
-      {
-        hostname: parsed.hostname,
-        path: `${parsed.pathname}${parsed.search}`,
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-          ...headers,
-        },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          let parsedBody: any;
-          try {
-            parsedBody = data ? JSON.parse(data) : {};
-          } catch {
-            reject(new Error(`Invalid JSON from LLM provider: ${data.slice(0, 500)}`));
-            return;
-          }
-          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
-            resolve(parsedBody as T);
-            return;
-          }
-          const message = parsedBody.error && parsedBody.error.message ? parsedBody.error.message : `HTTP ${res.statusCode}`;
-          const error = new Error(message) as Error & { statusCode?: number; response?: unknown };
-          error.statusCode = res.statusCode;
-          error.response = parsedBody;
-          reject(error);
-        });
-      }
-    );
-    req.on('error', reject);
-    req.write(payload);
-    req.end();
+  return requestHttpsJson<T>({
+    url,
+    method: 'POST',
+    headers,
+    body,
+    upstream: 'LLM provider',
+    timeoutMs: Number(process.env.LLM_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 60_000),
+  }).then((response) => {
+    if (response.statusCode >= 200 && response.statusCode < 300) return response.body;
+    const parsedBody = response.body as any;
+    const message = parsedBody?.error?.message || `HTTP ${response.statusCode}`;
+    const error = new Error(message) as Error & { statusCode?: number; response?: unknown };
+    error.statusCode = response.statusCode;
+    error.response = parsedBody;
+    throw error;
   });
 }
 
@@ -253,6 +225,33 @@ export function normalizeJiraReference(value: unknown): string {
   return exactMatch ? exactMatch[0].toUpperCase() : raw.toUpperCase();
 }
 
+function normalizeCaseIntent(value: unknown): 'positive' | 'negative' | 'edge' | undefined {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'positive' || normalized === 'negative' || normalized === 'edge') return normalized;
+  return undefined;
+}
+
+function inferCaseIntent(testCase: Record<string, unknown>): 'positive' | 'negative' | 'edge' {
+  const haystack = [
+    String(testCase.type || ''),
+    String(testCase.title || ''),
+    normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
+  ]
+    .filter(Boolean)
+    .join(' \n ')
+    .toLowerCase();
+
+  if (/\b(edge|boundary|boundaries|limit|limits|maximum|max(?:imum)?|minimum|min(?:imum)?|empty|zero|null|duplicate|overflow|large dataset|single item)\b/.test(haystack)) {
+    return 'edge';
+  }
+
+  if (/\b(negative|invalid|error|errors|fail(?:s|ed|ure)?|reject(?:ed|s|ion)?|deny|denied|blocked|disabled|unavailable|missing permission|missing field|unauthorized|forbidden)\b/.test(haystack)) {
+    return 'negative';
+  }
+
+  return 'positive';
+}
+
 export function normalizeIdList(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map((item) => String(item || '').trim()).filter(Boolean);
@@ -296,15 +295,29 @@ function normalizeScopedItems(
   fallback: Array<{
     id: string;
     text: string;
+    sourceExcerpts?: Array<{
+      text: string;
+      location?: string;
+      url?: string;
+      kind?: 'jira' | 'prd';
+      confidence?: 'verbatim' | 'closest' | 'weak';
+    }>;
     sourceExcerpt?: string;
     sourceExcerptLocation?: string;
     sourceExcerptUrl?: string;
     sourceExcerptKind?: 'jira' | 'prd';
-    sourceExcerptConfidence?: 'verbatim' | 'closest';
+    sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
   }>
 ): Array<{
   id: string;
   text: string;
+  sourceExcerpts?: Array<{
+    text: string;
+    location?: string;
+    url?: string;
+    kind?: 'jira' | 'prd';
+    confidence?: 'verbatim' | 'closest' | 'weak';
+  }>;
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
@@ -323,8 +336,9 @@ function normalizeScopedItems(
       return {
         id: fallbackItem.id,
         text: localizedText || fallbackItem.text,
-        ...(fallbackItem.sourceExcerpt
+        ...(fallbackItem.sourceExcerpt || fallbackItem.sourceExcerpts?.length
           ? {
+              sourceExcerpts: fallbackItem.sourceExcerpts,
               sourceExcerpt: fallbackItem.sourceExcerpt,
               sourceExcerptLocation: fallbackItem.sourceExcerptLocation,
               sourceExcerptUrl: fallbackItem.sourceExcerptUrl,
@@ -344,8 +358,9 @@ function normalizeScopedItems(
       return {
         id: fallbackId,
         text: String(record.text || '').trim(),
-        ...(fallbackItem?.sourceExcerpt
+        ...(fallbackItem?.sourceExcerpt || fallbackItem?.sourceExcerpts?.length
           ? {
+              sourceExcerpts: fallbackItem.sourceExcerpts,
               sourceExcerpt: fallbackItem.sourceExcerpt,
               sourceExcerptLocation: fallbackItem.sourceExcerptLocation,
               sourceExcerptUrl: fallbackItem.sourceExcerptUrl,
@@ -400,6 +415,7 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
     id: String(testCase.id || testCase.testCaseId || testCase.test_case_id || `TC-${String(index + 1).padStart(2, '0')}`),
     title: String(testCase.title || ''),
     type: String(testCase.type || ''),
+    caseIntent: normalizeCaseIntent(testCase.caseIntent || testCase.case_intent) || inferCaseIntent(testCase),
     jiraReference: normalizeJiraReference(testCase.jiraReference || testCase.jira_reference || testCase.refs || ''),
     preconditions: normalizeTextList(testCase.preconditions || testCase.custom_preconds || ''),
     bddScenario: normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
@@ -736,7 +752,8 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       : 'The main Jira ticket description is empty or too thin. Treat the main Jira ticket acceptance criteria as the primary coverage authority. Parent Story and PRD are supporting context only.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
-    'Each testCases item must include id, title, type, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'caseIntent must be exactly one of: positive, negative, edge.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
@@ -822,7 +839,8 @@ async function repairMissingCoverageWithProvider(
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
     'Generate repair cases from the same selected scope authority and final acceptance criteria only.',
-    'Each testCases item must include id, title, type, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'caseIntent must be exactly one of: positive, negative, edge.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
     'The evidence object must include coverageNote only.',
     'Each returned case must map to at least one missing acceptance criterion id.',
@@ -838,6 +856,7 @@ async function repairMissingCoverageWithProvider(
         id: testCase.id,
         title: testCase.title,
         type: testCase.type,
+        caseIntent: testCase.caseIntent,
         coversAcceptanceCriteria: testCase.coversAcceptanceCriteria,
       })),
       context: buildGenerationPromptContext(context),

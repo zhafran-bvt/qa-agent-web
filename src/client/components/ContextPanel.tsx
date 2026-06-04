@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -56,6 +57,8 @@ export function ContextPanel({
   onGenerate,
 }: ContextPanelProps) {
   const t = uiText[lang].context;
+  const s = uiText[lang].stepper;
+  const [collapsed, setCollapsed] = useState(false);
   const displayConfidenceReasons = translation?.confidenceReasons?.length ? translation.confidenceReasons : context?.confidenceReasons || [];
   const displayAcceptanceCriteria = translation?.acceptanceCriteria?.length ? translation.acceptanceCriteria : context?.acceptanceCriteria || [];
   const displayUserStories = translation?.userStories?.length ? translation.userStories : context?.userStories || [];
@@ -71,7 +74,7 @@ export function ContextPanel({
       ]
     : [];
   return (
-    <section className="panel panel-stack panel-context">
+    <section className={`panel panel-stack panel-context${collapsed ? ' panel-collapsed' : ''}`}>
       <div className="panel-heading">
         <div className="panel-heading-main">
           <span className="panel-step">2</span>
@@ -88,6 +91,7 @@ export function ContextPanel({
             {translating ? '...' : 'ID'}
           </button>
         </div>
+        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
       </div>
 
       {!context ? (
@@ -166,6 +170,7 @@ export function ContextPanel({
                         <div className="criteria-text">{criterion.text}</div>
                         <SourceExcerpt
                           criterionText={criterion.text}
+                          excerpts={criterion.sourceExcerpts}
                           excerpt={criterion.sourceExcerpt}
                           location={criterion.sourceExcerptLocation}
                           url={criterion.sourceExcerptUrl}

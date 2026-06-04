@@ -47,6 +47,7 @@ test('normalizes snake case LLM fields', () => {
       id: 'TC-01',
       title: '[Web][Spatial Analysis][ORB-3118] Example',
       type: 'Happy Path',
+      caseIntent: 'positive',
       jiraReference: 'ORB-3118',
       preconditions: 'User is logged in.',
       bddScenario: 'Feature: Example\nScenario: Example\nGiven x\nWhen y\nThen z',
@@ -72,6 +73,31 @@ test('normalizes coverage metadata fields', () => {
       0
     ).coversAcceptanceCriteria,
     ['AC-1', 'AC-2']
+  );
+});
+
+test('normalizes explicit case intent and falls back for legacy cases', () => {
+  assert.equal(
+    normalizeCase(
+      {
+        title: '[Web][Spatial Analysis][ORB-3118] Reject invalid polygon row',
+        type: 'BDD',
+        case_intent: 'negative',
+      },
+      0
+    ).caseIntent,
+    'negative'
+  );
+
+  assert.equal(
+    normalizeCase(
+      {
+        title: '[Web][Spatial Analysis][ORB-3118] Handle empty polygon dataset boundary',
+        type: 'BDD',
+      },
+      0
+    ).caseIntent,
+    'edge'
   );
 });
 

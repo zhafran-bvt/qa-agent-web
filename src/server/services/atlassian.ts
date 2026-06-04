@@ -1,5 +1,6 @@
 import https from 'node:https';
 import type { Logger } from './logger';
+import { requestHttpsJson } from './http';
 
 interface AtlassianAuthConfig {
   clientId: string;
@@ -71,98 +72,29 @@ export interface SimplifiedIssue {
   createdAt?: string;
 }
 
-function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const payload = body ? JSON.stringify(body) : null;
-    const req = https.request(
-      {
-        hostname: parsed.hostname,
-        path: `${parsed.pathname}${parsed.search}`,
-        method: options.method || 'GET',
-        headers: {
-          Accept: 'application/json',
-          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-          ...(options.headers || {}),
-        },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          let parsedBody: unknown = {};
-          try {
-            parsedBody = data ? JSON.parse(data) : {};
-          } catch {
-            reject(new Error(`Invalid JSON from ${url}: ${data.slice(0, 500)}`));
-            return;
-          }
-          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
-            resolve(parsedBody as T);
-            return;
-          }
-          const errorBody = parsedBody as { error_description?: string; error?: string };
-          const error = new Error(errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`) as Error & {
-            statusCode?: number;
-          };
-          error.statusCode = res.statusCode;
-          reject(error);
-        });
-      }
-    );
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
+const ATLASSIAN_TIMEOUT_MS = Number(process.env.ATLASSIAN_TIMEOUT_MS) || 20000;
+
+function requestJsonWithHeaders<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  return requestHttpsJson<T>({
+    url,
+    method: options.method || 'GET',
+    headers: options.headers || {},
+    body,
+    upstream: 'Atlassian',
+    timeoutMs: Number(process.env.ATLASSIAN_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+  }).then((response) => {
+    if (response.statusCode >= 200 && response.statusCode < 300) return response;
+    const errorBody = response.body as { error_description?: string; error?: string; errorMessage?: string };
+    const error = new Error(errorBody.errorMessage || errorBody.error_description || errorBody.error || `HTTP ${response.statusCode}`) as Error & {
+      statusCode?: number;
+    };
+    error.statusCode = response.statusCode;
+    throw error;
   });
 }
 
-function requestJsonWithHeaders<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
-  return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const payload = body ? JSON.stringify(body) : null;
-    const req = https.request(
-      {
-        hostname: parsed.hostname,
-        path: `${parsed.pathname}${parsed.search}`,
-        method: options.method || 'GET',
-        headers: {
-          Accept: 'application/json',
-          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-          ...(options.headers || {}),
-        },
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-        res.on('end', () => {
-          let parsedBody: unknown = {};
-          try {
-            parsedBody = data ? JSON.parse(data) : {};
-          } catch {
-            reject(new Error(`Invalid JSON from ${url}: ${data.slice(0, 500)}`));
-            return;
-          }
-          if ((res.statusCode || 500) >= 200 && (res.statusCode || 500) < 300) {
-            resolve({ body: parsedBody as T, headers: res.headers, statusCode: res.statusCode || 200 });
-            return;
-          }
-          const errorBody = parsedBody as { error_description?: string; error?: string; errorMessage?: string };
-          const error = new Error(errorBody.errorMessage || errorBody.error_description || errorBody.error || `HTTP ${res.statusCode}`) as Error & {
-            statusCode?: number;
-          };
-          error.statusCode = res.statusCode;
-          reject(error);
-        });
-      }
-    );
-    req.on('error', reject);
-    if (payload) req.write(payload);
-    req.end();
-  });
+function requestJson<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<T> {
+  return requestJsonWithHeaders<T>(url, options, body).then((response) => response.body);
 }
 
 const ATLASSIAN_AUTH_URL = 'https://auth.atlassian.com/authorize';

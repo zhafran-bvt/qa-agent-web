@@ -128,6 +128,17 @@ export const uiText = {
       pushing: 'Pushing...',
       action: 'Push to TestRail',
       emptyResults: 'Compact push status will appear here.',
+      gatesTitle: 'Before you can push',
+      gateCasesValid: 'All cases pass validation',
+      gateCoverage: 'Acceptance-criteria coverage complete',
+      gateApproved: 'Approved for TestRail',
+      gateSection: 'TestRail section ID entered',
+      gateReady: 'Ready to push.',
+      gateBlocked: 'Resolve the unchecked items to enable push.',
+      sectionHint: 'Find it in the TestRail section URL (…/sections/69).',
+      pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
+        `Pushed ${pushed}/${total}${failed ? ` · ${failed} failed` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
+      pushFailures: 'Failed cases',
     },
     context: {
       title: 'Scope Snapshot',
@@ -181,6 +192,8 @@ export const uiText = {
       noGeneratedCasesYet: 'No generated cases yet.',
       generatedCases: (count: number) => `Generated ${count} case(s).`,
       typeMix: (value: string) => `Type mix: ${value}`,
+      caseIntentMix: (positive: number, negative: number, edge: number) =>
+        `Case mix: Positive ${positive} · Negative ${negative} · Edge ${edge}`,
       noScopedAcForRun: 'No scoped acceptance criteria detected for this run.',
       acceptanceCriteriaCovered: (covered: string, missing: string) =>
         `Acceptance criteria covered: ${covered}${missing ? ` · missing ${missing}` : ''}`,
@@ -266,7 +279,17 @@ export const uiText = {
       source: 'Source',
       verbatim: 'verbatim',
       closestMatch: 'closest match',
+      weakMatch: 'weak match',
       noSourceMatched: 'No specific source line matched',
+    },
+    stepper: {
+      ariaLabel: 'Workflow steps',
+      analyze: 'Analyze',
+      scope: 'Scope Snapshot',
+      review: 'Review',
+      approve: 'Approve & Push',
+      collapse: 'Collapse',
+      expand: 'Expand',
     },
   },
   id: {
@@ -396,6 +419,17 @@ export const uiText = {
       pushing: 'Lagi push...',
       action: 'Push ke TestRail',
       emptyResults: 'Status push ringkas bakal muncul di sini.',
+      gatesTitle: 'Sebelum bisa push',
+      gateCasesValid: 'Semua case lolos validasi',
+      gateCoverage: 'Coverage acceptance criteria lengkap',
+      gateApproved: 'Sudah di-approve untuk TestRail',
+      gateSection: 'Section ID TestRail sudah diisi',
+      gateReady: 'Siap di-push.',
+      gateBlocked: 'Selesaikan item yang belum tercentang untuk mengaktifkan push.',
+      sectionHint: 'Cari di URL section TestRail (…/sections/69).',
+      pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
+        `Berhasil push ${pushed}/${total}${failed ? ` · ${failed} gagal` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
+      pushFailures: 'Case yang gagal',
     },
     context: {
       title: 'Ringkasan Scope',
@@ -449,6 +483,8 @@ export const uiText = {
       noGeneratedCasesYet: 'Belum ada case hasil generate.',
       generatedCases: (count: number) => `Total ${count} case berhasil digenerate.`,
       typeMix: (value: string) => `Komposisi tipe: ${value}`,
+      caseIntentMix: (positive: number, negative: number, edge: number) =>
+        `Komposisi case: Positive ${positive} · Negative ${negative} · Edge ${edge}`,
       noScopedAcForRun: 'Run ini belum punya scoped acceptance criteria.',
       acceptanceCriteriaCovered: (covered: string, missing: string) =>
         `AC yang sudah ke-cover: ${covered}${missing ? ` · yang belum ${missing}` : ''}`,
@@ -534,7 +570,17 @@ export const uiText = {
       source: 'Sumber',
       verbatim: 'sesuai sumber',
       closestMatch: 'kecocokan terdekat',
+      weakMatch: 'kecocokan lemah',
       noSourceMatched: 'Tidak ada baris sumber spesifik yang cocok',
+    },
+    stepper: {
+      ariaLabel: 'Langkah workflow',
+      analyze: 'Analisis',
+      scope: 'Ringkasan Scope',
+      review: 'Review',
+      approve: 'Approve & Push',
+      collapse: 'Tutup',
+      expand: 'Buka',
     },
   },
 };

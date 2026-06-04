@@ -19,6 +19,7 @@ import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { HistoryPanel } from './components/HistoryPanel';
 import { RegenerateDiffPanel } from './components/RegenerateDiffPanel';
 import { ReviewPanel } from './components/ReviewPanel';
+import { WorkflowStepper, type WorkflowStepKey, type WorkflowStepState } from './components/WorkflowStepper';
 import { uiText, type UiLanguage } from './i18n';
 import type {
   AnalyzeRequest,
@@ -50,6 +51,27 @@ type ToastItem = {
   title: string;
   message: string;
 };
+
+function formatPushResults(
+  response: { summary: { pushed: number; failed: number; total: number }; results: Array<{ ok: boolean; caseId?: number | string; error?: string; title: string }> },
+  lang: UiLanguage
+): string {
+  const t = uiText[lang].approval;
+  const caseRefs = response.results
+    .filter((entry) => entry.ok && entry.caseId !== undefined && entry.caseId !== null)
+    .map((entry) => `C${entry.caseId}`)
+    .join(', ');
+  const lines = [t.pushSummary(response.summary.pushed, response.summary.failed, response.summary.total, caseRefs)];
+  const failures = response.results.filter((entry) => !entry.ok);
+  if (failures.length) {
+    lines.push('');
+    lines.push(t.pushFailures);
+    for (const failure of failures) {
+      lines.push(`- ${failure.title}: ${failure.error || 'Unknown error'}`);
+    }
+  }
+  return lines.join('\n');
+}
 
 export default function App() {
   const [lang, setLang] = useState<UiLanguage>('en');
@@ -158,11 +180,22 @@ export default function App() {
   const invalidCount = useMemo(() => validation.filter((item) => !item.valid).length, [validation]);
   const t = uiText[lang];
   const toastText = uiText[lang].toast;
-  const pushDisabled = useMemo(() => {
-    const validationOkay = testCases.length > 0 && validation.every((item) => item.valid);
-    const coverageOkay = !coverageEnforced || !coverage || coverage.uncoveredCriteria.length === 0;
-    return !(validationOkay && coverageOkay && approved && sectionId.trim());
-  }, [approved, coverage, coverageEnforced, sectionId, testCases.length, validation]);
+  const casesValid = useMemo(() => testCases.length > 0 && validation.every((item) => item.valid), [testCases.length, validation]);
+  const coverageComplete = useMemo(
+    () => !coverageEnforced || !coverage || coverage.uncoveredCriteria.length === 0,
+    [coverage, coverageEnforced]
+  );
+  const stepperSteps = useMemo<Array<{ key: WorkflowStepKey; state: WorkflowStepState }>>(() => {
+    const analyzeDone = Boolean(context);
+    const scopeDone = testCases.length > 0;
+    const reviewReady = casesValid && coverageComplete;
+    const order: WorkflowStepKey[] = ['analyze', 'scope', 'review', 'approve'];
+    const activeIndex = !analyzeDone ? 0 : !scopeDone ? 1 : !reviewReady ? 2 : 3;
+    return order.map((key, index) => ({
+      key,
+      state: index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'upcoming',
+    }));
+  }, [context, testCases.length, casesValid, coverageComplete]);
 
   function removeToast(id: number) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -286,7 +319,7 @@ export default function App() {
         enforceAcceptanceCriteria: coverageEnforced,
         testCases,
       });
-      setPushResults(JSON.stringify(response, null, 2));
+      setPushResults(formatPushResults(response, lang));
       pushToast('success', toastText.pushSuccessTitle, toastText.pushSuccessMessage);
       await refreshAuxiliaryData();
     } catch (pushError) {
@@ -430,7 +463,7 @@ export default function App() {
             </div>
 
             <div className="modal-panel-wrap">
-              <DiagnosticsPanel lang="en" diagnostics={diagnostics} />
+              <DiagnosticsPanel lang={lang} diagnostics={diagnostics} />
             </div>
           </section>
         </div>
@@ -471,35 +504,22 @@ export default function App() {
           <div className="section-tag">{t.guidedWorkflow}</div>
         </div>
 
-        <div className="workflow-top">
-          <div className="workflow-main-column">
-            <AnalyzePanel
-              lang={lang}
-              form={form}
-              busy={analyzing}
-              suggestionsEnabled={Boolean(config?.authenticated)}
-              suggestions={ticketSuggestions}
-              suggestionsLoading={loadingSuggestions}
-              suggestionsError={suggestionsError}
-              onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
-              onSuggestionSelect={handleSuggestionSelect}
-              onAnalyze={handleAnalyze}
-            />
-          </div>
-          <ApprovalPanel
-            lang="en"
-            approved={approved}
-            sectionId={sectionId}
-            pushDisabled={pushDisabled}
-            busy={pushing}
-            results={pushResults}
-            onApprovedChange={setApproved}
-            onSectionIdChange={setSectionId}
-            onPush={handlePush}
-          />
-        </div>
+        <WorkflowStepper lang={lang} steps={stepperSteps} />
 
         <div className="workflow-main-column">
+          <AnalyzePanel
+            lang={lang}
+            form={form}
+            busy={analyzing}
+            suggestionsEnabled={Boolean(config?.authenticated)}
+            suggestions={ticketSuggestions}
+            suggestionsLoading={loadingSuggestions}
+            suggestionsError={suggestionsError}
+            onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
+            onSuggestionSelect={handleSuggestionSelect}
+            onAnalyze={handleAnalyze}
+          />
+
           <ContextPanel
             lang={lang}
             context={context}
@@ -517,7 +537,7 @@ export default function App() {
 
           {pendingGeneration ? (
             <RegenerateDiffPanel
-              lang="en"
+              lang={lang}
               currentCases={testCases}
               candidate={pendingGeneration}
               onReplace={() => {
@@ -529,7 +549,7 @@ export default function App() {
           ) : null}
 
           <ReviewPanel
-            lang="en"
+            lang={lang}
             context={context}
             generating={generating}
             testCases={testCases}
@@ -538,6 +558,19 @@ export default function App() {
             coverageEnforced={coverageEnforced}
             manualScopeOverride={manualScopeOverride}
             onCaseChange={handleCaseChange}
+          />
+
+          <ApprovalPanel
+            lang={lang}
+            approved={approved}
+            sectionId={sectionId}
+            casesValid={casesValid}
+            coverageComplete={coverageComplete}
+            busy={pushing}
+            results={pushResults}
+            onApprovedChange={setApproved}
+            onSectionIdChange={setSectionId}
+            onPush={handlePush}
           />
         </div>
 
@@ -548,7 +581,7 @@ export default function App() {
           </div>
 
           <div className="secondary-stack">
-          <HistoryPanel lang="en" runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
+          <HistoryPanel lang={lang} runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
           </div>
         </section>
       </main>

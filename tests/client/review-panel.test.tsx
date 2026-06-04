@@ -44,6 +44,22 @@ const context: QaContext = {
     {
       id: 'AC-1',
       text: 'The AI Summary tab is available for analysis results with no score.',
+      sourceExcerpts: [
+        {
+          text: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
+          location: 'PRD: AI Summary NO SCORE',
+          url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+          kind: 'prd',
+          confidence: 'closest',
+        },
+        {
+          text: 'Results with no score still use the AI Summary variant.',
+          location: 'PRD: AI Summary NO SCORE',
+          url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+          kind: 'prd',
+          confidence: 'closest',
+        },
+      ],
       sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
       sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
       sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
@@ -69,6 +85,7 @@ const testCases: GeneratedTestCase[] = [
     id: 'TC-ORB-3157-001',
     title: '[Web][AI Assistance][ORB-3157] Show AI Summary for no-score analysis results',
     type: 'BDD',
+    caseIntent: 'positive',
     jiraReference: 'ORB-3157',
     preconditions: 'User has a no-score analysis result.',
     bddScenario: 'Feature: AI Summary\nScenario: View summary\nGiven x\nWhen y\nThen z',
@@ -80,6 +97,22 @@ const testCases: GeneratedTestCase[] = [
         {
           id: 'AC-1',
           text: 'The AI Summary tab is available for analysis results with no score.',
+          sourceExcerpts: [
+            {
+              text: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
+              location: 'PRD: AI Summary NO SCORE',
+              url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+              kind: 'prd',
+              confidence: 'closest',
+            },
+            {
+              text: 'Results with no score still use the AI Summary variant.',
+              location: 'PRD: AI Summary NO SCORE',
+              url: 'https://example.test/prd#AI-Summary-NO-SCORE',
+              kind: 'prd',
+              confidence: 'closest',
+            },
+          ],
           sourceExcerpt: 'The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.',
           sourceExcerptLocation: 'PRD: AI Summary NO SCORE',
           sourceExcerptUrl: 'https://example.test/prd#AI-Summary-NO-SCORE',
@@ -88,6 +121,23 @@ const testCases: GeneratedTestCase[] = [
       ],
       coverageNote: 'Covers no-score AI Summary availability.',
     },
+  },
+];
+
+const mixedIntentCases: GeneratedTestCase[] = [
+  {
+    ...testCases[0],
+    id: 'TC-ORB-3157-002',
+    title: '[Web][AI Assistance][ORB-3157] Reject access when AI Summary is unavailable',
+    type: 'BDD',
+    caseIntent: 'negative',
+  },
+  {
+    ...testCases[0],
+    id: 'TC-ORB-3157-003',
+    title: '[Web][AI Assistance][ORB-3157] Handle empty analysis result boundary',
+    type: 'BDD',
+    caseIntent: 'edge',
   },
 ];
 
@@ -136,6 +186,7 @@ describe('ReviewPanel', () => {
       />
     );
 
+    expect(document.querySelectorAll('.source-quote').length).toBe(2);
     expect(document.querySelector('.source-quote')?.textContent).toMatch(/Analysis Summary window/);
     expect(screen.getAllByText(/PRD: AI Summary NO SCORE/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
@@ -159,5 +210,27 @@ describe('ReviewPanel', () => {
     expect(screen.getByText('Generating test cases...')).toBeTruthy();
     expect(screen.getByText('Building BDD cases from the resolved scope authority and final acceptance criteria.')).toBeTruthy();
     expect(screen.getByText('Coverage will appear after generation finishes.')).toBeTruthy();
+  });
+
+  it('summarizes positive, negative, and edge-case mix', () => {
+    render(
+      <ReviewPanel
+        context={context}
+        generating={false}
+        testCases={[testCases[0], ...mixedIntentCases]}
+        validation={[
+          ...validation,
+          { ...validation[0], id: 'TC-ORB-3157-002' },
+          { ...validation[0], id: 'TC-ORB-3157-003' },
+        ]}
+        coverage={coverage}
+        coverageEnforced={true}
+        manualScopeOverride={false}
+        lang="en"
+        onCaseChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Case mix: Positive 1 · Negative 1 · Edge 1')).toBeTruthy();
   });
 });
