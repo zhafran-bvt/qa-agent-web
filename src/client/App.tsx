@@ -795,13 +795,6 @@ export default function App() {
           </div>
         </div>
 
-        <footer className="workbench-actionbar">
-          <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' - ') || t.noLlmConfigured}</div>
-          <button className="button button-secondary" type="button" disabled={Boolean(generateBlocker)} onClick={handleGenerate}>
-            {generating ? t.context.generating : t.context.generate}
-          </button>
-          <div>{generateBlocker || (invalidCount ? t.casesNeedFixes(invalidCount) : testCases.length ? t.validationClear : t.noCasesGeneratedYet)}</div>
-        </footer>
       </main>
     </div>
   );
