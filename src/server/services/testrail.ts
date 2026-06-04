@@ -1,10 +1,11 @@
-import type { GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
+import type { ExistingTestRailCase, GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
 import { requestHttpsJson } from './http';
 
-interface TestRailConfig {
+export interface TestRailConfig {
   baseUrl: string;
   user: string;
   apiKey: string;
+  projectId?: string;
 }
 
 function delay(ms: number): Promise<void> {
@@ -37,6 +38,95 @@ function addCase(config: TestRailConfig, sectionId: string, testCase: GeneratedT
     const parsed = response.body || {};
     throw new Error(String((parsed as Record<string, unknown>).error || `HTTP ${response.statusCode}`));
   });
+}
+
+function authHeader(config: TestRailConfig): string {
+  return `Basic ${Buffer.from(`${config.user}:${config.apiKey}`).toString('base64')}`;
+}
+
+export function normalizeRefTokens(refs: string): string[] {
+  return String(refs || '')
+    .split(/[\s,;|/]+/)
+    .map((token) => token.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+export function hasExactJiraRef(refs: string, jiraKey: string): boolean {
+  const normalizedJiraKey = String(jiraKey || '').trim().toUpperCase();
+  return normalizeRefTokens(refs).includes(normalizedJiraKey);
+}
+
+export function buildGetCasesUrl(config: TestRailConfig, projectId: string, sectionId: string, jiraKey: string): string {
+  const baseUrl = config.baseUrl.replace(/\/$/, '');
+  const params = new URLSearchParams({
+    section_id: sectionId,
+    refs: jiraKey,
+  });
+  return `${baseUrl}/index.php?/api/v2/get_cases/${encodeURIComponent(projectId)}&${params.toString()}`;
+}
+
+function extractBddScenario(raw: unknown): string {
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        if (item && typeof item === 'object' && 'content' in item) return String((item as { content?: unknown }).content || '').trim();
+        return String(item || '').trim();
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  return String(raw || '').trim();
+}
+
+function mapExistingCase(config: TestRailConfig, rawCase: Record<string, unknown>): ExistingTestRailCase {
+  const caseId = (rawCase.id || rawCase.case_id || '') as number | string;
+  const baseUrl = config.baseUrl.replace(/\/$/, '');
+  return {
+    caseId,
+    title: String(rawCase.title || ''),
+    refs: String(rawCase.refs || ''),
+    typeId: (rawCase.type_id || rawCase.typeId || undefined) as number | string | undefined,
+    preconditions: String(rawCase.custom_preconds || rawCase.preconditions || '').trim(),
+    bddScenario: extractBddScenario(rawCase.custom_testrail_bdd_scenario || rawCase.bddScenario || rawCase.bdd_scenario),
+    webUrl: caseId ? `${baseUrl}/index.php?/cases/view/${caseId}` : undefined,
+  };
+}
+
+function parseCasesResponse(body: unknown): Record<string, unknown>[] {
+  if (Array.isArray(body)) return body as Record<string, unknown>[];
+  if (body && typeof body === 'object') {
+    const record = body as Record<string, unknown>;
+    if (Array.isArray(record.cases)) return record.cases as Record<string, unknown>[];
+  }
+  return [];
+}
+
+export async function findExistingCasesByJiraRef(
+  config: TestRailConfig,
+  sectionId: string,
+  jiraKey: string
+): Promise<ExistingTestRailCase[]> {
+  const projectId = String(config.projectId || '').trim();
+  if (!projectId) throw new Error('TestRail project ID is required for duplicate lookup.');
+
+  const response = await requestHttpsJson<unknown>({
+    url: buildGetCasesUrl(config, projectId, sectionId, jiraKey),
+    method: 'GET',
+    headers: {
+      Authorization: authHeader(config),
+    },
+    upstream: 'TestRail',
+    timeoutMs: Number(process.env.TESTRAIL_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+  });
+
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const parsed = response.body as Record<string, unknown>;
+    throw new Error(String(parsed?.error || `HTTP ${response.statusCode}`));
+  }
+
+  return parseCasesResponse(response.body)
+    .map((rawCase) => mapExistingCase(config, rawCase))
+    .filter((testCase) => hasExactJiraRef(testCase.refs, jiraKey));
 }
 
 export function mapType(type: string): number {

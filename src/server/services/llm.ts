@@ -1,4 +1,10 @@
-import type { GeneratedTestCase, QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
+import type {
+  DuplicateCaseRecommendation,
+  ExistingTestRailCase,
+  GeneratedTestCase,
+  QaContext,
+  ScopeSnapshotTranslation,
+} from '../../shared/contracts';
 import { buildCoverage } from './validation';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 import { requestHttpsJson } from './http';
@@ -42,6 +48,12 @@ interface ProviderScopeTranslationResult {
   provider: string;
   model: string;
   translation: ScopeSnapshotTranslation;
+}
+
+interface ProviderDuplicateReviewResult {
+  provider: string;
+  model: string;
+  recommendations: DuplicateCaseRecommendation[];
 }
 
 function stripAcceptanceCriteriaSections(text: string): string {
@@ -229,6 +241,92 @@ function normalizeCaseIntent(value: unknown): 'positive' | 'negative' | 'edge' |
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'positive' || normalized === 'negative' || normalized === 'edge') return normalized;
   return undefined;
+}
+
+function normalizeComparableText(value: unknown): string {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\[[^\]]+\]/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function recommendationForCaseId(
+  recommendations: DuplicateCaseRecommendation[],
+  newCaseId: string
+): DuplicateCaseRecommendation | undefined {
+  return recommendations.find((item) => item.newCaseId === newCaseId);
+}
+
+export function buildDeterministicDuplicateRecommendations(
+  existingCases: ExistingTestRailCase[],
+  generatedCases: GeneratedTestCase[]
+): DuplicateCaseRecommendation[] {
+  const existingByTitle = new Map<string, ExistingTestRailCase[]>();
+  for (const existingCase of existingCases) {
+    const normalizedTitle = normalizeComparableText(existingCase.title);
+    if (!normalizedTitle) continue;
+    existingByTitle.set(normalizedTitle, [...(existingByTitle.get(normalizedTitle) || []), existingCase]);
+  }
+
+  const recommendations: DuplicateCaseRecommendation[] = [];
+  generatedCases.forEach((testCase, index) => {
+    const newCaseId = testCase.id || `TC-${index + 1}`;
+    const exactMatches = existingByTitle.get(normalizeComparableText(testCase.title)) || [];
+    if (exactMatches.length) {
+      recommendations.push({
+        newCaseId,
+        recommendation: 'exclude',
+        overlap: 'already_covered',
+        matchedExistingCaseIds: exactMatches.map((existingCase) => existingCase.caseId),
+        reason: 'Existing TestRail case has the same normalized title.',
+        deterministic: true,
+      });
+    }
+  });
+  return recommendations;
+}
+
+function normalizeDuplicateRecommendation(
+  raw: Record<string, unknown>,
+  generatedCase: GeneratedTestCase,
+  index: number
+): DuplicateCaseRecommendation {
+  const rawRecommendation = String(raw.recommendation || '').toLowerCase();
+  const recommendation = rawRecommendation === 'include' || rawRecommendation === 'exclude' || rawRecommendation === 'review' ? rawRecommendation : 'review';
+  const rawOverlap = String(raw.overlap || '').toLowerCase();
+  const overlap =
+    rawOverlap === 'already_covered' || rawOverlap === 'partial_overlap' || rawOverlap === 'new_coverage'
+      ? rawOverlap
+      : recommendation === 'include'
+      ? 'new_coverage'
+      : recommendation === 'exclude'
+      ? 'already_covered'
+      : 'partial_overlap';
+  const matchedExistingCaseIds = Array.isArray(raw.matchedExistingCaseIds)
+    ? raw.matchedExistingCaseIds.map((item) => String(item || '').trim()).filter(Boolean)
+    : Array.isArray(raw.matched_existing_case_ids)
+    ? raw.matched_existing_case_ids.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+
+  return {
+    newCaseId: String(raw.newCaseId || raw.new_case_id || generatedCase.id || `TC-${index + 1}`),
+    recommendation,
+    overlap,
+    matchedExistingCaseIds,
+    reason: String(raw.reason || '').trim() || 'Review suggested because overlap could not be determined confidently.',
+    deterministic: false,
+  };
+}
+
+function findDuplicateRecommendationArray(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.recommendations)) return record.recommendations;
+  if (Array.isArray(record.duplicateCaseRecommendations)) return record.duplicateCaseRecommendations;
+  return null;
 }
 
 function inferCaseIntent(testCase: Record<string, unknown>): 'positive' | 'negative' | 'edge' {
@@ -710,6 +808,152 @@ async function translateScopeSnapshotWithProvider(
     model: provider.model,
     translation: normalizeScopeSnapshotTranslation(parsed, context),
   };
+}
+
+async function recommendDuplicateCasesWithProvider(
+  provider: ProviderConfig,
+  jiraKey: string,
+  existingCases: ExistingTestRailCase[],
+  generatedCases: GeneratedTestCase[],
+  deterministicRecommendations: DuplicateCaseRecommendation[]
+): Promise<ProviderDuplicateReviewResult> {
+  const deterministicIds = new Set(deterministicRecommendations.map((item) => item.newCaseId));
+  const casesForLlm = generatedCases.filter((testCase, index) => !deterministicIds.has(testCase.id || `TC-${index + 1}`));
+  if (!casesForLlm.length) {
+    return { provider: provider.name, model: provider.model, recommendations: [] };
+  }
+
+  const systemPrompt = [
+    'You are a senior QA reviewer preventing duplicate TestRail pushes.',
+    'Compare existing TestRail cases against newly generated candidate cases for the same Jira ticket.',
+    'Recommend include only when the candidate adds materially new test coverage.',
+    'Recommend exclude when existing cases already cover the same behavior.',
+    'Recommend review when there is partial overlap or uncertainty.',
+    'Use titles, case intent, covered AC ids, preconditions, and BDD steps. Do not invent existing cases.',
+    'Return strict JSON only.',
+    'Use this exact top-level shape: {"recommendations":[{"newCaseId":"","recommendation":"include|exclude|review","overlap":"already_covered|partial_overlap|new_coverage","matchedExistingCaseIds":[],"reason":""}]}',
+  ].join('\n');
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0.1,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: JSON.stringify(
+            {
+              instruction: `Review duplicate risk for ${jiraKey}.`,
+              existingCases: existingCases.map((testCase) => ({
+                caseId: testCase.caseId,
+                title: testCase.title,
+                refs: testCase.refs,
+                preconditions: testCase.preconditions || '',
+                bddScenario: testCase.bddScenario || '',
+              })),
+              generatedCases: casesForLlm.map((testCase, index) => ({
+                id: testCase.id || `TC-${index + 1}`,
+                title: testCase.title,
+                caseIntent: testCase.caseIntent || '',
+                coversAcceptanceCriteria: testCase.coversAcceptanceCriteria || [],
+                preconditions: testCase.preconditions || '',
+                bddScenario: testCase.bddScenario || '',
+              })),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    }
+  );
+
+  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  const recommendations = findDuplicateRecommendationArray(parsed);
+  if (!recommendations) throw new Error('LLM duplicate review did not return recommendations.');
+
+  return {
+    provider: provider.name,
+    model: provider.model,
+    recommendations: casesForLlm.map((testCase, index) => {
+      const newCaseId = testCase.id || `TC-${index + 1}`;
+      const raw = recommendations.find((item) => {
+        if (!item || typeof item !== 'object') return false;
+        const record = item as Record<string, unknown>;
+        return String(record.newCaseId || record.new_case_id || '') === newCaseId;
+      });
+      return normalizeDuplicateRecommendation((raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>, testCase, index);
+    }),
+  };
+}
+
+function buildDuplicateFallbackRecommendations(
+  deterministicRecommendations: DuplicateCaseRecommendation[],
+  generatedCases: GeneratedTestCase[]
+): DuplicateCaseRecommendation[] {
+  return generatedCases.map((testCase, index) => {
+    const newCaseId = testCase.id || `TC-${index + 1}`;
+    const deterministic = recommendationForCaseId(deterministicRecommendations, newCaseId);
+    if (deterministic) return deterministic;
+    return {
+      newCaseId,
+      recommendation: 'review',
+      overlap: 'partial_overlap',
+      matchedExistingCaseIds: [],
+      reason: 'Review manually because duplicate similarity could not be determined automatically.',
+      deterministic: true,
+    };
+  });
+}
+
+export async function recommendDuplicateCases(
+  config: LlmConfig,
+  jiraKey: string,
+  existingCases: ExistingTestRailCase[],
+  generatedCases: GeneratedTestCase[]
+): Promise<DuplicateCaseRecommendation[]> {
+  const deterministicRecommendations = buildDeterministicDuplicateRecommendations(existingCases, generatedCases);
+  const providers = config.providers.filter((provider) => provider.apiKey);
+  if (!providers.length) return buildDuplicateFallbackRecommendations(deterministicRecommendations, generatedCases);
+
+  let lastError: Error | null = null;
+  for (const provider of providers) {
+    try {
+      const llmResult = await recommendDuplicateCasesWithProvider(
+        provider,
+        jiraKey,
+        existingCases,
+        generatedCases,
+        deterministicRecommendations
+      );
+      const merged = generatedCases.map((testCase, index) => {
+        const newCaseId = testCase.id || `TC-${index + 1}`;
+        return (
+          recommendationForCaseId(deterministicRecommendations, newCaseId) ||
+          recommendationForCaseId(llmResult.recommendations, newCaseId) ||
+          ({
+            newCaseId,
+            recommendation: 'review',
+            overlap: 'partial_overlap',
+            matchedExistingCaseIds: [],
+            reason: 'Review manually because this case was not classified by duplicate review.',
+            deterministic: true,
+          } satisfies DuplicateCaseRecommendation)
+        );
+      });
+      return merged;
+    } catch (error) {
+      lastError = error as Error;
+      if (!isFallbackError(error as Error & { statusCode?: number })) break;
+    }
+  }
+
+  void lastError;
+  return buildDuplicateFallbackRecommendations(deterministicRecommendations, generatedCases);
 }
 
 function getMissingAcceptanceCriteria(context: GenerateContext, testCases: GeneratedTestCase[]) {

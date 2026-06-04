@@ -332,6 +332,44 @@ export interface PushRequest extends ValidateRequest {
   generatedRunId?: string;
 }
 
+export type DuplicateCaseDecision = 'include' | 'exclude' | 'review';
+
+export interface ExistingTestRailCase {
+  caseId: number | string;
+  title: string;
+  refs: string;
+  typeId?: number | string;
+  preconditions?: string;
+  bddScenario?: string;
+  webUrl?: string;
+}
+
+export interface DuplicateCaseRecommendation {
+  newCaseId: string;
+  recommendation: DuplicateCaseDecision;
+  overlap: 'already_covered' | 'partial_overlap' | 'new_coverage';
+  matchedExistingCaseIds: Array<number | string>;
+  reason: string;
+  deterministic: boolean;
+}
+
+export interface PushPreflightRequest extends PushRequest {}
+
+export interface PushPreflightResponse {
+  duplicatesFound: boolean;
+  duplicateLookupSkipped?: {
+    reason: string;
+  };
+  existingCases: ExistingTestRailCase[];
+  recommendations: DuplicateCaseRecommendation[];
+  summary: {
+    jiraKey: string;
+    sectionId: string;
+    existingCount: number;
+    generatedCount: number;
+  };
+}
+
 export interface PushCaseResult {
   ok: boolean;
   caseId?: number | string;

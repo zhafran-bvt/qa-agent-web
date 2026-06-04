@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildGenerationPromptContext,
+  buildDeterministicDuplicateRecommendations,
   buildScopePriorityContext,
   findAcceptanceCriteriaArray,
   findCaseArray,
@@ -99,6 +100,43 @@ test('normalizes explicit case intent and falls back for legacy cases', () => {
     ).caseIntent,
     'edge'
   );
+});
+
+test('deterministic duplicate review excludes exact normalized title matches', () => {
+  const recommendations = buildDeterministicDuplicateRecommendations(
+    [
+      {
+        caseId: 123,
+        title: '[Web][Spatial Analysis][ORB-3079] Preserve polygon dataset geometry',
+        refs: 'ORB-3079',
+      },
+    ],
+    [
+      {
+        id: 'TC-ORB-3079-001',
+        title: '[Web][Spatial Analysis][ORB-3079] Preserve polygon dataset geometry',
+        type: 'BDD',
+        caseIntent: 'positive',
+        jiraReference: 'ORB-3079',
+        preconditions: '',
+        bddScenario: '',
+        coversAcceptanceCriteria: ['AC-1'],
+        sourceScope: [],
+        evidence: { prdSectionTitle: '', acceptanceCriteria: [], coverageNote: '' },
+      },
+    ]
+  );
+
+  assert.deepEqual(recommendations, [
+    {
+      newCaseId: 'TC-ORB-3079-001',
+      recommendation: 'exclude',
+      overlap: 'already_covered',
+      matchedExistingCaseIds: [123],
+      reason: 'Existing TestRail case has the same normalized title.',
+      deterministic: true,
+    },
+  ]);
 });
 
 test('normalizes top-level coverage note fallback', () => {

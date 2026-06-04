@@ -9,7 +9,7 @@
   "scripts": {
     "prepare": "node scripts/install-hooks.mjs",
     "dev": "QA_AGENT_PORT=5180 QA_AGENT_BASE_URL=http://localhost:5180 ATLASSIAN_REDIRECT_URI=http://localhost:5180/auth/atlassian/callback concurrently \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "tsx watch src/server/index.ts",
+    "dev:server": "node --env-file=.env ./node_modules/.bin/tsx watch src/server/index.ts",
     "dev:client": "vite",
     "build": "npm run build:server && npm run build:client",
     "build:server": "tsc -p tsconfig.server.json",

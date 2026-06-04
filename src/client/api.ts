@@ -5,6 +5,8 @@ import type {
   DiagnosticsResponse,
   GenerateRequest,
   GenerateResponse,
+  PushPreflightRequest,
+  PushPreflightResponse,
   PushRequest,
   PushResponse,
   ScopeSnapshotTranslationRequest,
@@ -62,6 +64,13 @@ export function validateCases(payload: ValidateRequest): Promise<ValidateRespons
 
 export function pushCases(payload: PushRequest): Promise<PushResponse> {
   return requestJson<PushResponse>('/api/push', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function preflightPush(payload: PushPreflightRequest): Promise<PushPreflightResponse> {
+  return requestJson<PushPreflightResponse>('/api/push/preflight', {
     method: 'POST',
     body: JSON.stringify(payload),
   });

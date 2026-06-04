@@ -98,6 +98,10 @@ export const uiText = {
       pushSuccessTitle: 'Push complete',
       pushSuccessMessage: 'TestRail push finished successfully.',
       pushErrorTitle: 'Push failed',
+      duplicateReviewTitle: 'Duplicate review needed',
+      duplicateReviewMessage: (count: number, ticketKey: string) => `${ticketKey} already has ${count} TestRail case(s). Review before pushing.`,
+      duplicateReviewEmptySelection: 'Select at least one generated case to push.',
+      duplicateLookupSkippedTitle: 'Duplicate lookup skipped',
       historyErrorTitle: 'History load failed',
       validationErrorTitle: 'Validation refresh failed',
     },
@@ -139,6 +143,23 @@ export const uiText = {
       pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
         `Pushed ${pushed}/${total}${failed ? ` · ${failed} failed` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
       pushFailures: 'Failed cases',
+    },
+    duplicateReview: {
+      title: 'Existing TestRail cases found',
+      subtitle: (count: number, jiraKey: string, sectionId: string) =>
+        `${jiraKey} already has ${count} case(s) in section ${sectionId}. Review the suggested action before pushing another set.`,
+      existingTitle: 'Existing TestRail cases',
+      generatedTitle: 'Generated cases to review',
+      openInTestrail: 'Open in TestRail',
+      selectRecommended: 'Select recommended',
+      pushSelected: 'Push selected',
+      pushing: 'Pushing...',
+      cancel: 'Cancel',
+      selectedCount: (selected: number, total: number) => `${selected}/${total} selected`,
+      recommendation: (value: string): string => (value === 'include' ? 'Include' : value === 'exclude' ? 'Exclude' : 'Review'),
+      overlap: (value: string): string =>
+        value === 'new_coverage' ? 'New coverage' : value === 'already_covered' ? 'Already covered' : 'Partial overlap',
+      matches: (caseIds: string) => `Matches ${caseIds}`,
     },
     context: {
       title: 'Scope Snapshot',
@@ -389,6 +410,10 @@ export const uiText = {
       pushSuccessTitle: 'Push selesai',
       pushSuccessMessage: 'Push ke TestRail berhasil diselesaikan.',
       pushErrorTitle: 'Push gagal',
+      duplicateReviewTitle: 'Perlu cek duplikat',
+      duplicateReviewMessage: (count: number, ticketKey: string) => `${ticketKey} sudah punya ${count} case di TestRail. Review dulu sebelum push.`,
+      duplicateReviewEmptySelection: 'Pilih minimal satu generated case untuk di-push.',
+      duplicateLookupSkippedTitle: 'Cek duplikat dilewati',
       historyErrorTitle: 'Gagal buka history',
       validationErrorTitle: 'Refresh validasi gagal',
     },
@@ -430,6 +455,23 @@ export const uiText = {
       pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
         `Berhasil push ${pushed}/${total}${failed ? ` · ${failed} gagal` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
       pushFailures: 'Case yang gagal',
+    },
+    duplicateReview: {
+      title: 'Case TestRail sudah ada',
+      subtitle: (count: number, jiraKey: string, sectionId: string) =>
+        `${jiraKey} sudah punya ${count} case di section ${sectionId}. Cek saran ini sebelum push case baru.`,
+      existingTitle: 'Case yang sudah ada di TestRail',
+      generatedTitle: 'Generated case yang perlu dicek',
+      openInTestrail: 'Buka di TestRail',
+      selectRecommended: 'Pilih yang disarankan',
+      pushSelected: 'Push yang dipilih',
+      pushing: 'Lagi push...',
+      cancel: 'Batal',
+      selectedCount: (selected: number, total: number) => `${selected}/${total} dipilih`,
+      recommendation: (value: string): string => (value === 'include' ? 'Include' : value === 'exclude' ? 'Exclude' : 'Review'),
+      overlap: (value: string): string =>
+        value === 'new_coverage' ? 'Coverage baru' : value === 'already_covered' ? 'Sudah ter-cover' : 'Overlap sebagian',
+      matches: (caseIds: string) => `Mirip dengan ${caseIds}`,
     },
     context: {
       title: 'Ringkasan Scope',

@@ -8,6 +8,7 @@ import {
   loadHistoryRuns,
   loadTicketSuggestions,
   logout,
+  preflightPush,
   pushCases,
   translateScopeSnapshot,
   validateCases,
@@ -16,6 +17,7 @@ import { AnalyzePanel } from './components/AnalyzePanel';
 import { ApprovalPanel } from './components/ApprovalPanel';
 import { ContextPanel } from './components/ContextPanel';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
+import { DuplicatePushReviewModal } from './components/DuplicatePushReviewModal';
 import { HistoryPanel } from './components/HistoryPanel';
 import { RegenerateDiffPanel } from './components/RegenerateDiffPanel';
 import { ReviewPanel } from './components/ReviewPanel';
@@ -25,9 +27,12 @@ import type {
   AnalyzeRequest,
   ConfigResponse,
   CoverageSummary,
+  DuplicateCaseRecommendation,
+  ExistingTestRailCase,
   DiagnosticsResponse,
   GenerateResponse,
   GeneratedTestCase,
+  PushRequest,
   QaContext,
   ScopeSnapshotTranslation,
   SuggestedTicket,
@@ -106,6 +111,11 @@ export default function App() {
   const [ticketSuggestions, setTicketSuggestions] = useState<SuggestedTicket[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
+  const [duplicateReview, setDuplicateReview] = useState<{
+    existingCases: ExistingTestRailCase[];
+    recommendations: DuplicateCaseRecommendation[];
+    selectedCaseIds: string[];
+  } | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const skipNextValidation = useRef(false);
   const nextToastId = useRef(1);
@@ -209,6 +219,31 @@ export default function App() {
     }, 4200);
   }
 
+  function buildPushPayload(casesToPush: GeneratedTestCase[] = testCases): PushRequest | null {
+    if (!context) return null;
+    return {
+      approved,
+      sectionId,
+      generatedRunId,
+      jiraKey: context.ticketKey,
+      epic: context.epic,
+      feOnly: context.constraints.feOnly,
+      acceptanceCriteria: context.acceptanceCriteria,
+      enforceAcceptanceCriteria: coverageEnforced,
+      testCases: casesToPush,
+    };
+  }
+
+  async function submitPush(casesToPush: GeneratedTestCase[]) {
+    const payload = buildPushPayload(casesToPush);
+    if (!payload) return;
+    const response = await pushCases(payload);
+    setPushResults(formatPushResults(response, lang));
+    pushToast('success', toastText.pushSuccessTitle, toastText.pushSuccessMessage);
+    setDuplicateReview(null);
+    await refreshAuxiliaryData();
+  }
+
   async function handleAnalyze() {
     setAnalyzing(true);
     setError('');
@@ -226,6 +261,7 @@ export default function App() {
       setPushResults('');
       setGeneratedRunId('');
       setPendingGeneration(null);
+      setDuplicateReview(null);
       setLang('en');
       setScopeTranslation(null);
       pushToast('success', toastText.analyzeSuccessTitle, toastText.analyzeSuccessMessage(response.context.ticketKey));
@@ -269,6 +305,7 @@ export default function App() {
     setApproved(false);
     setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
+    setDuplicateReview(null);
   }
 
   async function handleGenerate() {
@@ -308,20 +345,52 @@ export default function App() {
     setPushing(true);
     setError('');
     try {
-      const response = await pushCases({
-        approved,
-        sectionId,
-        generatedRunId,
-        jiraKey: context.ticketKey,
-        epic: context.epic,
-        feOnly: context.constraints.feOnly,
-        acceptanceCriteria: context.acceptanceCriteria,
-        enforceAcceptanceCriteria: coverageEnforced,
-        testCases,
-      });
-      setPushResults(formatPushResults(response, lang));
-      pushToast('success', toastText.pushSuccessTitle, toastText.pushSuccessMessage);
-      await refreshAuxiliaryData();
+      const payload = buildPushPayload();
+      if (!payload) return;
+      const preflight = await preflightPush(payload);
+      if (preflight.duplicateLookupSkipped) {
+        setPushResults(preflight.duplicateLookupSkipped.reason);
+        pushToast('info', toastText.duplicateLookupSkippedTitle, preflight.duplicateLookupSkipped.reason);
+        await submitPush(testCases);
+        return;
+      }
+      if (preflight.duplicatesFound) {
+        const selectedCaseIds = testCases
+          .filter((testCase) => preflight.recommendations.find((item) => item.newCaseId === testCase.id)?.recommendation === 'include')
+          .map((testCase) => testCase.id);
+        setDuplicateReview({
+          existingCases: preflight.existingCases,
+          recommendations: preflight.recommendations,
+          selectedCaseIds,
+        });
+        setPushResults(
+          `Duplicate review required: ${preflight.summary.existingCount} existing TestRail case(s) found for ${preflight.summary.jiraKey}.`
+        );
+        pushToast('info', toastText.duplicateReviewTitle, toastText.duplicateReviewMessage(preflight.summary.existingCount, preflight.summary.jiraKey));
+        return;
+      }
+      await submitPush(testCases);
+    } catch (pushError) {
+      const message = (pushError as Error).message;
+      setPushResults(message);
+      pushToast('error', toastText.pushErrorTitle, message);
+    } finally {
+      setPushing(false);
+    }
+  }
+
+  async function handleDuplicatePushConfirm() {
+    if (!duplicateReview) return;
+    const selected = new Set(duplicateReview.selectedCaseIds);
+    const casesToPush = testCases.filter((testCase) => selected.has(testCase.id));
+    if (!casesToPush.length) {
+      pushToast('error', toastText.pushErrorTitle, toastText.duplicateReviewEmptySelection);
+      return;
+    }
+    setPushing(true);
+    setError('');
+    try {
+      await submitPush(casesToPush);
     } catch (pushError) {
       const message = (pushError as Error).message;
       setPushResults(message);
@@ -467,6 +536,22 @@ export default function App() {
             </div>
           </section>
         </div>
+      ) : null}
+
+      {duplicateReview && context ? (
+        <DuplicatePushReviewModal
+          lang={lang}
+          jiraKey={context.ticketKey}
+          sectionId={sectionId}
+          existingCases={duplicateReview.existingCases}
+          generatedCases={testCases}
+          recommendations={duplicateReview.recommendations}
+          selectedCaseIds={duplicateReview.selectedCaseIds}
+          busy={pushing}
+          onSelectedCaseIdsChange={(selectedCaseIds) => setDuplicateReview((current) => (current ? { ...current, selectedCaseIds } : current))}
+          onCancel={() => setDuplicateReview(null)}
+          onPushSelected={handleDuplicatePushConfirm}
+        />
       ) : null}
 
       <header className="hero">

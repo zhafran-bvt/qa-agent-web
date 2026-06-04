@@ -14,10 +14,10 @@ import {
 } from './services/atlassian';
 import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
-import { generateTestCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
+import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildTicketSuggestionsJql } from './services/suggestions';
-import { pushCases } from './services/testrail';
+import { findExistingCasesByJiraRef, pushCases } from './services/testrail';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -27,6 +27,7 @@ import type {
   ConfigResponse,
   DiagnosticsResponse,
   GenerateRequest,
+  PushPreflightRequest,
   PushRequest,
   QaContext,
   ScopeSnapshotTranslationRequest,
@@ -95,6 +96,7 @@ const config = {
     baseUrl: process.env.TESTRAIL_BASE_URL || '',
     user: process.env.TESTRAIL_USER || '',
     apiKey: process.env.TESTRAIL_API_KEY || '',
+    projectId: process.env.TESTRAIL_PROJECT_ID || '',
   },
 };
 
@@ -671,6 +673,95 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       caseCount: testCases.length,
       invalidCases: validation.filter((item) => !item.valid).map((item) => item.id),
       warnings: validation.reduce((count, item) => count + item.warnings.length, 0),
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/push/preflight') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { session } = sessionEnvelope;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 400, 'TestRail configuration is incomplete.');
+      return;
+    }
+    const body = await readBody<PushPreflightRequest>(req);
+    if (!body.approved) {
+      sendError(res, 400, 'QA approval is required before checking TestRail duplicates.');
+      return;
+    }
+    const sectionId = String(body.sectionId || '').trim();
+    if (!sectionId) {
+      sendError(res, 400, 'TestRail section ID is required.');
+      return;
+    }
+    const testCases = body.testCases || [];
+    const validation = validateCases(testCases, {
+      jiraKey: body.jiraKey,
+      epic: body.epic,
+      feOnly: body.feOnly,
+      allowNonMainRefs: body.allowNonMainRefs,
+      acceptanceCriteria: body.acceptanceCriteria,
+      enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+    });
+    const invalid = validation.filter((item) => !item.valid);
+    const coverage = buildCoverage(testCases, body.acceptanceCriteria, {
+      enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+    });
+    if (invalid.length || (coverage.enforced && coverage.uncoveredCriteria.length)) {
+      sendJson(res, 400, {
+        error: invalid.length ? 'Validation failed.' : 'Acceptance criteria coverage is incomplete.',
+        validation,
+        coverage,
+      });
+      return;
+    }
+
+    if (!config.testrail.projectId) {
+      log.warn('api.push.preflight.skipped', {
+        jiraKey: body.jiraKey,
+        user: session.user,
+        sectionId,
+        reason: 'missing_testrail_project_id',
+      });
+      sendJson(res, 200, {
+        duplicatesFound: false,
+        duplicateLookupSkipped: {
+          reason: 'TestRail project ID is not configured, so existing-case duplicate lookup was skipped.',
+        },
+        existingCases: [],
+        recommendations: [],
+        summary: {
+          jiraKey: body.jiraKey,
+          sectionId,
+          existingCount: 0,
+          generatedCount: testCases.length,
+        },
+      });
+      return;
+    }
+
+    const existingCases = await findExistingCasesByJiraRef(config.testrail, sectionId, body.jiraKey);
+    const recommendations = existingCases.length
+      ? await recommendDuplicateCases(config.llm, body.jiraKey, existingCases, testCases)
+      : [];
+    log.info('api.push.preflight.complete', {
+      jiraKey: body.jiraKey,
+      user: session.user,
+      sectionId,
+      existingCases: existingCases.length,
+      generatedCases: testCases.length,
+    });
+    sendJson(res, 200, {
+      duplicatesFound: existingCases.length > 0,
+      existingCases,
+      recommendations,
+      summary: {
+        jiraKey: body.jiraKey,
+        sectionId,
+        existingCount: existingCases.length,
+        generatedCount: testCases.length,
+      },
     });
     return;
   }

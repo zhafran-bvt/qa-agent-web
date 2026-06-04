@@ -78,6 +78,7 @@ Create an Atlassian OAuth 3LO app and set its callback to `http://localhost:5180
 | `DATABASE_URL` | prod | Enables Postgres persistence; dev falls back to `file+memory` if init fails |
 | `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | ✅ (≥1) | Primary / fallback LLM. `OPENAI_MODEL`, `DEEPSEEK_MODEL` optional overrides |
 | `TESTRAIL_BASE_URL` / `_USER` / `_API_KEY` | for push | TestRail credentials. `TESTRAIL_SECTION_ID` optional default |
+| `TESTRAIL_PROJECT_ID` | recommended for push | Enables the pre-push duplicate check that searches existing TestRail cases by Jira ref. Push still works without it, but duplicate review is skipped |
 | `QA_AGENT_PORT` / `QA_AGENT_BASE_URL` | optional | Override host/port for `npm start` |
 
 Persistence-backed data: sessions, audit events, workflow history, push history. Migrations apply from `src/server/migrations`. Atlassian refresh tokens are stored and used to refresh access tokens. Production should use Postgres (not fallback mode) and must not rely on a committed `.env`.
