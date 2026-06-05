@@ -5,31 +5,37 @@ import { uiText } from '../i18n';
 interface DiagnosticsPanelProps {
   diagnostics: DiagnosticsResponse | null;
   lang: UiLanguage;
+  showHeader?: boolean;
 }
 
-export function DiagnosticsPanel({ diagnostics, lang }: DiagnosticsPanelProps) {
+export function DiagnosticsPanel({ diagnostics, lang, showHeader = true }: DiagnosticsPanelProps) {
   const t = uiText[lang].diagnostics;
   return (
     <section className="panel panel-stack panel-secondary">
-      <div className="panel-heading">
-        <div>
-          <h2>{t.title}</h2>
-          <p>{t.subtitle}</p>
+      {showHeader ? (
+        <div className="panel-heading">
+          <div>
+            <h2>{t.title}</h2>
+            <p>{t.subtitle}</p>
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {!diagnostics ? (
-        <div className="summary muted">{t.unavailable}</div>
+        <div className="diagnostics-empty">
+          <strong>{t.unavailable}</strong>
+          <span>{t.unavailableBody}</span>
+        </div>
       ) : (
         <>
-          <div className="context-grid">
-            <div className="context-item">
+          <div className="diagnostics-row-grid">
+            <div className="diagnostics-row">
               <span className="context-label">{t.persistence}</span>
               <div className="context-value">
-                {diagnostics.persistence.mode} · {t.migration(diagnostics.persistence.currentVersion || 'none')}
+                {diagnostics.persistence.mode} - {t.migration(diagnostics.persistence.currentVersion || 'none')}
               </div>
             </div>
-            <div className="context-item">
+            <div className="diagnostics-row">
               <span className="context-label">{t.selectedResource}</span>
               <div className="context-value">
                 {diagnostics.auth.selectedResource
@@ -37,7 +43,7 @@ export function DiagnosticsPanel({ diagnostics, lang }: DiagnosticsPanelProps) {
                   : t.noActiveSession}
               </div>
             </div>
-            <div className="context-item">
+            <div className="diagnostics-row">
               <span className="context-label">{t.privacy}</span>
               <div className="context-value">
                 {t.privacySummary(
@@ -49,11 +55,11 @@ export function DiagnosticsPanel({ diagnostics, lang }: DiagnosticsPanelProps) {
             </div>
           </div>
 
-          <div className="summary">
-            <div>{t.atlassian(diagnostics.readiness.atlassian)}</div>
-            <div>{t.llm(diagnostics.readiness.llm)}</div>
-            <div>{t.testrail(diagnostics.readiness.testrail)}</div>
-            <div>{t.database(diagnostics.readiness.database)}</div>
+          <div className="diagnostics-readiness" aria-label={t.readinessTitle}>
+            <span className={diagnostics.readiness.atlassian ? 'status-badge success' : 'status-badge warning'}>{t.atlassian(diagnostics.readiness.atlassian)}</span>
+            <span className={diagnostics.readiness.llm ? 'status-badge success' : 'status-badge warning'}>{t.llm(diagnostics.readiness.llm)}</span>
+            <span className={diagnostics.readiness.testrail ? 'status-badge success' : 'status-badge warning'}>{t.testrail(diagnostics.readiness.testrail)}</span>
+            <span className={diagnostics.readiness.database ? 'status-badge success' : 'status-badge warning'}>{t.database(diagnostics.readiness.database)}</span>
           </div>
 
           <div className="summary">

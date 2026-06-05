@@ -4,8 +4,8 @@ import net from 'node:net';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import path from 'node:path';
 
-const repoRoot = '/Users/bvt-zhafran/Downloads/qa-agent-web';
-const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
+const repoRoot = process.cwd();
+const tsxCli = path.join(repoRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs');
 
 let serverProcess: ChildProcessWithoutNullStreams | null = null;
 let serverPort = 0;
@@ -42,7 +42,7 @@ async function waitForServer(port: number): Promise<void> {
 
 test.before(async () => {
   serverPort = await getFreePort();
-  serverProcess = spawn(tsxBin, ['src/server/index.ts'], {
+  serverProcess = spawn(process.execPath, [tsxCli, 'src/server/index.ts'], {
     cwd: repoRoot,
     env: {
       ...process.env,

@@ -15,7 +15,7 @@ function runLabel(run: WorkflowHistorySummary, lang: UiLanguage): string {
   const parts = [run.entryType.toUpperCase(), run.jiraKey, run.user];
   if (run.caseCount != null) parts.push(t.cases(run.caseCount));
   if (run.entryType === 'push') parts.push(t.pushSummary(run.pushed || 0, (run.pushed || 0) + (run.failed || 0)));
-  return parts.join(' · ');
+  return parts.join(' - ');
 }
 
 export function HistoryPanel({ runs, selectedRun, busy, lang, onOpenRun }: HistoryPanelProps) {

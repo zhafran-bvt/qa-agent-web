@@ -9,6 +9,7 @@ interface ApprovalPanelProps {
   coverageComplete: boolean;
   busy: boolean;
   results: string;
+  pushBlocker: string;
   lang: UiLanguage;
   onApprovedChange: (value: boolean) => void;
   onSectionIdChange: (value: string) => void;
@@ -22,6 +23,7 @@ export function ApprovalPanel({
   coverageComplete,
   busy,
   results,
+  pushBlocker,
   lang,
   onApprovedChange,
   onSectionIdChange,
@@ -56,7 +58,7 @@ export function ApprovalPanel({
           aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`}
           onClick={() => setCollapsed((value) => !value)}
         >
-          {collapsed ? '▸' : '▾'}
+          {collapsed ? '>' : 'v'}
         </button>
       </div>
 
@@ -76,17 +78,17 @@ export function ApprovalPanel({
         <ul>
           {gates.map((gate) => (
             <li key={gate.label} className={gate.ok ? 'gate-ok' : 'gate-bad'}>
-              <span className="gate-mark" aria-hidden="true">{gate.ok ? '✓' : '✗'}</span>
+              <span className="gate-mark" aria-hidden="true">{gate.ok ? 'OK' : '-'}</span>
               <span>{gate.label}</span>
             </li>
           ))}
         </ul>
       </div>
 
-      <button className="button button-danger" type="button" disabled={busy || !allGatesMet} onClick={onPush}>
+      <button className="button button-danger" type="button" disabled={Boolean(pushBlocker)} onClick={onPush}>
         {busy ? t.pushing : t.action}
       </button>
-      {!busy ? <p className={`gate-hint${allGatesMet ? ' gate-hint-ready' : ''}`}>{allGatesMet ? t.gateReady : t.gateBlocked}</p> : null}
+      {!busy ? <p className={`gate-hint${allGatesMet ? ' gate-hint-ready' : ''}`}>{pushBlocker || t.gateReady}</p> : null}
 
       <pre className="results">{results || t.emptyResults}</pre>
     </section>

@@ -7,8 +7,13 @@ import path from 'node:path';
 const repoRoot = process.cwd();
 const stampPath = path.join(repoRoot, '.git', 'qa-review-stamp.json');
 const reviewerGuide = path.join(repoRoot, 'docs', 'qa-reviewer-agent.md');
+const npmBin = 'npm';
 
 function run(cmd, args) {
+  if (process.platform === 'win32') {
+    execFileSync('cmd.exe', ['/d', '/s', '/c', cmd, ...args], { cwd: repoRoot, stdio: 'inherit' });
+    return;
+  }
   execFileSync(cmd, args, { cwd: repoRoot, stdio: 'inherit' });
 }
 
@@ -28,9 +33,9 @@ if (!hasStagedChanges()) {
 console.log(`QA reviewer guide: ${reviewerGuide}`);
 console.log('Running required verification before commit...');
 
-run('npm', ['test']);
-run('npm', ['run', 'typecheck']);
-run('npm', ['run', 'build']);
+run(npmBin, ['test']);
+run(npmBin, ['run', 'typecheck']);
+run(npmBin, ['run', 'build']);
 
 const stagedTree = capture('git', ['write-tree']);
 const head = capture('git', ['rev-parse', '--verify', 'HEAD']);

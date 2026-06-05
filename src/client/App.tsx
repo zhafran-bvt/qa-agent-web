@@ -21,7 +21,7 @@ import { DuplicatePushReviewModal } from './components/DuplicatePushReviewModal'
 import { HistoryPanel } from './components/HistoryPanel';
 import { RegenerateDiffPanel } from './components/RegenerateDiffPanel';
 import { ReviewPanel } from './components/ReviewPanel';
-import { WorkflowStepper, type WorkflowStepKey, type WorkflowStepState } from './components/WorkflowStepper';
+import type { WorkflowStepKey, WorkflowStepState } from './components/WorkflowStepper';
 import { uiText, type UiLanguage } from './i18n';
 import type {
   AnalyzeRequest,
@@ -82,6 +82,8 @@ export default function App() {
   const [lang, setLang] = useState<UiLanguage>('en');
   const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
   const [translatingScope, setTranslatingScope] = useState(false);
   const [config, setConfig] = useState<ConfigResponse | null>(null);
@@ -119,6 +121,10 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const skipNextValidation = useRef(false);
   const nextToastId = useRef(1);
+  const analyzeSectionRef = useRef<HTMLElement | null>(null);
+  const scopeSectionRef = useRef<HTMLElement | null>(null);
+  const reviewSectionRef = useRef<HTMLElement | null>(null);
+  const approveSectionRef = useRef<HTMLElement | null>(null);
 
   async function refreshAuxiliaryData() {
     try {
@@ -206,9 +212,46 @@ export default function App() {
       state: index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'upcoming',
     }));
   }, [context, testCases.length, casesValid, coverageComplete]);
+  const activeWorkflowLabel = useMemo(() => {
+    const active = stepperSteps.find((step) => step.state === 'active')?.key || 'analyze';
+    return uiText[lang].stepper[active];
+  }, [lang, stepperSteps]);
+  const analyzeBlocker = useMemo(() => {
+    if (analyzing) return t.analyze.blockerAnalyzing;
+    if (!config?.authenticated) return t.analyze.blockerLogin;
+    if (!form.jiraKey.trim()) return t.analyze.blockerTicket;
+    return '';
+  }, [analyzing, config?.authenticated, form.jiraKey, t.analyze]);
+  const generateBlocker = useMemo(() => {
+    if (generating) return t.context.blockerGenerating;
+    if (!context) return t.context.blockerNoContext;
+    if (context.requiresConfidencePermission && !confidenceApproved) return t.context.blockerConfidence;
+    return '';
+  }, [confidenceApproved, context, generating, t.context]);
+  const pushBlocker = useMemo(() => {
+    if (pushing) return t.approval.blockerPushing;
+    if (!testCases.length) return t.approval.blockerNoCases;
+    if (!casesValid) return t.approval.blockerCasesInvalid;
+    if (!coverageComplete) return t.approval.blockerCoverage;
+    if (!approved) return t.approval.blockerApproval;
+    if (!sectionId.trim()) return t.approval.blockerSection;
+    return '';
+  }, [approved, casesValid, coverageComplete, pushing, sectionId, t.approval, testCases.length]);
 
   function removeToast(id: number) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function scrollToSection(key: WorkflowStepKey) {
+    const target =
+      key === 'analyze'
+        ? analyzeSectionRef.current
+        : key === 'scope'
+          ? scopeSectionRef.current
+          : key === 'review'
+            ? reviewSectionRef.current
+            : approveSectionRef.current;
+    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function pushToast(tone: ToastTone, title: string, message: string) {
@@ -411,6 +454,10 @@ export default function App() {
     window.location.reload();
   }
 
+  function handleLogin() {
+    window.location.href = '/auth/atlassian';
+  }
+
   async function handleOpenHistoryRun(id: string) {
     setHistoryLoading(true);
     try {
@@ -426,7 +473,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`workbench-app${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
       {toasts.length ? (
         <div className="toast-stack" aria-live="polite" aria-atomic="true">
           {toasts.map((toast) => (
@@ -445,18 +492,6 @@ export default function App() {
           ))}
         </div>
       ) : null}
-
-      <div className="utility-trigger-stack">
-        <button className="workflow-help-trigger" type="button" onClick={() => setShowWorkflowHelp(true)} aria-haspopup="dialog" aria-expanded={showWorkflowHelp}>
-          <span className="workflow-help-trigger-icon">?</span>
-          <span>{t.help.trigger}</span>
-        </button>
-
-        <button className="workflow-help-trigger" type="button" onClick={() => setShowStatusModal(true)} aria-haspopup="dialog" aria-expanded={showStatusModal}>
-          <span className="workflow-help-trigger-icon">!</span>
-          <span>{t.status.trigger}</span>
-        </button>
-      </div>
 
       {showWorkflowHelp ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setShowWorkflowHelp(false)}>
@@ -532,7 +567,33 @@ export default function App() {
             </div>
 
             <div className="modal-panel-wrap">
-              <DiagnosticsPanel lang={lang} diagnostics={diagnostics} />
+              <DiagnosticsPanel lang={lang} diagnostics={diagnostics} showHeader={false} />
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {showHistory ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowHistory(false)}>
+          <section
+            className="modal-card workflow-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">QA Agent</div>
+                <h2 id="history-modal-title">{t.history.title}</h2>
+                <p>{t.history.subtitle}</p>
+              </div>
+              <button className="button button-secondary button-small" type="button" onClick={() => setShowHistory(false)}>
+                {t.status.close}
+              </button>
+            </div>
+            <div className="modal-panel-wrap">
+              <HistoryPanel lang={lang} runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
             </div>
           </section>
         </div>
@@ -554,127 +615,186 @@ export default function App() {
         />
       ) : null}
 
-      <header className="hero">
-        <div className="hero-copy">
-          <div className="eyebrow">QA Agent</div>
-          <h1>{t.heroTitle}</h1>
-          <p>{t.heroSubtitle}</p>
+      <aside className="workbench-sidebar">
+        <div className="workbench-brand">
+          <button className="hamburger-button" type="button" aria-label="Toggle sidebar" onClick={() => setSidebarCollapsed((value) => !value)}>
+            <span className="hamburger-lines" aria-hidden="true"><span /><span /><span /></span>
+          </button>
+          <strong>QA Agent</strong>
         </div>
+        <nav className="workbench-nav" aria-label={t.stepper.ariaLabel}>
+          {stepperSteps.map((step, index) => (
+            <button
+              className={`workbench-nav-step is-${step.state}`}
+              key={step.key}
+              type="button"
+              aria-label={`${t.stepper[step.key]} - ${
+                step.key === 'analyze'
+                  ? 'Pick ticket and sources'
+                  : step.key === 'scope'
+                    ? 'Confirm scope'
+                    : step.key === 'review'
+                      ? 'Inspect test cases'
+                      : 'Validate and push'
+              }`}
+              title={t.stepper[step.key]}
+              onClick={() => scrollToSection(step.key)}
+            >
+              <span className="workbench-nav-dot">{index + 1}</span>
+              <span className="workbench-nav-copy">
+                <span>{t.stepper[step.key]}</span>
+                <small>
+                  {step.key === 'analyze'
+                    ? 'Pick ticket & sources'
+                    : step.key === 'scope'
+                      ? 'Confirm scope'
+                      : step.key === 'review'
+                        ? 'Inspect test cases'
+                        : 'Validate & push'}
+                </small>
+              </span>
+            </button>
+          ))}
+        </nav>
+        <div className="workbench-nav-secondary">
+          <button type="button" title="History" onClick={() => setShowHistory(true)}>
+            <span className="workbench-nav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+            </span>
+            <span className="workbench-nav-label">History</span>
+          </button>
+          <button type="button" title="Pushes" onClick={() => scrollToSection('approve')}>
+            <span className="workbench-nav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 19V6" />
+                <path d="M6 11l6-6 6 6" />
+                <path d="M5 21h14" />
+              </svg>
+            </span>
+            <span className="workbench-nav-label">Pushes</span>
+          </button>
+        </div>
+        <button className="workbench-collapse" type="button" onClick={() => setSidebarCollapsed((value) => !value)}>
+          ‹ <span>{sidebarCollapsed ? 'Expand' : 'Collapse'}</span>
+        </button>
+      </aside>
 
-        <div className="hero-actions">
-          <div className="auth-card">
-            <div className="auth-label">{t.authLabel}</div>
-            <div className="auth-value">
-              {loadingConfig ? t.checking : config?.authenticated ? t.loggedInAs(config.user || '') : t.notLoggedIn}
-            </div>
-            {config?.session?.expiresAt ? <div className="muted">{t.sessionExpiry(new Date(config.session.expiresAt).toLocaleString())}</div> : null}
+      <main className="workbench-main">
+        <header className="workbench-topbar">
+          <div>
+            <h1>{t.heroTitle}</h1>
+            <p>{activeWorkflowLabel}</p>
+          </div>
+          <div className="workbench-top-actions">
+            <button className="button button-secondary button-small" type="button" onClick={() => setShowWorkflowHelp(true)}>
+              {t.help.trigger}
+            </button>
+            <button className="button button-secondary button-small" type="button" onClick={() => setShowStatusModal(true)}>
+              {t.status.trigger}
+            </button>
             {config?.authenticated ? (
-              <button className="button button-secondary" type="button" onClick={handleLogout}>
+              <button className="button button-secondary button-small" type="button" onClick={handleLogout}>
                 {t.logout}
               </button>
             ) : (
-              <a className="button button-secondary" href="/auth/atlassian">
+              <button className="button button-primary button-small" type="button" onClick={handleLogin}>
                 {t.loginWithAtlassian}
-              </a>
+              </button>
             )}
+            <span className="workbench-avatar">QA</span>
+            <span>{config?.authenticated ? config.user || 'QA Engineer' : t.notLoggedIn}</span>
           </div>
-        </div>
-      </header>
+        </header>
 
-      {error ? <div className="global-error">{error}</div> : null}
+        <div className="workbench-content">
+          {error ? <div className="global-error">{error}</div> : null}
 
-      <main className="workflow-shell">
-        <div className="section-bar">
-          <h2>{t.mainWorkflow}</h2>
-          <div className="section-tag">{t.guidedWorkflow}</div>
-        </div>
-
-        <WorkflowStepper lang={lang} steps={stepperSteps} />
-
-        <div className="workflow-main-column">
+          <section ref={analyzeSectionRef} className="workbench-anchor">
           <AnalyzePanel
             lang={lang}
             form={form}
             busy={analyzing}
+            canAnalyze={Boolean(config?.authenticated)}
+            analyzeBlocker={analyzeBlocker}
             suggestionsEnabled={Boolean(config?.authenticated)}
             suggestions={ticketSuggestions}
             suggestionsLoading={loadingSuggestions}
             suggestionsError={suggestionsError}
+            onLogin={handleLogin}
             onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
             onSuggestionSelect={handleSuggestionSelect}
             onAnalyze={handleAnalyze}
           />
+          </section>
 
-          <ContextPanel
-            lang={lang}
-            context={context}
-            analyzing={analyzing}
-            translation={lang === 'id' ? scopeTranslation : null}
-            translating={translatingScope}
-            permissionApproved={confidenceApproved}
-            overrideReason={overrideReason}
-            busy={generating}
-            onLanguageChange={handleScopeLanguageChange}
-            onPermissionApprovedChange={setConfidenceApproved}
-            onOverrideReasonChange={setOverrideReason}
-            onGenerate={handleGenerate}
-          />
+          <div className="workbench-primary">
+            <section ref={scopeSectionRef} className="workbench-anchor">
+              <ContextPanel
+                lang={lang}
+                context={context}
+                analyzing={analyzing}
+                translation={lang === 'id' ? scopeTranslation : null}
+                translating={translatingScope}
+                permissionApproved={confidenceApproved}
+                overrideReason={overrideReason}
+                busy={generating}
+                generateBlocker={generateBlocker}
+                onLanguageChange={handleScopeLanguageChange}
+                onPermissionApprovedChange={setConfidenceApproved}
+                onOverrideReasonChange={setOverrideReason}
+                onGenerate={handleGenerate}
+              />
+            </section>
 
-          {pendingGeneration ? (
-            <RegenerateDiffPanel
-              lang={lang}
-              currentCases={testCases}
-              candidate={pendingGeneration}
-              onReplace={() => {
-                applyGeneration(pendingGeneration);
-                setPendingGeneration(null);
-              }}
-              onCancel={() => setPendingGeneration(null)}
-            />
-          ) : null}
+            {pendingGeneration ? (
+              <RegenerateDiffPanel
+                lang={lang}
+                currentCases={testCases}
+                candidate={pendingGeneration}
+                onReplace={() => {
+                  applyGeneration(pendingGeneration);
+                  setPendingGeneration(null);
+                }}
+                onCancel={() => setPendingGeneration(null)}
+              />
+            ) : null}
 
-          <ReviewPanel
-            lang={lang}
-            context={context}
-            generating={generating}
-            testCases={testCases}
-            validation={validation}
-            coverage={coverage}
-            coverageEnforced={coverageEnforced}
-            manualScopeOverride={manualScopeOverride}
-            onCaseChange={handleCaseChange}
-          />
+            <section ref={reviewSectionRef} className="workbench-anchor">
+              <ReviewPanel
+                lang={lang}
+                context={context}
+                generating={generating}
+                testCases={testCases}
+                validation={validation}
+                coverage={coverage}
+                coverageEnforced={coverageEnforced}
+                manualScopeOverride={manualScopeOverride}
+                onCaseChange={handleCaseChange}
+              />
+            </section>
 
-          <ApprovalPanel
-            lang={lang}
-            approved={approved}
-            sectionId={sectionId}
-            casesValid={casesValid}
-            coverageComplete={coverageComplete}
-            busy={pushing}
-            results={pushResults}
-            onApprovedChange={setApproved}
-            onSectionIdChange={setSectionId}
-            onPush={handlePush}
-          />
+            <section ref={approveSectionRef} className="workbench-anchor">
+              <ApprovalPanel
+                lang={lang}
+                approved={approved}
+                sectionId={sectionId}
+                casesValid={casesValid}
+                coverageComplete={coverageComplete}
+                busy={pushing}
+                results={pushResults}
+                pushBlocker={pushBlocker}
+                onApprovedChange={setApproved}
+                onSectionIdChange={setSectionId}
+                onPush={handlePush}
+              />
+            </section>
+          </div>
         </div>
 
-        <section className="secondary-sections">
-          <div className="section-bar section-bar-secondary">
-            <h2>{t.secondarySections}</h2>
-            <div className="section-note">{t.secondarySectionsNote}</div>
-          </div>
-
-          <div className="secondary-stack">
-          <HistoryPanel lang={lang} runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
-          </div>
-        </section>
       </main>
-
-      <footer className="footer-bar">
-        <div>{config?.defaults.llmProviders.filter((provider) => provider.configured).map((provider) => `${provider.name}:${provider.model}`).join(' · ') || t.noLlmConfigured}</div>
-        <div>{invalidCount ? t.casesNeedFixes(invalidCount) : testCases.length ? t.validationClear : t.noCasesGeneratedYet}</div>
-      </footer>
     </div>
   );
 }

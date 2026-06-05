@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { AnalyzeRequest, SuggestedTicket } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -11,6 +10,9 @@ interface AnalyzePanelProps {
   suggestions: SuggestedTicket[];
   suggestionsLoading: boolean;
   suggestionsError: string;
+  canAnalyze: boolean;
+  analyzeBlocker: string;
+  onLogin: () => void;
   onChange: (patch: Partial<AnalyzeRequest>) => void;
   onSuggestionSelect: (ticketKey: string) => void;
   onAnalyze: () => void;
@@ -24,49 +26,62 @@ export function AnalyzePanel({
   suggestions,
   suggestionsLoading,
   suggestionsError,
+  canAnalyze,
+  analyzeBlocker,
+  onLogin,
   onChange,
   onSuggestionSelect,
   onAnalyze,
 }: AnalyzePanelProps) {
   const t = uiText[lang].analyze;
-  const s = uiText[lang].stepper;
-  const [collapsed, setCollapsed] = useState(false);
   return (
-    <section className={`panel panel-stack panel-control${collapsed ? ' panel-collapsed' : ''}`}>
-      <div className="panel-heading">
-        <div className="panel-heading-main">
-          <span className="panel-step">1</span>
-          <div>
-            <h2>{t.title}</h2>
-            <p>{t.subtitle}</p>
+    <section className="analysis-card">
+      <div className="analysis-ticket">
+        <h2>{t.title}</h2>
+        <p>{t.subtitle}</p>
+
+        {!canAnalyze ? (
+          <div className="connect-callout">
+            <div>
+              <strong>{t.connectTitle}</strong>
+              <p>{t.connectBody}</p>
+            </div>
+            <button className="button button-primary button-small" type="button" onClick={onLogin}>
+              {t.connectAction}
+            </button>
           </div>
+        ) : null}
+
+        <div className="ticket-entry-row">
+          <label className="field">
+            <span>{t.jiraTicketKey}</span>
+            <input value={form.jiraKey} placeholder="ORB-3118" onChange={(event) => onChange({ jiraKey: event.target.value })} />
+          </label>
+          <button className="button" type="button" disabled={Boolean(analyzeBlocker)} onClick={onAnalyze}>
+            {busy ? t.analyzing : t.action}
+          </button>
         </div>
-        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
+
+        <div className="toggle-row">
+          <label className="checkbox">
+            <input type="checkbox" checked={form.feOnly} onChange={(event) => onChange({ feOnly: event.target.checked })} />
+            <span>{t.feOnlyScope}</span>
+          </label>
+          <label className="checkbox">
+            <input type="checkbox" checked={form.beAlreadyTested} onChange={(event) => onChange({ beAlreadyTested: event.target.checked })} />
+            <span>{t.beAlreadyTested}</span>
+          </label>
+          <label className="checkbox">
+            <input type="checkbox" checked={form.includeComments} onChange={(event) => onChange({ includeComments: event.target.checked })} />
+            <span>{t.includeComments}</span>
+          </label>
+        </div>
+        {analyzeBlocker ? <div className="action-hint">{analyzeBlocker}</div> : null}
       </div>
 
-      <label className="field">
-        <span>{t.jiraTicketKey}</span>
-        <input value={form.jiraKey} placeholder="ORB-3118" onChange={(event) => onChange({ jiraKey: event.target.value })} />
-      </label>
-
-      <div className="toggle-row">
-        <label className="checkbox">
-          <input type="checkbox" checked={form.feOnly} onChange={(event) => onChange({ feOnly: event.target.checked })} />
-          <span>{t.feOnlyScope}</span>
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={form.beAlreadyTested} onChange={(event) => onChange({ beAlreadyTested: event.target.checked })} />
-          <span>{t.beAlreadyTested}</span>
-        </label>
-        <label className="checkbox">
-          <input type="checkbox" checked={form.includeComments} onChange={(event) => onChange({ includeComments: event.target.checked })} />
-          <span>{t.includeComments}</span>
-        </label>
-      </div>
-
-      <div className="suggestions-panel">
-        <div className="suggestions-header">
-          <strong>{t.suggestedTickets}</strong>
+      <div className="analysis-suggestions">
+        <div>
+          <h3>{t.suggestedTickets}</h3>
           <span className="muted">
             {!suggestionsEnabled
               ? t.suggestionsLoginHint
@@ -78,7 +93,7 @@ export function AnalyzePanel({
           </span>
         </div>
         {!suggestionsEnabled ? (
-          <div className="suggestions-empty-state">
+          <div className="suggestions-empty-state compact-empty">
             <strong>{t.suggestionsLockedTitle}</strong>
             <span className="muted">{t.suggestionsLockedBody}</span>
           </div>
@@ -91,7 +106,7 @@ export function AnalyzePanel({
                 <span className="suggestion-key">{ticket.key}</span>
                 <span className="suggestion-summary">{ticket.summary || t.noSummary}</span>
                 <span className="suggestion-meta">
-                  {[ticket.issueType, ticket.status].filter(Boolean).join(' · ')}
+                  {[ticket.issueType, ticket.status].filter(Boolean).join(' - ')}
                 </span>
               </button>
             ))}
@@ -100,10 +115,6 @@ export function AnalyzePanel({
           <div className="muted">{t.noSuggestedTickets}</div>
         )}
       </div>
-
-      <button className="button" type="button" disabled={busy} onClick={onAnalyze}>
-        {busy ? t.analyzing : t.action}
-      </button>
     </section>
   );
 }

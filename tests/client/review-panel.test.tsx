@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ReviewPanel } from '../../src/client/components/ReviewPanel';
 import type { CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../../src/shared/contracts';
@@ -171,7 +172,7 @@ const coverage: CoverageSummary = {
 };
 
 describe('ReviewPanel', () => {
-  it('renders quoted AC evidence inline in traceability details', () => {
+  it('renders quoted AC evidence inline in traceability details', async () => {
     render(
       <ReviewPanel
         context={context}
@@ -186,10 +187,36 @@ describe('ReviewPanel', () => {
       />
     );
 
+    // Evidence (with source excerpts) now lives behind the Evidence tab.
+    await userEvent.click(screen.getByRole('button', { name: 'Evidence' }));
+
     expect(document.querySelectorAll('.source-quote').length).toBe(2);
     expect(document.querySelector('.source-quote')?.textContent).toMatch(/Analysis Summary window/);
     expect(screen.getAllByText(/PRD: AI Summary NO SCORE/).length).toBeGreaterThanOrEqual(1);
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
+  });
+
+  it('renders the BDD scenario as editable Given/When/Then steps', () => {
+    render(
+      <ReviewPanel
+        context={context}
+        generating={false}
+        testCases={testCases}
+        validation={validation}
+        coverage={coverage}
+        coverageEnforced={true}
+        manualScopeOverride={false}
+        lang="en"
+        onCaseChange={vi.fn()}
+      />
+    );
+
+    // Details tab is the default; the BDD string parses into step inputs.
+    expect(screen.getByDisplayValue('AI Summary')).toBeTruthy(); // Feature
+    expect(screen.getByDisplayValue('View summary')).toBeTruthy(); // Scenario
+    expect(screen.getByDisplayValue('x')).toBeTruthy(); // Given
+    expect(screen.getByDisplayValue('y')).toBeTruthy(); // When
+    expect(screen.getByDisplayValue('z')).toBeTruthy(); // Then
   });
 
   it('shows an explicit generation state before cases are ready', () => {
@@ -210,6 +237,28 @@ describe('ReviewPanel', () => {
     expect(screen.getByText('Generating test cases...')).toBeTruthy();
     expect(screen.getByText('Building BDD cases from the resolved scope authority and final acceptance criteria.')).toBeTruthy();
     expect(screen.getByText('Coverage will appear after generation finishes.')).toBeTruthy();
+  });
+
+  it('shows task-aware empty guidance before generation starts', () => {
+    render(
+      <ReviewPanel
+        context={context}
+        generating={false}
+        testCases={[]}
+        validation={[]}
+        coverage={null}
+        coverageEnforced={true}
+        manualScopeOverride={false}
+        lang="en"
+        onCaseChange={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Generate cases to begin review')).toBeTruthy();
+    expect(
+      screen.getByText('Scope is ready. Generate BDD cases to inspect validation, coverage, and evidence.'),
+    ).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Generate BDD with AI' })).toBeNull();
   });
 
   it('summarizes positive, negative, and edge-case mix', () => {

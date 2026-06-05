@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CoverageSummary, GeneratedTestCase, QaContext, ValidationEntry } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
 import { SourceExcerpt } from './SourceExcerpt';
+import { BddEditor } from './BddEditor';
 
 interface ReviewPanelProps {
   context: QaContext | null;
@@ -27,7 +28,7 @@ function evidenceSummary(testCase: GeneratedTestCase, coverageEnforced: boolean,
   return [
     testCase.evidence.prdSectionTitle || t.noPrdSection,
     ids ? `AC: ${ids}` : coverageEnforced ? t.noAcMapping : t.acMappingNotEnforced,
-  ].join(' · ');
+  ].join(' - ');
 }
 
 type CaseIntent = 'positive' | 'negative' | 'edge';
@@ -74,7 +75,7 @@ function generatedSummaryText(
 
   const typeSummary = Array.from(counts.entries())
     .map(([type, count]) => `${type}: ${count}`)
-    .join(' · ');
+    .join(' - ');
 
   const intentCounts: Record<CaseIntent, number> = {
     positive: 0,
@@ -145,47 +146,111 @@ export function ReviewPanel({
   onCaseChange,
 }: ReviewPanelProps) {
   const t = uiText[lang].review;
-  const s = uiText[lang].stepper;
-  const [collapsed, setCollapsed] = useState(false);
+  const [selectedCaseIndex, setSelectedCaseIndex] = useState(0);
+  const [activeFilter, setActiveFilter] = useState<'all' | 'valid' | 'needsFix' | 'unmapped'>('all');
+  const [activeTab, setActiveTab] = useState<'details' | 'validation' | 'mapping' | 'evidence' | 'history'>('details');
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
   const invalidCount = validation.filter((item) => !item.valid).length;
+  const validCount = validation.filter((item) => item.valid).length;
+  const unmappedCaseIds = new Set(coverage?.unmappedCases || []);
+  const isUnmapped = (testCase: GeneratedTestCase) =>
+    unmappedCaseIds.has(testCase.id) || !(testCase.coversAcceptanceCriteria && testCase.coversAcceptanceCriteria.length);
+  const unmappedCount = coverage ? coverage.unmappedCases.length : testCases.filter(isUnmapped).length;
+  const coveragePercent = coverage?.totalCriteria ? Math.round((coverage.coveredCriteria / coverage.totalCriteria) * 100) : 0;
+  const selectedCase = testCases[selectedCaseIndex] || testCases[0] || null;
+  const selectedValidation = selectedCase ? validation[selectedCaseIndex] : null;
+
+  const query = searchQuery.trim().toLowerCase();
+  const filteredCases = testCases
+    .map((testCase, index) => ({ testCase, index, validationEntry: validation[index] }))
+    .filter((entry) => {
+      if (activeFilter === 'valid' && !entry.validationEntry?.valid) return false;
+      if (activeFilter === 'needsFix' && entry.validationEntry?.valid) return false;
+      if (activeFilter === 'unmapped' && !isUnmapped(entry.testCase)) return false;
+      if (query && !`${entry.testCase.id} ${entry.testCase.title}`.toLowerCase().includes(query)) return false;
+      return true;
+    });
+
+  const filteredPositions = filteredCases.map((entry) => entry.index);
+  const selectedPosition = filteredPositions.indexOf(selectedCaseIndex);
+  const goToOffset = (offset: number) => {
+    if (selectedPosition < 0) return;
+    const next = filteredPositions[selectedPosition + offset];
+    if (next != null) setSelectedCaseIndex(next);
+  };
+
+  useEffect(() => {
+    if (selectedCaseIndex >= testCases.length) {
+      setSelectedCaseIndex(Math.max(0, testCases.length - 1));
+    }
+  }, [selectedCaseIndex, testCases.length]);
+
+  // Keep a visible case selected when filters/search hide the current one.
+  useEffect(() => {
+    if (filteredPositions.length && !filteredPositions.includes(selectedCaseIndex)) {
+      setSelectedCaseIndex(filteredPositions[0]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeFilter, searchQuery, testCases.length]);
+
+  // "/" focuses the case search (unless already typing in a field).
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== '/') return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      event.preventDefault();
+      searchRef.current?.focus();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   return (
-    <section className={`panel panel-stack panel-wide panel-review${collapsed ? ' panel-collapsed' : ''}`}>
-      <div className="panel-heading">
-        <div className="panel-heading-main">
-          <span className="panel-step">3</span>
-          <div>
-            <h2>{t.title}</h2>
-            <p>{t.subtitle}</p>
+    <section className="panel review-workspace">
+      <div className="review-head">
+        <div className="review-title">
+          <h3>{t.title}</h3>
+          <p>{t.subtitle}</p>
+        </div>
+        <div className="review-stats">
+          <span>{t.statTotal}<strong>{testCases.length}</strong></span>
+          <span className="stat-ok">{t.statValid}<strong>{validCount}</strong></span>
+          <span className="stat-warn">{t.statNeedsFix}<strong>{invalidCount}</strong></span>
+          <span className="stat-danger">{t.statUnmapped}<strong>{unmappedCount}</strong></span>
+          <span className="coverage-stat">{t.coverageLabel} <span className="coverage-bar"><span style={{ width: `${coveragePercent}%` }} /></span><strong>{coveragePercent}%</strong></span>
+        </div>
+      </div>
+
+      {generating || testCases.length > 0 ? (
+        <>
+          <div className={`summary summary-status ${invalidCount ? 'summary-warn' : ''}`}>
+            {generating ? t.generatingTitle : invalidCount ? t.needsFixes(invalidCount) : t.casesValid(testCases.length)}
           </div>
-        </div>
-        <button type="button" className="panel-collapse-toggle" aria-expanded={!collapsed} aria-label={`${collapsed ? s.expand : s.collapse} ${t.title}`} onClick={() => setCollapsed((value) => !value)}>{collapsed ? '▸' : '▾'}</button>
-      </div>
 
-      <div className={`summary summary-status ${invalidCount ? 'summary-warn' : ''}`}>
-        {generating ? t.generatingTitle : testCases.length === 0 ? t.noGeneratedCases : invalidCount ? t.needsFixes(invalidCount) : t.casesValid(testCases.length)}
-      </div>
+          <div className="summary summary-generated">
+            {(generating
+              ? [t.generatingBody]
+              : generatedSummaryText(testCases, coverage, context, coverageEnforced, lang)
+            ).map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
 
-      <div className="summary summary-generated">
-        {(generating
-          ? [t.generatingBody]
-          : generatedSummaryText(testCases, coverage, context, coverageEnforced, lang)
-        ).map((line) => (
-          <div key={line}>{line}</div>
-        ))}
-      </div>
-
-      <details className="summary summary-detail">
-        <summary>{t.coverageDetails}</summary>
-        <div className="summary-detail-body">
-          {(generating
-            ? [t.generatingCoverage]
-            : coverageSummaryText(coverage, context, coverageEnforced, manualScopeOverride, lang)
-          ).map((line) => (
-            <div key={line}>{line}</div>
-          ))}
-        </div>
-      </details>
+          <details className="summary summary-detail">
+            <summary>{t.coverageDetails}</summary>
+            <div className="summary-detail-body">
+              {(generating
+                ? [t.generatingCoverage]
+                : coverageSummaryText(coverage, context, coverageEnforced, manualScopeOverride, lang)
+              ).map((line) => (
+                <div key={line}>{line}</div>
+              ))}
+            </div>
+          </details>
+        </>
+      ) : null}
 
       {generating && testCases.length === 0 ? (
         <div className="case-list case-list-loading">
@@ -207,120 +272,233 @@ export function ReviewPanel({
             </article>
           ))}
         </div>
+      ) : testCases.length === 0 ? (
+        <div className="empty-centered">
+          <span className="empty-ic" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M9 11l3 3 8-8" />
+              <path d="M21 12a9 9 0 1 1-5.6-8.3" />
+            </svg>
+          </span>
+          <div className="empty-title">{context ? t.emptyTitleReady : t.emptyTitleNoScope}</div>
+          <p className="empty-hint">{context ? t.emptyBodyReady : t.emptyBodyNoScope}</p>
+        </div>
       ) : (
-      <div className="case-list">
-        {testCases.map((testCase, index) => {
-          const validationEntry = validation[index];
-          return (
-            <article className="case-card" key={testCase.id || index}>
-              <div className="case-header">
-                <div className="case-title-block">
-                  <div className="case-title-meta">
-                    <div className="case-id">{testCase.id}</div>
-                    <div className="case-reference">{evidenceSummary(testCase, coverageEnforced, lang)}</div>
+        <div className="review-split">
+          <div className="review-table-pane">
+            <div className="review-tools">
+              <input
+                ref={searchRef}
+                className="review-search"
+                type="search"
+                value={searchQuery}
+                placeholder={t.searchPlaceholder}
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+              <button className={`review-filter ${activeFilter === 'all' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('all')}>{t.filterAll} {testCases.length}</button>
+              <button className={`review-filter ${activeFilter === 'valid' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('valid')}>{t.filterValid} {validCount}</button>
+              <button className={`review-filter ${activeFilter === 'needsFix' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('needsFix')}>{t.filterNeedsFix} {invalidCount}</button>
+              <button className={`review-filter ${activeFilter === 'unmapped' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('unmapped')}>{t.filterUnmapped} {unmappedCount}</button>
+            </div>
+            <table className="case-table">
+              <thead>
+                <tr>
+                  <th>{t.colId}</th>
+                  <th>{t.titleLabel}</th>
+                  <th>{t.colStatus}</th>
+                  <th>{t.coversAc}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredCases.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="muted">{t.noMatches}</td>
+                  </tr>
+                ) : null}
+                {filteredCases.map(({ testCase, index, validationEntry }) => {
+                  const isSelected = index === selectedCaseIndex;
+                  return (
+                    <tr
+                      className={isSelected ? 'selected' : ''}
+                      key={testCase.id || index}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedCaseIndex(index)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          setSelectedCaseIndex(index);
+                        }
+                      }}
+                    >
+                      <td>{testCase.id}</td>
+                      <td>{testCase.title}</td>
+                      <td><span className={`status-badge ${validationEntry?.valid ? 'success' : 'warning'}`}>{validationEntry?.valid ? t.valid : t.needsFixesShort}</span></td>
+                      <td>{listToInput(testCase.coversAcceptanceCriteria) || '-'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          {selectedCase ? (
+            <div className="case-detail-pane">
+              <div className="case-detail-head">
+                <div>
+                  <span className="case-id">{selectedCase.id}</span>
+                  <h3>{selectedCase.title}</h3>
+                  <p>{evidenceSummary(selectedCase, coverageEnforced, lang)}</p>
+                </div>
+                <div className="case-detail-head-actions">
+                  <span className={`status-badge ${selectedValidation?.valid ? 'success' : 'warning'}`}>{selectedValidation?.valid ? t.valid : t.needsFixesShort}</span>
+                  <div className="case-nav">
+                    <button type="button" aria-label={t.prevCase} disabled={selectedPosition <= 0} onClick={() => goToOffset(-1)}>{'<'}</button>
+                    <button type="button" aria-label={t.nextCase} disabled={selectedPosition < 0 || selectedPosition >= filteredPositions.length - 1} onClick={() => goToOffset(1)}>{'>'}</button>
                   </div>
-                  <div className="case-status">{validationEntry?.valid ? t.valid : t.needsFixesShort}</div>
                 </div>
               </div>
 
-              <div className="case-grid case-grid-title">
-                <label className="field">
-                  <span>{t.titleLabel}</span>
-                  <input value={testCase.title} onChange={(event) => onCaseChange(index, 'title', event.target.value)} />
-                </label>
+              <div className="case-tabs">
+                <button className={activeTab === 'details' ? 'active' : ''} type="button" onClick={() => setActiveTab('details')}>{t.tabDetails}</button>
+                <button className={activeTab === 'validation' ? 'active' : ''} type="button" onClick={() => setActiveTab('validation')}>{t.tabValidation}</button>
+                <button className={activeTab === 'mapping' ? 'active' : ''} type="button" onClick={() => setActiveTab('mapping')}>{t.tabMapping}</button>
+                <button className={activeTab === 'evidence' ? 'active' : ''} type="button" onClick={() => setActiveTab('evidence')}>{t.tabEvidence}</button>
+                <button className={activeTab === 'history' ? 'active' : ''} type="button" onClick={() => setActiveTab('history')}>{t.tabHistory}</button>
               </div>
 
-              <div className="case-grid case-grid-meta">
-                <label className="field">
-                  <span>{t.typeLabel}</span>
-                  <input value={testCase.type} onChange={(event) => onCaseChange(index, 'type', event.target.value)} />
-                </label>
-                <label className="field">
-                  <span>{t.jiraReference}</span>
-                  <input value={testCase.jiraReference} onChange={(event) => onCaseChange(index, 'jiraReference', event.target.value)} />
-                </label>
-              </div>
-
-              <details className="evidence-panel">
-                <summary className="evidence-summary">{t.traceabilityDetails}</summary>
-                <div className="evidence-content">
-                  <div className="evidence-grid">
-                    <div className="evidence-row">
-                      <span className="evidence-label">{t.coversAc}</span>
-                      <div className="readonly-block">{listToInput(testCase.coversAcceptanceCriteria) || t.noAcMapping}</div>
+              <div className="case-detail-form">
+                {activeTab === 'details' ? (
+                  <>
+                    <label className="field">
+                      <span>{t.titleLabel}</span>
+                      <input value={selectedCase.title} onChange={(event) => onCaseChange(selectedCaseIndex, 'title', event.target.value)} />
+                    </label>
+                    <div className="case-detail-grid">
+                      <label className="field">
+                        <span>{t.typeLabel}</span>
+                        <input value={selectedCase.type} onChange={(event) => onCaseChange(selectedCaseIndex, 'type', event.target.value)} />
+                      </label>
+                      <label className="field">
+                        <span>{t.jiraReference}</span>
+                        <input value={selectedCase.jiraReference} onChange={(event) => onCaseChange(selectedCaseIndex, 'jiraReference', event.target.value)} />
+                      </label>
                     </div>
+                    <label className="field">
+                      <span>{t.preconditions}</span>
+                      <textarea className="review-textarea" value={selectedCase.preconditions} onChange={(event) => onCaseChange(selectedCaseIndex, 'preconditions', event.target.value)} />
+                    </label>
+                    <div className="field">
+                      <span>{t.bddScenario}</span>
+                      <BddEditor
+                        key={selectedCase.id}
+                        value={selectedCase.bddScenario}
+                        lang={lang}
+                        onChange={(next) => onCaseChange(selectedCaseIndex, 'bddScenario', next)}
+                      />
+                    </div>
+                  </>
+                ) : null}
 
+                {activeTab === 'validation' ? (
+                  <div className="tab-panel">
+                    {selectedValidation?.valid ? (
+                      <div className="muted">{t.noValidationIssues}</div>
+                    ) : (
+                      <div className="validation-row">
+                        <div className="validation-chip validation-error">{t.needsFixesShort}</div>
+                        <div className="validation-detail">{selectedValidation?.errors.join('\n')}</div>
+                      </div>
+                    )}
+                    {selectedValidation?.warnings.length ? (
+                      <div className="evidence-row">
+                        <span className="evidence-label">{t.warningsLabel}</span>
+                        <div className="evidence-warning">{selectedValidation.warnings.join('\n')}</div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {activeTab === 'mapping' ? (
+                  <div className="tab-panel">
+                    <label className="field">
+                      <span>{t.coversAc}</span>
+                      <input
+                        value={listToInput(selectedCase.coversAcceptanceCriteria)}
+                        onChange={(event) =>
+                          onCaseChange(
+                            selectedCaseIndex,
+                            'coversAcceptanceCriteria',
+                            event.target.value.split(',').map((value) => value.trim()).filter(Boolean)
+                          )
+                        }
+                      />
+                    </label>
                     <div className="evidence-row">
                       <span className="evidence-label">{t.sourceScope}</span>
-                      <div className="readonly-block">{listToInput(testCase.sourceScope) || '-'}</div>
+                      <div className="readonly-block">{listToInput(selectedCase.sourceScope) || '-'}</div>
+                    </div>
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.caseCoverageStatus}</span>
+                      <div className="readonly-block">
+                        {selectedCase.coversAcceptanceCriteria.length
+                          ? listToInput(selectedCase.coversAcceptanceCriteria)
+                          : coverageEnforced
+                            ? t.noAcMapping
+                            : t.acMappingNotEnforced}
+                      </div>
                     </div>
                   </div>
+                ) : null}
 
-                  <div className="evidence-row">
-                    <span className="evidence-label">{t.prdSection}</span>
-                    <div className="readonly-block">{testCase.evidence.prdSectionTitle || t.noPrdSection}</div>
+                {activeTab === 'evidence' ? (
+                  <div className="tab-panel">
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.prdSection}</span>
+                      <div className="readonly-block">{selectedCase.evidence.prdSectionTitle || t.noPrdSection}</div>
+                    </div>
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.acceptanceCriteria}</span>
+                      {selectedCase.evidence.acceptanceCriteria.length ? (
+                        <ul className="evidence-list">
+                          {selectedCase.evidence.acceptanceCriteria.map((criterion) => (
+                            <li key={criterion.id}>
+                              <strong>{criterion.id}</strong> {criterion.text}
+                              <SourceExcerpt
+                                criterionText={criterion.text}
+                                excerpts={criterion.sourceExcerpts}
+                                excerpt={criterion.sourceExcerpt}
+                                location={criterion.sourceExcerptLocation}
+                                url={criterion.sourceExcerptUrl}
+                                kind={criterion.sourceExcerptKind}
+                                confidence={criterion.sourceExcerptConfidence}
+                                lang={lang}
+                              />
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <div className="muted">{t.noResolvedAcceptanceCriteria}</div>
+                      )}
+                    </div>
+                    <div className="evidence-row">
+                      <span className="evidence-label">{t.coverageNote}</span>
+                      {selectedCase.evidence.coverageNote ? (
+                        <div>{selectedCase.evidence.coverageNote}</div>
+                      ) : (
+                        <div className="evidence-warning">{t.missingCoverageNote}</div>
+                      )}
+                    </div>
                   </div>
+                ) : null}
 
-                  <div className="evidence-row">
-                    <span className="evidence-label">{t.acceptanceCriteria}</span>
-                    {testCase.evidence.acceptanceCriteria.length ? (
-                      <ul className="evidence-list">
-                        {testCase.evidence.acceptanceCriteria.map((criterion) => (
-                          <li key={criterion.id}>
-                            <strong>{criterion.id}</strong> {criterion.text}
-                            <SourceExcerpt
-                              criterionText={criterion.text}
-                              excerpts={criterion.sourceExcerpts}
-                              excerpt={criterion.sourceExcerpt}
-                              location={criterion.sourceExcerptLocation}
-                              url={criterion.sourceExcerptUrl}
-                              kind={criterion.sourceExcerptKind}
-                              confidence={criterion.sourceExcerptConfidence}
-                              lang={lang}
-                            />
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <div className="muted">{t.noResolvedAcceptanceCriteria}</div>
-                    )}
-                  </div>
-
-                  <div className="evidence-row">
-                    <span className="evidence-label">{t.coverageNote}</span>
-                    {testCase.evidence.coverageNote ? (
-                      <div>{testCase.evidence.coverageNote}</div>
-                    ) : (
-                      <div className="evidence-warning">{t.missingCoverageNote}</div>
-                    )}
-                  </div>
-
-                  {validationEntry?.warnings.length ? (
-                    <div className="evidence-warning">{validationEntry.warnings.join('\n')}</div>
-                  ) : null}
-                </div>
-              </details>
-
-              <label className="field">
-                <span>{t.preconditions}</span>
-                <textarea className="review-textarea" value={testCase.preconditions} onChange={(event) => onCaseChange(index, 'preconditions', event.target.value)} />
-              </label>
-
-              <label className="field">
-                <span>{t.bddScenario}</span>
-                <textarea className="code-area review-textarea" value={testCase.bddScenario} onChange={(event) => onCaseChange(index, 'bddScenario', event.target.value)} />
-              </label>
-
-              {!validationEntry?.valid ? (
-                <div className="validation-row">
-                  <div className="validation-chip validation-error">{t.needsFixesShort}</div>
-                  <div className="validation-detail">{validationEntry.errors.join('\n')}</div>
-                </div>
-              ) : null}
-            </article>
-          );
-        })}
-      </div>
+                {activeTab === 'history' ? (
+                  <div className="tab-panel muted">{t.historyEmpty}</div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
       )}
     </section>
   );
