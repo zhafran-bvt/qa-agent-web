@@ -1,3 +1,4 @@
+import type { ReactElement } from 'react';
 import type { QaContext, ScopeSnapshotTranslation } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
@@ -11,10 +12,12 @@ interface ContextPanelProps {
   permissionApproved: boolean;
   overrideReason: string;
   busy: boolean;
+  generateBlocker: string;
   lang: UiLanguage;
   onLanguageChange: (value: UiLanguage) => void;
   onPermissionApprovedChange: (value: boolean) => void;
   onOverrideReasonChange: (value: string) => void;
+  onGenerate: () => void;
 }
 
 function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTranslation | null, lang: UiLanguage) {
@@ -40,16 +43,59 @@ function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTransl
   ];
 }
 
-function contextSourceRows(context: QaContext, lang: UiLanguage) {
-  const t = uiText[lang].context;
+type SourceIconName = 'issue' | 'linked' | 'parent' | 'docs' | 'comments' | 'prd';
+
+interface ScopeSourceChip {
+  key: SourceIconName;
+  label: string;
+  count: number;
+  /** boolean sources (parent / PRD) show "No <label>" when absent instead of a 0 count */
+  boolean?: boolean;
+}
+
+function scopeSourceChips(context: QaContext): ScopeSourceChip[] {
   return [
-    ['Issue', '1'],
-    ['Linked issues', String(context.linkedIssues.length)],
-    ['Parent', context.scopeParentIssue ? '1' : t.none],
-    ['Docs', String(context.confluencePages.length)],
-    ['Comments', String(context.mainIssue.comments?.length || 0)],
-    ['PRD', context.scopeConfluenceSection ? '1' : t.none],
+    { key: 'issue', label: 'Issue', count: 1 },
+    { key: 'linked', label: 'Linked', count: context.linkedIssues.length },
+    { key: 'parent', label: 'Parent', count: context.scopeParentIssue ? 1 : 0, boolean: true },
+    { key: 'docs', label: 'Docs', count: context.confluencePages.length },
+    { key: 'comments', label: 'Comments', count: context.mainIssue.comments?.length || 0 },
+    { key: 'prd', label: 'PRD', count: context.scopeConfluenceSection ? 1 : 0, boolean: true },
   ];
+}
+
+const SOURCE_ICONS: Record<SourceIconName, ReactElement> = {
+  issue: (
+    <>
+      <path d="M4 4h16v16H4z" />
+      <path d="M8 9h8M8 13h5" />
+    </>
+  ),
+  linked: (
+    <>
+      <path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1" />
+      <path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1" />
+    </>
+  ),
+  parent: <path d="M12 19V5M5 12l7-7 7 7" />,
+  docs: (
+    <>
+      <path d="M14 3v5h5" />
+      <path d="M7 3h8l5 5v13H7z" />
+    </>
+  ),
+  comments: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
+  prd: <path d="M4 5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />,
+};
+
+function SourceChipIcon({ name }: { name: SourceIconName }) {
+  return (
+    <span className="ic" aria-hidden="true">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        {SOURCE_ICONS[name]}
+      </svg>
+    </span>
+  );
 }
 
 export function ContextPanel({
@@ -60,10 +106,12 @@ export function ContextPanel({
   permissionApproved,
   overrideReason,
   busy,
+  generateBlocker,
   lang,
   onLanguageChange,
   onPermissionApprovedChange,
   onOverrideReasonChange,
+  onGenerate,
 }: ContextPanelProps) {
   const t = uiText[lang].context;
   const displayConfidenceReasons = translation?.confidenceReasons?.length ? translation.confidenceReasons : context?.confidenceReasons || [];
@@ -124,14 +172,15 @@ export function ContextPanel({
             </div>
           </div>
         ) : (
-          <div className="empty-snapshot empty-next-steps">
-            <strong>{t.emptyTitle}</strong>
-            <p>{t.emptyBody}</p>
-            <ol>
-              {t.emptySteps.map((step) => (
-                <li key={step}>{step}</li>
-              ))}
-            </ol>
+          <div className="empty-centered">
+            <span className="empty-ic" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="11" cy="11" r="7" />
+                <path d="M21 21l-4.3-4.3" />
+              </svg>
+            </span>
+            <div className="empty-title">{t.emptyTitle}</div>
+            <p className="empty-hint">{t.emptyBody}</p>
           </div>
         )
       ) : (
@@ -155,34 +204,43 @@ export function ContextPanel({
             </span>
           </div>
 
-          <div className="scope-body-grid">
-            <div className="scope-source-card">
-              <h4>Context</h4>
-              <div className="source-row-list">
-                {contextSourceRows(context, lang).map(([label, value]) => (
-                  <div className="source-row-item" key={label}>
-                    <span className="source-icon">{label.slice(0, 1)}</span>
-                    <span>{label}</span>
-                    <strong>{value}</strong>
-                  </div>
-                ))}
-              </div>
+          <div className="scope-sources">
+            <p className="section-label">{t.scopeSources}</p>
+            <div className="src-strip">
+              {scopeSourceChips(context).map((chip) => {
+                const zero = chip.count === 0;
+                return (
+                  <span className={`src-chip ${zero ? 'zero' : ''}`} key={chip.key}>
+                    <SourceChipIcon name={chip.key} />
+                    {chip.boolean && zero ? null : <span className="n">{chip.count}</span>}
+                    <span className="lbl">{chip.boolean && zero ? `No ${chip.label.toLowerCase()}` : chip.label}</span>
+                  </span>
+                );
+              })}
             </div>
+          </div>
 
-            <div className="scope-source-card">
-              <h3>{t.userStories}</h3>
-              {displayUserStories.length ? (
-                <ul className="story-list">
-                  {displayUserStories.map((story) => (
-                    <li key={story.id}>
-                      <strong>{story.id}</strong> {story.text}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted">{t.noUserStories}</p>
-              )}
-            </div>
+          <div className="scope-stories">
+            <p className="section-label">{t.userStories}</p>
+            {displayUserStories.length ? (
+              <ul className="story-list">
+                {displayUserStories.map((story) => (
+                  <li key={story.id}>
+                    <strong>{story.id}</strong> {story.text}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="stories-empty">
+                <span className="ic" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="8" r="4" />
+                    <path d="M4 21a8 8 0 0 1 16 0" />
+                  </svg>
+                </span>
+                {t.noUserStories}
+              </div>
+            )}
           </div>
 
           <div className="acceptance-workspace">
@@ -251,7 +309,17 @@ export function ContextPanel({
             </div>
           ) : null}
 
-          {busy ? <div className="action-hint">{t.blockerGenerating}</div> : null}
+          <div className="scope-generate-footer">
+            <button
+              className="button button-generate"
+              type="button"
+              disabled={busy || Boolean(generateBlocker)}
+              onClick={onGenerate}
+            >
+              {busy ? t.generating : t.generate}
+            </button>
+            {generateBlocker ? <span className="action-hint">{generateBlocker}</span> : null}
+          </div>
         </>
       )}
     </section>

@@ -69,17 +69,11 @@ describe('App utility UI', () => {
 
     await waitFor(() => expect(screen.getByText('Connect Atlassian to start')).toBeTruthy());
 
-    await userEvent.click(screen.getByRole('button', { name: /Atlassian: Configured - open status/i }));
-    expect(screen.getByRole('dialog', { name: /Diagnostics/i })).toBeTruthy();
-    await userEvent.click(within(screen.getByRole('dialog', { name: /Diagnostics/i })).getByRole('button', { name: 'Close' }));
-
-    await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    const dialog = screen.getByRole('dialog', { name: /Diagnostics/i });
-    expect(within(dialog).getAllByRole('heading', { name: 'Diagnostics' })).toHaveLength(1);
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await userEvent.click(screen.getByRole('button', { name: 'History' }));
+    expect(screen.getByRole('dialog', { name: /Workflow History/i })).toBeTruthy();
+    await userEvent.click(within(screen.getByRole('dialog', { name: /Workflow History/i })).getByRole('button', { name: 'Close' }));
 
     await userEvent.click(screen.getByRole('button', { name: /Scope Snapshot - Confirm scope/i }));
-    await userEvent.click(screen.getByRole('button', { name: 'History' }));
     await userEvent.click(screen.getByRole('button', { name: 'Pushes' }));
     expect(Element.prototype.scrollIntoView).toHaveBeenCalled();
 
@@ -94,7 +88,6 @@ describe('App utility UI', () => {
 
     await waitFor(() => expect(screen.getByText('Log in with Atlassian to analyze Jira scope.')).toBeTruthy());
     expect(screen.getByRole('button', { name: 'Analyze Jira + Confluence' }).hasAttribute('disabled')).toBe(true);
-    expect(screen.getAllByText('Analyze a Jira ticket before generating BDD cases.').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('Generate test cases before pushing to TestRail.')).toBeTruthy();
     expect(screen.getByText('Load scope before generation')).toBeTruthy();
     expect(screen.getByText('Analyze scope before review')).toBeTruthy();

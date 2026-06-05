@@ -82,6 +82,7 @@ export default function App() {
   const [lang, setLang] = useState<UiLanguage>('en');
   const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
   const [translatingScope, setTranslatingScope] = useState(false);
@@ -124,7 +125,6 @@ export default function App() {
   const scopeSectionRef = useRef<HTMLElement | null>(null);
   const reviewSectionRef = useRef<HTMLElement | null>(null);
   const approveSectionRef = useRef<HTMLElement | null>(null);
-  const historySectionRef = useRef<HTMLElement | null>(null);
 
   async function refreshAuxiliaryData() {
     try {
@@ -201,15 +201,6 @@ export default function App() {
     () => !coverageEnforced || !coverage || coverage.uncoveredCriteria.length === 0,
     [coverage, coverageEnforced]
   );
-  const readinessItems = useMemo(
-    () => [
-      { label: 'Atlassian', ready: Boolean(config?.ready.atlassian), active: Boolean(config?.authenticated) },
-      { label: 'LLM', ready: Boolean(config?.ready.llm), active: Boolean(config?.ready.llm) },
-      { label: 'TestRail', ready: Boolean(config?.ready.testrail), active: Boolean(config?.ready.testrail) },
-      { label: 'Database', ready: Boolean(config?.ready.database), active: Boolean(config?.ready.database) },
-    ],
-    [config]
-  );
   const stepperSteps = useMemo<Array<{ key: WorkflowStepKey; state: WorkflowStepState }>>(() => {
     const analyzeDone = Boolean(context);
     const scopeDone = testCases.length > 0;
@@ -251,7 +242,7 @@ export default function App() {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }
 
-  function scrollToSection(key: WorkflowStepKey | 'history') {
+  function scrollToSection(key: WorkflowStepKey) {
     const target =
       key === 'analyze'
         ? analyzeSectionRef.current
@@ -259,9 +250,7 @@ export default function App() {
           ? scopeSectionRef.current
           : key === 'review'
             ? reviewSectionRef.current
-            : key === 'approve'
-              ? approveSectionRef.current
-              : historySectionRef.current;
+            : approveSectionRef.current;
     target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -584,6 +573,32 @@ export default function App() {
         </div>
       ) : null}
 
+      {showHistory ? (
+        <div className="modal-backdrop" role="presentation" onClick={() => setShowHistory(false)}>
+          <section
+            className="modal-card workflow-help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="history-modal-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <div className="eyebrow">QA Agent</div>
+                <h2 id="history-modal-title">{t.history.title}</h2>
+                <p>{t.history.subtitle}</p>
+              </div>
+              <button className="button button-secondary button-small" type="button" onClick={() => setShowHistory(false)}>
+                {t.status.close}
+              </button>
+            </div>
+            <div className="modal-panel-wrap">
+              <HistoryPanel lang={lang} runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {duplicateReview && context ? (
         <DuplicatePushReviewModal
           lang={lang}
@@ -642,9 +657,25 @@ export default function App() {
           ))}
         </nav>
         <div className="workbench-nav-secondary">
-          <button type="button" title="History" onClick={() => scrollToSection('history')}>History</button>
-          <button type="button" title="Pushes" onClick={() => scrollToSection('approve')}>Pushes</button>
-          <button type="button" title="Settings" onClick={() => setShowStatusModal(true)}>Settings</button>
+          <button type="button" title="History" onClick={() => setShowHistory(true)}>
+            <span className="workbench-nav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 7v5l3 2" />
+              </svg>
+            </span>
+            <span className="workbench-nav-label">History</span>
+          </button>
+          <button type="button" title="Pushes" onClick={() => scrollToSection('approve')}>
+            <span className="workbench-nav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 19V6" />
+                <path d="M6 11l6-6 6 6" />
+                <path d="M5 21h14" />
+              </svg>
+            </span>
+            <span className="workbench-nav-label">Pushes</span>
+          </button>
         </div>
         <button className="workbench-collapse" type="button" onClick={() => setSidebarCollapsed((value) => !value)}>
           ‹ <span>{sidebarCollapsed ? 'Expand' : 'Collapse'}</span>
@@ -681,29 +712,6 @@ export default function App() {
         <div className="workbench-content">
           {error ? <div className="global-error">{error}</div> : null}
 
-          <section className="health-row" aria-label="Runtime readiness">
-            {readinessItems.map((item) => (
-              <button
-                className="health-card"
-                key={item.label}
-                type="button"
-                aria-label={`${item.label}: ${item.active ? 'Ready' : item.ready ? 'Configured' : 'Missing'} - open status`}
-                onClick={() => setShowStatusModal(true)}
-              >
-                <span className={`health-dot ${item.active || item.ready ? 'ready' : 'missing'}`} />
-                <div>
-                  <strong>{item.label}</strong>
-                  <span>{item.active ? 'Ready' : item.ready ? 'Configured' : 'Missing'}</span>
-                </div>
-                <span>›</span>
-              </button>
-            ))}
-            <div className="health-sync">Last sync: just now</div>
-            <button className="button button-secondary" type="button" onClick={() => setShowStatusModal(true)}>
-              Setup & Health
-            </button>
-          </section>
-
           <section ref={analyzeSectionRef} className="workbench-anchor">
           <AnalyzePanel
             lang={lang}
@@ -722,9 +730,8 @@ export default function App() {
           />
           </section>
 
-          <div className="workbench-grid">
-            <div className="workbench-primary">
-              <section ref={scopeSectionRef} className="workbench-anchor">
+          <div className="workbench-primary">
+            <section ref={scopeSectionRef} className="workbench-anchor">
               <ContextPanel
                 lang={lang}
                 context={context}
@@ -734,26 +741,28 @@ export default function App() {
                 permissionApproved={confidenceApproved}
                 overrideReason={overrideReason}
                 busy={generating}
+                generateBlocker={generateBlocker}
                 onLanguageChange={handleScopeLanguageChange}
                 onPermissionApprovedChange={setConfidenceApproved}
                 onOverrideReasonChange={setOverrideReason}
+                onGenerate={handleGenerate}
               />
-              </section>
+            </section>
 
-              {pendingGeneration ? (
-                <RegenerateDiffPanel
-                  lang={lang}
-                  currentCases={testCases}
-                  candidate={pendingGeneration}
-                  onReplace={() => {
-                    applyGeneration(pendingGeneration);
-                    setPendingGeneration(null);
-                  }}
-                  onCancel={() => setPendingGeneration(null)}
-                />
-              ) : null}
+            {pendingGeneration ? (
+              <RegenerateDiffPanel
+                lang={lang}
+                currentCases={testCases}
+                candidate={pendingGeneration}
+                onReplace={() => {
+                  applyGeneration(pendingGeneration);
+                  setPendingGeneration(null);
+                }}
+                onCancel={() => setPendingGeneration(null)}
+              />
+            ) : null}
 
-              <section ref={reviewSectionRef} className="workbench-anchor">
+            <section ref={reviewSectionRef} className="workbench-anchor">
               <ReviewPanel
                 lang={lang}
                 context={context}
@@ -763,19 +772,11 @@ export default function App() {
                 coverage={coverage}
                 coverageEnforced={coverageEnforced}
                 manualScopeOverride={manualScopeOverride}
-                generateBlocker={generateBlocker}
-                onGenerate={handleGenerate}
                 onCaseChange={handleCaseChange}
               />
-              </section>
+            </section>
 
-              <section ref={historySectionRef} className="workbench-anchor">
-              <HistoryPanel lang={lang} runs={historyRuns} selectedRun={selectedHistoryRun} busy={historyLoading} onOpenRun={handleOpenHistoryRun} />
-              </section>
-            </div>
-
-            <aside className="workbench-rail">
-              <section ref={approveSectionRef} className="workbench-anchor">
+            <section ref={approveSectionRef} className="workbench-anchor">
               <ApprovalPanel
                 lang={lang}
                 approved={approved}
@@ -789,9 +790,7 @@ export default function App() {
                 onSectionIdChange={setSectionId}
                 onPush={handlePush}
               />
-              </section>
-              <DiagnosticsPanel lang={lang} diagnostics={diagnostics} />
-            </aside>
+            </section>
           </div>
         </div>
 

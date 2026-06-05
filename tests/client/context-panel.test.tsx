@@ -110,6 +110,8 @@ describe('ContextPanel', () => {
         onLanguageChange={onLanguageChange}
         onPermissionApprovedChange={vi.fn()}
         onOverrideReasonChange={vi.fn()}
+        generateBlocker=""
+        onGenerate={vi.fn()}
       />
     );
 
@@ -145,6 +147,8 @@ describe('ContextPanel', () => {
         onLanguageChange={vi.fn()}
         onPermissionApprovedChange={vi.fn()}
         onOverrideReasonChange={vi.fn()}
+        generateBlocker=""
+        onGenerate={vi.fn()}
       />
     );
 
@@ -166,11 +170,14 @@ describe('ContextPanel', () => {
         onLanguageChange={vi.fn()}
         onPermissionApprovedChange={vi.fn()}
         onOverrideReasonChange={vi.fn()}
+        generateBlocker=""
+        onGenerate={vi.fn()}
       />
     );
 
     expect(screen.getByText('Load scope before generation')).toBeTruthy();
-    expect(screen.getByText('Connect Atlassian')).toBeTruthy();
-    expect(screen.getByText('Run Analyze Jira + Confluence')).toBeTruthy();
+    expect(
+      screen.getByText('Scope Snapshot becomes useful after QA Agent resolves Jira, linked issues, and PRD evidence.'),
+    ).toBeTruthy();
   });
 });
