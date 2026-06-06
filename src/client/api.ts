@@ -76,7 +76,7 @@ export function loadPlanForStory(storyKey: string): Promise<PlanForStoryResponse
 
 export function addTestRailPlanEntry(
   planId: string | number,
-  payload: { name: string; caseIds: number[]; dryRun?: boolean }
+  payload: { name: string; caseIds: number[]; refs?: string; dryRun?: boolean }
 ): Promise<TestRailManageResponse> {
   return requestJson<TestRailManageResponse>(`/api/testrail/manage/plan/${encodeURIComponent(String(planId))}/entry`, {
     method: 'POST',

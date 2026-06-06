@@ -28,7 +28,7 @@ export function AddToRunCard({ lang, caseIds, jiraKey }: AddToRunCardProps) {
     try {
       const res =
         mode === 'new'
-          ? await createTestRailRun({ name: runName, caseIds, dryRun })
+          ? await createTestRailRun({ name: runName, caseIds, refs: jiraKey, dryRun })
           : await setTestRailRunCases(runId.trim(), caseIds, dryRun);
       setResult(res);
     } catch (err) {

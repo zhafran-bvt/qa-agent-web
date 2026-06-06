@@ -447,6 +447,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
         name: body.name,
         include_all: false,
         case_ids: body.caseIds || [],
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.addEntry', `add_plan_entry/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
@@ -461,6 +462,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
       }
       const payload: Record<string, unknown> = {
         name: body.name,
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.create', `add_plan/${encodeURIComponent(projectId)}`, payload, Boolean(body.dryRun));
@@ -470,6 +472,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
       const body = await readBody<ManageRunRequest>(req);
       const payload: Record<string, unknown> = {
         ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.update', `update_plan/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
