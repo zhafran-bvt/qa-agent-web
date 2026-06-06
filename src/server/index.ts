@@ -17,8 +17,9 @@ import { buildQaContext } from './services/context-builder';
 import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildTicketSuggestionsJql } from './services/suggestions';
-import { buildManageCaseBody, findExistingCasesByJiraRef, pushCases, trWrite } from './services/testrail';
-import { clearDashboardCaches, findPlansForStory, getSummary, listPlans } from './services/testrail-dashboard';
+import { buildManageCaseBody, findExistingCasesByJiraRef, getUserByEmail, pushCases, trWrite, type TestRailConfig } from './services/testrail';
+import { decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
+import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -100,7 +101,8 @@ const config = {
     user: process.env.TESTRAIL_USER || '',
     apiKey: process.env.TESTRAIL_API_KEY || '',
     projectId: process.env.TESTRAIL_PROJECT_ID || '',
-    suiteId: process.env.TESTRAIL_SUITE_ID || '1',
+    // Suite defaults to the project id (this instance uses matching ids); override with TESTRAIL_SUITE_ID if they differ.
+    suiteId: process.env.TESTRAIL_SUITE_ID || process.env.TESTRAIL_PROJECT_ID || '1',
   },
   reporterUrl: (process.env.TESTRAIL_REPORTER_URL || '').replace(/\/$/, ''),
 };
@@ -339,6 +341,19 @@ async function appendAudit(event: Record<string, unknown>): Promise<void> {
   await persistence.appendAudit(event);
 }
 
+/** Effective TestRail config for a session: the user's own saved creds if present, else shared env. */
+async function resolveTestrailConfig(session: SessionRecord | null | undefined): Promise<TestRailConfig> {
+  if (encryptionAvailable() && session?.accountId) {
+    try {
+      const creds = await persistence.getUserTestrailCreds(session.accountId);
+      if (creds) return { ...config.testrail, user: creds.user, apiKey: decryptSecret(creds.apiKeyEnc) };
+    } catch {
+      // fall back to the shared account
+    }
+  }
+  return config.testrail;
+}
+
 /**
  * TestRail management writes (Phase C). All routes require a session + configured TestRail.
  * Every action supports `dryRun` — it returns the resolved endpoint + payload without
@@ -352,6 +367,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
     return;
   }
 
+  const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
   const segments = url.pathname.split('/').filter(Boolean); // ['api','testrail','manage',...]
   const resource = segments[3] || '';
   const idA = segments[4];
@@ -364,7 +380,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
       return;
     }
     try {
-      const result = await trWrite(config.testrail, endpoint, payload);
+      const result = await trWrite(trConfig, endpoint, payload);
       clearDashboardCaches();
       sendJson(res, 200, { ok: true, action, id: result.id, result });
     } catch (error) {
@@ -447,6 +463,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
         name: body.name,
         include_all: false,
         case_ids: body.caseIds || [],
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.addEntry', `add_plan_entry/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
@@ -461,6 +478,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
       }
       const payload: Record<string, unknown> = {
         name: body.name,
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.create', `add_plan/${encodeURIComponent(projectId)}`, payload, Boolean(body.dryRun));
@@ -470,6 +488,7 @@ async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, u
       const body = await readBody<ManageRunRequest>(req);
       const payload: Record<string, unknown> = {
         ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
         ...(body.description !== undefined ? { description: body.description } : {}),
       };
       await run('plan.update', `update_plan/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
@@ -644,6 +663,112 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sendJson(res, 200, { projectId: String(projectId), plans });
     } catch (error) {
       sendError(res, 502, (error as Error).message || 'Failed to load TestRail plans.');
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/testrail/credentials') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const accountId = sessionEnvelope.session.accountId || '';
+
+    if (req.method === 'GET') {
+      let configured = false;
+      let user: string | null = null;
+      if (encryptionAvailable() && accountId) {
+        const creds = await persistence.getUserTestrailCreds(accountId);
+        if (creds) {
+          configured = true;
+          user = creds.user;
+        }
+      }
+      sendJson(res, 200, { available: encryptionAvailable(), configured, user });
+      return;
+    }
+
+    if (req.method === 'POST') {
+      if (!encryptionAvailable()) {
+        sendError(res, 503, 'Server encryption key (ENCRYPTION_KEY) is not configured, so personal credentials are disabled.');
+        return;
+      }
+      if (!accountId) {
+        sendError(res, 400, 'No Atlassian account on this session.');
+        return;
+      }
+      if (!config.testrail.baseUrl) {
+        sendError(res, 503, 'TestRail base URL is not configured.');
+        return;
+      }
+      const body = await readBody<{ user?: string; apiKey?: string }>(req);
+      const trUser = String(body.user || '').trim();
+      const apiKey = String(body.apiKey || '').trim();
+      if (!trUser || !apiKey) {
+        sendError(res, 400, 'TestRail email and API key are required.');
+        return;
+      }
+      try {
+        await getUserByEmail({ ...config.testrail, user: trUser, apiKey }, trUser);
+      } catch {
+        sendError(res, 400, 'Could not verify those TestRail credentials — check the email and API key.');
+        return;
+      }
+      await persistence.setUserTestrailCreds(accountId, trUser, encryptSecret(apiKey));
+      sendJson(res, 200, { available: true, configured: true, user: trUser });
+      return;
+    }
+
+    if (req.method === 'DELETE') {
+      if (accountId) await persistence.deleteUserTestrailCreds(accountId);
+      sendJson(res, 200, { available: encryptionAvailable(), configured: false, user: null });
+      return;
+    }
+
+    sendError(res, 405, 'Method not allowed.');
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/testrail/plan-run-counts') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const ids = (url.searchParams.get('ids') || '')
+      .split(',')
+      .map((v) => v.trim())
+      .filter(Boolean);
+    if (!ids.length) {
+      sendJson(res, 200, { counts: {} });
+      return;
+    }
+    try {
+      sendJson(res, 200, { counts: await getPlanRunCounts(config.testrail, ids) });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to load run counts.');
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/testrail/coverage') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const keys = (url.searchParams.get('keys') || '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+    if (!keys.length) {
+      sendJson(res, 200, { coverage: {} });
+      return;
+    }
+    try {
+      sendJson(res, 200, { coverage: await getCoverageForKeys(config.testrail, keys) });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to compute coverage.');
     }
     return;
   }
@@ -1027,7 +1152,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       });
       return;
     }
-    const results = await pushCases(config.testrail, sectionId, body.testCases || []);
+    const trConfig = await resolveTestrailConfig(session);
+    const results = await pushCases(trConfig, sectionId, body.testCases || []);
     const summary = summarizeResults(results);
     if (body.generatedRunId) {
       await persistence.createPushRun({

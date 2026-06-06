@@ -47,12 +47,14 @@ export function PlanLinkCard({ lang, caseIds, taskKey, taskSummary, storyKey, st
 
   if (dismissed) return null;
 
+  const runRefs = [storyKey, taskKey].filter(Boolean).join(', ');
+
   async function addToExisting() {
     if (!selectedPlanId) return;
     setBusy(true);
     setError('');
     try {
-      await addTestRailPlanEntry(selectedPlanId, { name: runName, caseIds });
+      await addTestRailPlanEntry(selectedPlanId, { name: runName, caseIds, refs: runRefs });
       setDone(t.doneFound);
     } catch (err) {
       setError((err as Error).message || t.error);
@@ -65,10 +67,10 @@ export function PlanLinkCard({ lang, caseIds, taskKey, taskSummary, storyKey, st
     setBusy(true);
     setError('');
     try {
-      const created = await createTestRailPlan({ name: planName });
+      const created = await createTestRailPlan({ name: planName, refs: storyKey });
       const planId = 'dryRun' in created ? null : created.id;
       if (planId === null || planId === undefined) throw new Error(t.error);
-      await addTestRailPlanEntry(planId, { name: runName, caseIds });
+      await addTestRailPlanEntry(planId, { name: runName, caseIds, refs: runRefs });
       setDone(t.doneNew);
     } catch (err) {
       setError((err as Error).message || t.error);

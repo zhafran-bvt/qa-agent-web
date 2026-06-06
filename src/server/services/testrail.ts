@@ -183,6 +183,26 @@ export function getPlans(config: TestRailConfig, projectId?: string): Promise<Re
   return trGetPaginated(config, `get_plans/${requireProjectId(config, projectId)}`, 'plans');
 }
 
+export function getPlan(config: TestRailConfig, planId: number | string): Promise<Record<string, unknown>> {
+  return trGet<Record<string, unknown>>(config, `get_plan/${encodeURIComponent(String(planId))}`);
+}
+
+export function getUsers(config: TestRailConfig): Promise<Record<string, unknown>[]> {
+  return trGet(config, 'get_users').then((body) => parseList(body, 'users'));
+}
+
+/** Verify credentials by resolving the TestRail user for an email (throws on bad auth). */
+export function getUserByEmail(config: TestRailConfig, email: string): Promise<Record<string, unknown>> {
+  return trGet<Record<string, unknown>>(config, `get_user_by_email&email=${encodeURIComponent(email)}`);
+}
+
+/** All cases in the project's suite (used to compute which Jira refs already have coverage). */
+export function getCases(config: TestRailConfig, projectId?: string, suiteId?: string): Promise<Record<string, unknown>[]> {
+  const pid = requireProjectId(config, projectId);
+  const sid = String(suiteId || config.suiteId || '1');
+  return trGetPaginated(config, `get_cases/${pid}&suite_id=${encodeURIComponent(sid)}`, 'cases');
+}
+
 /** Flatten a plan's `entries[].runs[]` into a run list (used for run_count fallback). */
 export function extractRunsFromPlan(plan: Record<string, unknown>): Record<string, unknown>[] {
   const runs: Record<string, unknown>[] = [];

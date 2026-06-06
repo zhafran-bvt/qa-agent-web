@@ -488,6 +488,8 @@ export interface TrPlanSummary {
   failedCount: number;
   blockedCount: number;
   untestedCount: number;
+  createdBy?: number;
+  createdByName?: string;
   webUrl: string;
 }
 
@@ -515,6 +517,20 @@ export interface TestRailSummaryResponse extends TrSummary {}
 export interface PlanForStoryResponse {
   storyKey: string;
   plans: TrPlanSummary[];
+}
+
+export interface CoverageResponse {
+  coverage: Record<string, { covered: boolean; count: number }>;
+}
+
+export interface PlanRunCountsResponse {
+  counts: Record<string, number>;
+}
+
+export interface TestrailCredentialsStatus {
+  available: boolean;
+  configured: boolean;
+  user: string | null;
 }
 
 // --- TestRail management (write) -----------------------------------------

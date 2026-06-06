@@ -9,11 +9,14 @@ import type {
   PushPreflightResponse,
   PushRequest,
   PushResponse,
+  CoverageResponse,
   ManageCaseRequest,
   ManageRunRequest,
   PlanForStoryResponse,
+  PlanRunCountsResponse,
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
+  TestrailCredentialsStatus,
   TestRailManageResponse,
   TestRailPlansResponse,
   TestRailSummaryResponse,
@@ -70,13 +73,36 @@ export function createTestRailRun(payload: ManageRunRequest): Promise<TestRailMa
   });
 }
 
+export function loadTestrailCredentials(): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials');
+}
+
+export function saveTestrailCredentials(payload: { user: string; apiKey: string }): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function clearTestrailCredentials(): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials', { method: 'DELETE' });
+}
+
+export function loadCoverage(keys: string[]): Promise<CoverageResponse> {
+  return requestJson<CoverageResponse>(`/api/testrail/coverage?keys=${encodeURIComponent(keys.join(','))}`);
+}
+
+export function loadPlanRunCounts(planIds: Array<number | string>): Promise<PlanRunCountsResponse> {
+  return requestJson<PlanRunCountsResponse>(`/api/testrail/plan-run-counts?ids=${encodeURIComponent(planIds.join(','))}`);
+}
+
 export function loadPlanForStory(storyKey: string): Promise<PlanForStoryResponse> {
   return requestJson<PlanForStoryResponse>(`/api/testrail/plan-for-story?key=${encodeURIComponent(storyKey)}`);
 }
 
 export function addTestRailPlanEntry(
   planId: string | number,
-  payload: { name: string; caseIds: number[]; dryRun?: boolean }
+  payload: { name: string; caseIds: number[]; refs?: string; dryRun?: boolean }
 ): Promise<TestRailManageResponse> {
   return requestJson<TestRailManageResponse>(`/api/testrail/manage/plan/${encodeURIComponent(String(planId))}/entry`, {
     method: 'POST',

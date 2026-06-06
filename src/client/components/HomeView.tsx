@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
-import type { TrSummary, WorkflowHistorySummary } from '../../shared/contracts';
-import { loadTestRailSummary } from '../api';
+import { useEffect, useMemo, useState } from 'react';
+import type { CoverageResponse, TrSummary, WorkflowHistorySummary } from '../../shared/contracts';
+import { loadCoverage, loadTestRailSummary } from '../api';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
 
@@ -96,6 +96,34 @@ export function HomeView({
   const [summary, setSummary] = useState<TrSummary | null>(null);
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState('');
+  const [coverage, setCoverage] = useState<CoverageResponse['coverage'] | null>(null);
+
+  const suggestionKeys = suggestions.map((s) => s.key).join(',');
+  useEffect(() => {
+    if (!authenticated || !testrailReady || !suggestionKeys) {
+      setCoverage(null);
+      return;
+    }
+    let cancelled = false;
+    loadCoverage(suggestionKeys.split(','))
+      .then((res) => {
+        if (!cancelled) setCoverage(res.coverage);
+      })
+      .catch(() => {
+        if (!cancelled) setCoverage(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, testrailReady, suggestionKeys]);
+
+  // gaps (no cases yet) first
+  const sortedSuggestions = useMemo(() => {
+    if (!coverage) return suggestions;
+    return [...suggestions].sort((a, b) => Number(coverage[a.key]?.covered ?? true) - Number(coverage[b.key]?.covered ?? true));
+  }, [suggestions, coverage]);
+
+  const gapCount = coverage ? suggestions.filter((s) => coverage[s.key] && !coverage[s.key].covered).length : 0;
 
   useEffect(() => {
     if (!authenticated || !testrailReady) return;
@@ -252,18 +280,31 @@ export function HomeView({
         <section className="home-card">
           <div className="home-card-head">
             <h3>{h.assignedHeading}</h3>
+            {coverage && suggestions.length ? (
+              <span className={`home-cov-summary ${gapCount > 0 ? 'has-gaps' : ''}`}>
+                {gapCount > 0 ? h.coverageSummary(gapCount, suggestions.length) : h.coverageAllCovered}
+              </span>
+            ) : null}
           </div>
           <div className="home-card-body">
             {suggestions.length ? (
-              suggestions.slice(0, 6).map((s) => (
-                <div className="home-tk-row" key={s.key}>
-                  <span className="home-tk-key">{s.key}</span>
-                  <span className="home-tk-sum" title={s.summary}>{s.summary}</span>
-                  <button type="button" className="home-tk-go" onClick={() => onQuickStart(s.key)}>
-                    {h.assignedGenerate}
-                  </button>
-                </div>
-              ))
+              sortedSuggestions.slice(0, 6).map((s) => {
+                const cov = coverage?.[s.key];
+                return (
+                  <div className="home-tk-row" key={s.key}>
+                    <span className="home-tk-key">{s.key}</span>
+                    <span className="home-tk-sum" title={s.summary}>{s.summary}</span>
+                    {cov ? (
+                      <span className={`home-cov-badge ${cov.covered ? 'covered' : 'gap'}`}>
+                        {cov.covered ? h.coverageHas(cov.count) : h.coverageGap}
+                      </span>
+                    ) : null}
+                    <button type="button" className="home-tk-go" onClick={() => onQuickStart(s.key)}>
+                      {h.assignedGenerate}
+                    </button>
+                  </div>
+                );
+              })
             ) : (
               <div className="home-muted home-empty-row">{h.assignedEmpty}</div>
             )}

@@ -13,6 +13,7 @@ vi.mock('../../src/client/api', () => ({
   loadHistoryRuns: vi.fn(),
   loadTicketSuggestions: vi.fn(),
   loadTestRailSummary: vi.fn(),
+  loadCoverage: vi.fn(),
   logout: vi.fn(),
   preflightPush: vi.fn(),
   pushCases: vi.fn(),
@@ -42,6 +43,7 @@ describe('App utility UI', () => {
     vi.mocked(api.loadConfig).mockResolvedValue(configResponse as any);
     vi.mocked(api.loadHistoryRuns).mockResolvedValue({ runs: [] } as any);
     vi.mocked(api.loadTicketSuggestions).mockResolvedValue({ tickets: [], jql: '' } as any);
+    vi.mocked(api.loadCoverage).mockResolvedValue({ coverage: {} } as any);
     vi.mocked(api.loadTestRailSummary).mockResolvedValue({
       projectId: '69',
       plans: 0,
