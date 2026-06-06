@@ -196,6 +196,11 @@ export function getUserByEmail(config: TestRailConfig, email: string): Promise<R
   return trGet<Record<string, unknown>>(config, `get_user_by_email&email=${encodeURIComponent(email)}`);
 }
 
+/** Single user by id — works for non-admins, unlike the bulk get_users (admin-only). */
+export function getUser(config: TestRailConfig, userId: number | string): Promise<Record<string, unknown>> {
+  return trGet<Record<string, unknown>>(config, `get_user/${encodeURIComponent(String(userId))}`);
+}
+
 /** All cases in the project's suite (used to compute which Jira refs already have coverage). */
 export function getCases(config: TestRailConfig, projectId?: string, suiteId?: string): Promise<Record<string, unknown>[]> {
   const pid = requireProjectId(config, projectId);

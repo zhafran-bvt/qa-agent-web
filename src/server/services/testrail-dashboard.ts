@@ -1,5 +1,5 @@
 import type { TrPlanSummary, TrSummary } from '../../shared/contracts';
-import { extractRunsFromPlan, getCases, getPlan, getPlans, getUsers, normalizeRefTokens, type TestRailConfig } from './testrail';
+import { extractRunsFromPlan, getCases, getPlan, getPlans, getUser, normalizeRefTokens, type TestRailConfig } from './testrail';
 import {
   calculateCompletionRate,
   calculatePassRate,
@@ -46,19 +46,30 @@ function summarizePlan(config: TestRailConfig, plan: Record<string, unknown>, us
 }
 
 const usersTtl = Number(process.env.DASHBOARD_USERS_CACHE_TTL_MS || 600_000);
-const usersCache = new TtlCache<Map<number, string>>(usersTtl, 1);
+// Per-id name cache. The bulk get_users is admin-only (403 for service accounts),
+// so we resolve names one id at a time via get_user/{id}, which non-admins can call.
+const userNameCache = new TtlCache<string>(usersTtl, 512);
 
-async function getUserMap(config: TestRailConfig): Promise<Map<number, string>> {
-  const cached = usersCache.get('users');
-  if (cached) return cached;
-  let map = new Map<number, string>();
-  try {
-    const users = await getUsers(config);
-    map = new Map(users.map((u) => [num(u.id), String(u.name || u.email || '')]));
-  } catch {
-    // get_users may be restricted; fall back to empty names
+async function resolveUserNames(config: TestRailConfig, ids: number[]): Promise<Map<number, string>> {
+  const map = new Map<number, string>();
+  const missing: number[] = [];
+  for (const id of new Set(ids)) {
+    if (!id) continue;
+    const cached = userNameCache.get(String(id));
+    if (cached !== undefined) map.set(id, cached);
+    else missing.push(id);
   }
-  usersCache.set('users', map);
+  await mapWithConcurrency(missing, 6, async (id) => {
+    try {
+      const u = await getUser(config, id);
+      const name = String(u.name || u.email || '');
+      userNameCache.set(String(id), name);
+      map.set(id, name);
+    } catch {
+      userNameCache.set(String(id), ''); // remember the failure so we don't refetch
+      map.set(id, '');
+    }
+  });
   return map;
 }
 
@@ -102,7 +113,8 @@ export async function listPlans(config: TestRailConfig, projectId?: string): Pro
   const cacheKey = `plans:${pid}`;
   const cached = plansCache.get(cacheKey);
   if (cached) return cached;
-  const [plans, userMap] = await Promise.all([getPlans(config, projectId), getUserMap(config)]);
+  const plans = await getPlans(config, projectId);
+  const userMap = await resolveUserNames(config, plans.map((plan) => num(plan.created_by, 0)).filter(Boolean));
   const summaries = plans
     .map((plan) => summarizePlan(config, plan, userMap))
     .sort((a, b) => b.createdOn - a.createdOn);
@@ -190,5 +202,5 @@ export function clearDashboardCaches(): void {
   plansCache.clear();
   coverageCache.clear();
   planRunCountCache.clear();
-  usersCache.clear();
+  userNameCache.clear();
 }
