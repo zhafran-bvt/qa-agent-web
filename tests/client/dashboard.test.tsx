@@ -65,25 +65,35 @@ describe('PlanList', () => {
     expect(screen.queryByRole('link', { name: 'Open in TestRail' })).toBeNull();
   });
 
-  it('paginates at 15 per page with prev/next', async () => {
-    const many: TrPlanSummary[] = Array.from({ length: 20 }, (_, i) => ({
+  it('paginates at 20 per page with prev/next', async () => {
+    const many: TrPlanSummary[] = Array.from({ length: 25 }, (_, i) => ({
       ...plans[0],
       planId: 1000 + i,
-      planName: `Plan ${i + 1}`,
+      planName: `Plan ${i + 1}`, // no Jira key → non-sprint section
     }));
     render(<PlanList lang="en" plans={many} reporterUrl="" />);
 
     expect(screen.getByRole('link', { name: 'Plan 1' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Plan 15' })).toBeTruthy();
-    expect(screen.queryByRole('link', { name: 'Plan 16' })).toBeNull();
-    expect(screen.getByText('1–15 of 20')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Plan 20' })).toBeTruthy();
+    expect(screen.queryByRole('link', { name: 'Plan 21' })).toBeNull();
+    expect(screen.getByText('1–20 of 25')).toBeTruthy();
     expect(screen.getByText('Page 1 of 2')).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: 'Next' }));
-    expect(screen.getByRole('link', { name: 'Plan 16' })).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Plan 20' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Plan 21' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Plan 25' })).toBeTruthy();
     expect(screen.queryByRole('link', { name: 'Plan 1' })).toBeNull();
-    expect(screen.getByText('16–20 of 20')).toBeTruthy();
+    expect(screen.getByText('21–25 of 25')).toBeTruthy();
+  });
+
+  it('splits plans into Sprint and Non-sprint sections by Jira key in the title', () => {
+    const mixed: TrPlanSummary[] = [
+      { ...plans[0], planId: 1, planName: 'ORB-2704, As a User, select adm area' },
+      { ...plans[0], planId: 2, planName: 'Release Plan [Data] - 20260528' },
+    ];
+    render(<PlanList lang="en" plans={mixed} reporterUrl="" />);
+    expect(screen.getByText('Sprint test plans')).toBeTruthy();
+    expect(screen.getByText('Non-sprint test plans')).toBeTruthy();
   });
 });
 

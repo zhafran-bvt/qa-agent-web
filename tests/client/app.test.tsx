@@ -66,16 +66,13 @@ describe('App utility UI', () => {
     } as any);
   });
 
-  it('opens the workflow and status modals from the left utility triggers', async () => {
+  it('opens the How it works page from the sidebar and the status modal from the top bar', async () => {
     render(<App />);
 
-    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
-    await waitFor(() => expect(screen.getByText('Recommendations unavailable')).toBeTruthy());
-    expect(screen.getAllByText('Log in with Atlassian first to load tickets assigned to you in the active sprint.').length).toBeGreaterThanOrEqual(1);
-
-    await userEvent.click(screen.getByRole('button', { name: /How it works/i }));
-    expect(screen.getByRole('dialog', { name: /How QA Agent works/i })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    // How it works is now a full page reached from the sidebar (not a modal).
+    await userEvent.click(screen.getByRole('tab', { name: /How it works/i }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: /How QA Agent works/i })).toBeTruthy());
+    expect(screen.queryByRole('dialog')).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: 'Status' }));
     expect(screen.getByRole('dialog', { name: /Diagnostics/i })).toBeTruthy();

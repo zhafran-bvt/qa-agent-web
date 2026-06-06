@@ -19,6 +19,7 @@ import { AddToRunCard } from './components/AddToRunCard';
 import { PlanLinkCard } from './components/PlanLinkCard';
 import { ContextPanel } from './components/ContextPanel';
 import { DashboardView } from './components/dashboard/DashboardView';
+import { GuideView } from './components/GuideView';
 import { HomeView } from './components/HomeView';
 import { TestRailAccountModal } from './components/TestRailAccountModal';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
@@ -85,12 +86,11 @@ function formatPushResults(
 
 export default function App() {
   const [lang, setLang] = useState<UiLanguage>('en');
-  const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showAccountMenu, setShowAccountMenu] = useState(false);
   const [showAccountModal, setShowAccountModal] = useState(false);
-  const [view, setView] = useState<'home' | 'generate' | 'testrail'>('home');
+  const [view, setView] = useState<'home' | 'generate' | 'testrail' | 'guide'>('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
   const [translatingScope, setTranslatingScope] = useState(false);
@@ -523,59 +523,6 @@ export default function App() {
         </div>
       ) : null}
 
-      {showWorkflowHelp ? (
-        <div className="modal-backdrop" role="presentation" onClick={() => setShowWorkflowHelp(false)}>
-          <section
-            className="modal-card workflow-help-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="workflow-help-title"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modal-header">
-              <div>
-                <div className="eyebrow">QA Agent</div>
-                <h2 id="workflow-help-title">{t.help.title}</h2>
-                <p>{t.help.subtitle}</p>
-              </div>
-              <button className="button button-secondary button-small" type="button" onClick={() => setShowWorkflowHelp(false)}>
-                {t.help.close}
-              </button>
-            </div>
-
-            <div className="workflow-visualization" aria-label="QA Agent workflow overview">
-              {t.help.steps.map((step, index) => {
-                const shortLabel = step.title.replace(/^\d+\.\s*/, '');
-                return (
-                  <div className="workflow-visual-step" key={step.title}>
-                    <div className="workflow-visual-node">
-                      <span className="workflow-visual-number">{index + 1}</span>
-                    </div>
-                    <div className="workflow-visual-label">{shortLabel}</div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="workflow-help-list">
-              {t.help.steps.map((step) => (
-                <article className="workflow-help-step" key={step.title}>
-                  <h3>{step.title}</h3>
-                  <p>{step.body}</p>
-                  {'details' in step && Array.isArray(step.details) && step.details.length ? (
-                    <ul className="workflow-help-points">
-                      {step.details.map((detail) => (
-                        <li key={detail}>{detail}</li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          </section>
-        </div>
-      ) : null}
-
       {showStatusModal ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setShowStatusModal(false)}>
           <section
@@ -694,6 +641,19 @@ export default function App() {
             </span>
             <span className="workbench-areanav-label">{t.dashboard.areaTestRail}</span>
           </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'guide'}
+            className={`workbench-areanav-item ${view === 'guide' ? 'is-active' : ''}`}
+            onClick={() => setView('guide')}
+            title={t.guide.navItem}
+          >
+            <span className="workbench-areanav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 17v-5M12 8h.01" /></svg>
+            </span>
+            <span className="workbench-areanav-label">{t.guide.navItem}</span>
+          </button>
         </nav>
         {view === 'generate' ? (
         <>
@@ -762,13 +722,10 @@ export default function App() {
       <main className="workbench-main">
         <header className="workbench-topbar">
           <div>
-            <h1>{view === 'home' ? t.home.title : view === 'testrail' ? t.dashboard.title : t.heroTitle}</h1>
-            <p>{view === 'home' ? t.home.subtitle : view === 'testrail' ? t.dashboard.subtitle : activeWorkflowLabel}</p>
+            <h1>{view === 'home' ? t.home.title : view === 'testrail' ? t.dashboard.title : view === 'guide' ? t.guide.navItem : t.heroTitle}</h1>
+            <p>{view === 'home' ? t.home.subtitle : view === 'testrail' ? t.dashboard.subtitle : view === 'guide' ? t.guide.subtitle : activeWorkflowLabel}</p>
           </div>
           <div className="workbench-top-actions">
-            <button className="button button-secondary button-small" type="button" onClick={() => setShowWorkflowHelp(true)}>
-              {t.help.trigger}
-            </button>
             <button className="button button-secondary button-small" type="button" onClick={() => setShowStatusModal(true)}>
               {t.status.trigger}
             </button>
@@ -827,7 +784,9 @@ export default function App() {
         <div className="workbench-content">
           {error ? <div className="global-error">{error}</div> : null}
 
-          {view === 'home' ? (
+          {view === 'guide' ? (
+            <GuideView lang={lang} />
+          ) : view === 'home' ? (
             <HomeView
               lang={lang}
               authenticated={Boolean(config?.authenticated)}
