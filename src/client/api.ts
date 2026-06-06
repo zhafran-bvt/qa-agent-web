@@ -9,11 +9,14 @@ import type {
   PushPreflightResponse,
   PushRequest,
   PushResponse,
+  CoverageResponse,
   ManageCaseRequest,
   ManageRunRequest,
   PlanForStoryResponse,
+  PlanRunCountsResponse,
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
+  TestrailCredentialsStatus,
   TestRailManageResponse,
   TestRailPlansResponse,
   TestRailSummaryResponse,
@@ -68,6 +71,29 @@ export function createTestRailRun(payload: ManageRunRequest): Promise<TestRailMa
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+export function loadTestrailCredentials(): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials');
+}
+
+export function saveTestrailCredentials(payload: { user: string; apiKey: string }): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function clearTestrailCredentials(): Promise<TestrailCredentialsStatus> {
+  return requestJson<TestrailCredentialsStatus>('/api/testrail/credentials', { method: 'DELETE' });
+}
+
+export function loadCoverage(keys: string[]): Promise<CoverageResponse> {
+  return requestJson<CoverageResponse>(`/api/testrail/coverage?keys=${encodeURIComponent(keys.join(','))}`);
+}
+
+export function loadPlanRunCounts(planIds: Array<number | string>): Promise<PlanRunCountsResponse> {
+  return requestJson<PlanRunCountsResponse>(`/api/testrail/plan-run-counts?ids=${encodeURIComponent(planIds.join(','))}`);
 }
 
 export function loadPlanForStory(storyKey: string): Promise<PlanForStoryResponse> {

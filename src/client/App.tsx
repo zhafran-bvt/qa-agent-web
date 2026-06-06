@@ -20,6 +20,7 @@ import { PlanLinkCard } from './components/PlanLinkCard';
 import { ContextPanel } from './components/ContextPanel';
 import { DashboardView } from './components/dashboard/DashboardView';
 import { HomeView } from './components/HomeView';
+import { TestRailAccountModal } from './components/TestRailAccountModal';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { DuplicatePushReviewModal } from './components/DuplicatePushReviewModal';
 import { HistoryPanel } from './components/HistoryPanel';
@@ -87,6 +88,8 @@ export default function App() {
   const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showAccountMenu, setShowAccountMenu] = useState(false);
+  const [showAccountModal, setShowAccountModal] = useState(false);
   const [view, setView] = useState<'home' | 'generate' | 'testrail'>('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
@@ -600,6 +603,8 @@ export default function App() {
         </div>
       ) : null}
 
+      {showAccountModal ? <TestRailAccountModal lang={lang} onClose={() => setShowAccountModal(false)} /> : null}
+
       {showHistory ? (
         <div className="modal-backdrop" role="presentation" onClick={() => setShowHistory(false)}>
           <section
@@ -768,16 +773,54 @@ export default function App() {
               {t.status.trigger}
             </button>
             {config?.authenticated ? (
-              <button className="button button-secondary button-small" type="button" onClick={handleLogout}>
-                {t.logout}
-              </button>
+              <div className="workbench-account">
+                <button
+                  className="workbench-account-trigger"
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={showAccountMenu}
+                  onClick={() => setShowAccountMenu((value) => !value)}
+                >
+                  <span className="workbench-avatar">QA</span>
+                  <span>{config.user || 'QA Engineer'}</span>
+                  <span aria-hidden="true">▾</span>
+                </button>
+                {showAccountMenu ? (
+                  <div className="workbench-account-menu" role="menu">
+                    <button
+                      role="menuitem"
+                      type="button"
+                      onClick={() => {
+                        setShowAccountMenu(false);
+                        setShowAccountModal(true);
+                      }}
+                    >
+                      {t.trAccount.menuItem}
+                    </button>
+                    <div className="workbench-account-sep" />
+                    <button
+                      role="menuitem"
+                      type="button"
+                      className="is-danger"
+                      onClick={() => {
+                        setShowAccountMenu(false);
+                        void handleLogout();
+                      }}
+                    >
+                      {t.logout}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
             ) : (
-              <button className="button button-primary button-small" type="button" onClick={handleLogin}>
-                {t.loginWithAtlassian}
-              </button>
+              <>
+                <button className="button button-primary button-small" type="button" onClick={handleLogin}>
+                  {t.loginWithAtlassian}
+                </button>
+                <span className="workbench-avatar">QA</span>
+                <span>{t.notLoggedIn}</span>
+              </>
             )}
-            <span className="workbench-avatar">QA</span>
-            <span>{config?.authenticated ? config.user || 'QA Engineer' : t.notLoggedIn}</span>
           </div>
         </header>
 

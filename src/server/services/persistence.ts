@@ -79,6 +79,11 @@ interface StoredPushRunInput {
   };
 }
 
+export interface UserTestrailCreds {
+  user: string;
+  apiKeyEnc: string;
+}
+
 export interface Persistence {
   initialize(): Promise<void>;
   ping(): Promise<{ ok: boolean; database: boolean; mode: 'postgres' | 'file+memory-fallback'; error?: string }>;
@@ -99,6 +104,9 @@ export interface Persistence {
   erasePersonalDataForAccount(accountId: string): Promise<{ sessionsDeleted: number }>;
   refreshPersonalDataForAccount(accountId: string, updates: { displayName?: string | null; retrievedAt: number }): Promise<{ sessionsUpdated: number }>;
   getPrivacyReportingStatus(defaultCycleDays: number, now: number): Promise<PrivacyReportingStatus>;
+  getUserTestrailCreds(accountId: string): Promise<UserTestrailCreds | null>;
+  setUserTestrailCreds(accountId: string, user: string, apiKeyEnc: string): Promise<void>;
+  deleteUserTestrailCreds(accountId: string): Promise<void>;
   appendAudit(event: Record<string, unknown>): Promise<void>;
   createAnalysisRun(input: { jiraKey: string; user: string; context: QaContext }): Promise<string | null>;
   createGeneratedRun(input: StoredGenerationRunInput): Promise<string | null>;
@@ -221,6 +229,18 @@ class ResilientPersistence implements Persistence {
     return this.active.appendAudit(event);
   }
 
+  getUserTestrailCreds(accountId: string): Promise<UserTestrailCreds | null> {
+    return this.active.getUserTestrailCreds(accountId);
+  }
+
+  setUserTestrailCreds(accountId: string, user: string, apiKeyEnc: string): Promise<void> {
+    return this.active.setUserTestrailCreds(accountId, user, apiKeyEnc);
+  }
+
+  deleteUserTestrailCreds(accountId: string): Promise<void> {
+    return this.active.deleteUserTestrailCreds(accountId);
+  }
+
   createAnalysisRun(input: { jiraKey: string; user: string; context: QaContext }): Promise<string | null> {
     return this.active.createAnalysisRun(input);
   }
@@ -254,6 +274,7 @@ class FileBackedPersistence implements Persistence {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly oauthStates = new Map<string, number>();
   private readonly privacyStates = new Map<string, { lastReportedAt: number; lastCyclePeriodDays: number; lastStatus: 'ok' | 'closed' | 'updated'; lastReportedAgeSeconds: number }>();
+  private readonly userTestrailCreds = new Map<string, UserTestrailCreds>();
   private lastPrivacyRunAt: number | null = null;
   private lastPrivacyRunError: string | null = null;
 
@@ -391,6 +412,18 @@ class FileBackedPersistence implements Persistence {
 
   async appendAudit(event: Record<string, unknown>): Promise<void> {
     await fsPromises.appendFile(this.auditFile, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`);
+  }
+
+  async getUserTestrailCreds(accountId: string): Promise<UserTestrailCreds | null> {
+    return this.userTestrailCreds.get(accountId) || null;
+  }
+
+  async setUserTestrailCreds(accountId: string, user: string, apiKeyEnc: string): Promise<void> {
+    this.userTestrailCreds.set(accountId, { user, apiKeyEnc });
+  }
+
+  async deleteUserTestrailCreds(accountId: string): Promise<void> {
+    this.userTestrailCreds.delete(accountId);
   }
 
   async createAnalysisRun(): Promise<string | null> {
@@ -790,6 +823,30 @@ class PostgresPersistence implements Persistence {
         JSON.stringify({ timestamp, ...event }),
       ]
     );
+  }
+
+  async getUserTestrailCreds(accountId: string): Promise<UserTestrailCreds | null> {
+    const result = await this.pool.query(
+      `SELECT tr_user, tr_api_key_enc FROM user_testrail_credentials WHERE account_id = $1`,
+      [accountId]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return { user: String(row.tr_user), apiKeyEnc: String(row.tr_api_key_enc) };
+  }
+
+  async setUserTestrailCreds(accountId: string, user: string, apiKeyEnc: string): Promise<void> {
+    const now = Date.now();
+    await this.pool.query(
+      `INSERT INTO user_testrail_credentials (account_id, tr_user, tr_api_key_enc, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4)
+       ON CONFLICT (account_id) DO UPDATE SET tr_user = EXCLUDED.tr_user, tr_api_key_enc = EXCLUDED.tr_api_key_enc, updated_at = EXCLUDED.updated_at`,
+      [accountId, user, apiKeyEnc, now]
+    );
+  }
+
+  async deleteUserTestrailCreds(accountId: string): Promise<void> {
+    await this.pool.query(`DELETE FROM user_testrail_credentials WHERE account_id = $1`, [accountId]);
   }
 
   async createAnalysisRun(input: { jiraKey: string; user: string; context: QaContext }): Promise<string> {

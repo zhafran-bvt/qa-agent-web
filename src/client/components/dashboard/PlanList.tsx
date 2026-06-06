@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { TrPlanSummary, TrStatusDistribution } from '../../../shared/contracts';
+import { loadPlanRunCounts } from '../../api';
 import type { UiLanguage } from '../../i18n';
 import { uiText } from '../../i18n';
 import { statusTone, STATUS_ORDER } from './status';
@@ -47,12 +48,32 @@ export function PlanList({ lang, plans, reporterUrl }: PlanListProps) {
   const start = page * PAGE_SIZE;
   const pagePlans = plans.slice(start, start + PAGE_SIZE);
 
+  // Lazily fetch real run counts for the visible page (TestRail list endpoint omits them).
+  const [runCounts, setRunCounts] = useState<Record<string, number>>({});
+  const pageIdsKey = pagePlans.map((p) => p.planId).join(',');
+  useEffect(() => {
+    const ids = pageIdsKey ? pageIdsKey.split(',') : [];
+    const missing = ids.filter((id) => runCounts[id] === undefined);
+    if (!missing.length) return;
+    let cancelled = false;
+    loadPlanRunCounts(missing)
+      .then((res) => {
+        if (!cancelled) setRunCounts((current) => ({ ...current, ...res.counts }));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageIdsKey]);
+
   return (
     <>
     <table className="tr-plan-table">
       <thead>
         <tr>
           <th>{t.colPlan}</th>
+          <th>{t.colCreatedBy}</th>
           <th className="tr-num">{t.colRuns}</th>
           <th className="tr-num">{t.colTests}</th>
           <th>{t.colPassRate}</th>
@@ -82,7 +103,8 @@ export function PlanList({ lang, plans, reporterUrl }: PlanListProps) {
                 {plan.isCompleted ? t.completed : t.active}
               </span>
             </td>
-            <td className="tr-num">{plan.totalRuns}</td>
+            <td className="tr-createdby">{plan.createdByName ? plan.createdByName : <span className="tr-muted">—</span>}</td>
+            <td className="tr-num">{runCounts[String(plan.planId)] ?? <span className="tr-muted">·</span>}</td>
             <td className="tr-num">{plan.totalTests}</td>
             <td>
               <div className="tr-passrate">
