@@ -24,6 +24,7 @@ export interface ConfigResponse {
   };
   defaults: {
     testrailSectionId: string;
+    reporterUrl: string;
     llmProviders: LlmProviderStatus[];
   };
 }
@@ -469,3 +470,89 @@ export interface DiagnosticsResponse {
     fields?: Record<string, unknown>;
   }>;
 }
+
+// --- TestRail dashboard (read views) -------------------------------------
+export type TrStatusDistribution = Record<string, number>;
+
+export interface TrPlanSummary {
+  planId: number;
+  planName: string;
+  isCompleted: boolean;
+  createdOn: number;
+  updatedOn: number | null;
+  totalRuns: number;
+  totalTests: number;
+  passRate: number;
+  completionRate: number;
+  statusDistribution: TrStatusDistribution;
+  failedCount: number;
+  blockedCount: number;
+  untestedCount: number;
+  webUrl: string;
+}
+
+export interface TestRailPlansResponse {
+  projectId: string;
+  plans: TrPlanSummary[];
+}
+
+export interface TrSummary {
+  projectId: string;
+  plans: number;
+  activePlans: number;
+  completedPlans: number;
+  totalTests: number;
+  passRate: number;
+  completionRate: number;
+  failed: number;
+  blocked: number;
+  untested: number;
+  distribution: TrStatusDistribution;
+}
+
+export interface TestRailSummaryResponse extends TrSummary {}
+
+export interface PlanForStoryResponse {
+  storyKey: string;
+  plans: TrPlanSummary[];
+}
+
+// --- TestRail management (write) -----------------------------------------
+export interface ManageCaseRequest {
+  sectionId?: string | number;
+  title?: string;
+  refs?: string;
+  preconditions?: string;
+  bddScenario?: string;
+  typeId?: number;
+  priorityId?: number;
+  templateId?: number;
+  dryRun?: boolean;
+}
+
+export interface ManageRunRequest {
+  projectId?: string | number;
+  suiteId?: number;
+  name?: string;
+  description?: string;
+  refs?: string;
+  caseIds?: number[];
+  includeAll?: boolean;
+  dryRun?: boolean;
+}
+
+export interface ManageDryRunPreview {
+  dryRun: true;
+  action: string;
+  endpoint: string;
+  payload: Record<string, unknown>;
+}
+
+export interface ManageResult {
+  ok: true;
+  action: string;
+  id?: number | string;
+  result?: Record<string, unknown>;
+}
+
+export type TestRailManageResponse = ManageDryRunPreview | ManageResult;

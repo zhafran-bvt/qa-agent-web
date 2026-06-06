@@ -12,6 +12,7 @@ vi.mock('../../src/client/api', () => ({
   loadHistoryRun: vi.fn(),
   loadHistoryRuns: vi.fn(),
   loadTicketSuggestions: vi.fn(),
+  loadTestRailSummary: vi.fn(),
   logout: vi.fn(),
   preflightPush: vi.fn(),
   pushCases: vi.fn(),
@@ -41,6 +42,19 @@ describe('App utility UI', () => {
     vi.mocked(api.loadConfig).mockResolvedValue(configResponse as any);
     vi.mocked(api.loadHistoryRuns).mockResolvedValue({ runs: [] } as any);
     vi.mocked(api.loadTicketSuggestions).mockResolvedValue({ tickets: [], jql: '' } as any);
+    vi.mocked(api.loadTestRailSummary).mockResolvedValue({
+      projectId: '69',
+      plans: 0,
+      activePlans: 0,
+      completedPlans: 0,
+      totalTests: 0,
+      passRate: 0,
+      completionRate: 0,
+      failed: 0,
+      blocked: 0,
+      untested: 0,
+      distribution: {},
+    } as any);
     vi.mocked(api.loadDiagnostics).mockResolvedValue({
       persistence: { mode: 'postgres', migrationVersion: '002_oauth_states.sql' },
       auth: { configured: true, authenticated: false },
@@ -53,6 +67,7 @@ describe('App utility UI', () => {
   it('opens the workflow and status modals from the left utility triggers', async () => {
     render(<App />);
 
+    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
     await waitFor(() => expect(screen.getByText('Recommendations unavailable')).toBeTruthy());
     expect(screen.getAllByText('Log in with Atlassian first to load tickets assigned to you in the active sprint.').length).toBeGreaterThanOrEqual(1);
 
@@ -67,6 +82,7 @@ describe('App utility UI', () => {
   it('keeps workbench utility controls clickable in the signed-out state', async () => {
     render(<App />);
 
+    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
     await waitFor(() => expect(screen.getByText('Connect Atlassian to start')).toBeTruthy());
 
     await userEvent.click(screen.getByRole('button', { name: 'History' }));
@@ -86,6 +102,7 @@ describe('App utility UI', () => {
   it('renders explicit blockers for disabled workbench actions', async () => {
     render(<App />);
 
+    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
     await waitFor(() => expect(screen.getByText('Log in with Atlassian to analyze Jira scope.')).toBeTruthy());
     expect(screen.getByRole('button', { name: 'Analyze Jira + Confluence' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByText('Generate test cases before pushing to TestRail.')).toBeTruthy();
@@ -128,6 +145,7 @@ describe('App utility UI', () => {
 
     render(<App />);
 
+    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
     await waitFor(() => expect(screen.getByText('Suggested for you')).toBeTruthy());
     expect(screen.getByText('Tickets assigned to you in the active sprint.')).toBeTruthy();
 

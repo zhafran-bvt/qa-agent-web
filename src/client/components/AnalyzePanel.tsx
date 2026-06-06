@@ -57,7 +57,7 @@ export function AnalyzePanel({
             <span>{t.jiraTicketKey}</span>
             <input value={form.jiraKey} placeholder="ORB-3118" onChange={(event) => onChange({ jiraKey: event.target.value })} />
           </label>
-          <button className="button" type="button" disabled={Boolean(analyzeBlocker)} onClick={onAnalyze}>
+          <button className="button" type="button" disabled={Boolean(analyzeBlocker)} onClick={() => onAnalyze()}>
             {busy ? t.analyzing : t.action}
           </button>
         </div>

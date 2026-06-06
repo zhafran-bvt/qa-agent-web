@@ -9,8 +9,14 @@ import type {
   PushPreflightResponse,
   PushRequest,
   PushResponse,
+  ManageCaseRequest,
+  ManageRunRequest,
+  PlanForStoryResponse,
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
+  TestRailManageResponse,
+  TestRailPlansResponse,
+  TestRailSummaryResponse,
   TicketSuggestionsResponse,
   ValidateRequest,
   ValidateResponse,
@@ -39,6 +45,97 @@ export function loadConfig(): Promise<ConfigResponse> {
 
 export function loadTicketSuggestions(): Promise<TicketSuggestionsResponse> {
   return requestJson<TicketSuggestionsResponse>('/api/suggestions/tickets');
+}
+
+export function loadTestRailPlans(projectId?: string): Promise<TestRailPlansResponse> {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+  return requestJson<TestRailPlansResponse>(`/api/testrail/plans${query}`);
+}
+
+export function loadTestRailSummary(): Promise<TestRailSummaryResponse> {
+  return requestJson<TestRailSummaryResponse>('/api/testrail/summary');
+}
+
+export function createTestRailCase(payload: ManageCaseRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>('/api/testrail/manage/case', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createTestRailRun(payload: ManageRunRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>('/api/testrail/manage/run', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function loadPlanForStory(storyKey: string): Promise<PlanForStoryResponse> {
+  return requestJson<PlanForStoryResponse>(`/api/testrail/plan-for-story?key=${encodeURIComponent(storyKey)}`);
+}
+
+export function addTestRailPlanEntry(
+  planId: string | number,
+  payload: { name: string; caseIds: number[]; dryRun?: boolean }
+): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/plan/${encodeURIComponent(String(planId))}/entry`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setTestRailRunCases(runId: string | number, caseIds: number[], dryRun = false): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/run/${encodeURIComponent(String(runId))}/cases`, {
+    method: 'POST',
+    body: JSON.stringify({ caseIds, dryRun }),
+  });
+}
+
+export function updateTestRailCase(caseId: string | number, payload: ManageCaseRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/case/${encodeURIComponent(String(caseId))}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateTestRailRun(runId: string | number, payload: ManageRunRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/run/${encodeURIComponent(String(runId))}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function createTestRailPlan(payload: ManageRunRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>('/api/testrail/manage/plan', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateTestRailPlan(planId: string | number, payload: ManageRunRequest): Promise<TestRailManageResponse> {
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/plan/${encodeURIComponent(String(planId))}`, {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  });
+}
+
+function deleteManage(resource: 'case' | 'run' | 'plan', id: string | number, dryRun = false): Promise<TestRailManageResponse> {
+  const query = dryRun ? '?dry_run=true' : '';
+  return requestJson<TestRailManageResponse>(`/api/testrail/manage/${resource}/${encodeURIComponent(String(id))}${query}`, {
+    method: 'DELETE',
+  });
+}
+
+export function deleteTestRailCase(caseId: string | number, dryRun = false): Promise<TestRailManageResponse> {
+  return deleteManage('case', caseId, dryRun);
+}
+
+export function deleteTestRailRun(runId: string | number, dryRun = false): Promise<TestRailManageResponse> {
+  return deleteManage('run', runId, dryRun);
+}
+
+export function deleteTestRailPlan(planId: string | number, dryRun = false): Promise<TestRailManageResponse> {
+  return deleteManage('plan', planId, dryRun);
 }
 
 export function analyzeContext(payload: AnalyzeRequest): Promise<AnalyzeResponse> {
