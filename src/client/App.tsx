@@ -15,7 +15,11 @@ import {
 } from './api';
 import { AnalyzePanel } from './components/AnalyzePanel';
 import { ApprovalPanel } from './components/ApprovalPanel';
+import { AddToRunCard } from './components/AddToRunCard';
+import { PlanLinkCard } from './components/PlanLinkCard';
 import { ContextPanel } from './components/ContextPanel';
+import { DashboardView } from './components/dashboard/DashboardView';
+import { HomeView } from './components/HomeView';
 import { DiagnosticsPanel } from './components/DiagnosticsPanel';
 import { DuplicatePushReviewModal } from './components/DuplicatePushReviewModal';
 import { HistoryPanel } from './components/HistoryPanel';
@@ -83,6 +87,7 @@ export default function App() {
   const [showWorkflowHelp, setShowWorkflowHelp] = useState(false);
   const [showStatusModal, setShowStatusModal] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [view, setView] = useState<'home' | 'generate' | 'testrail'>('home');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [scopeTranslation, setScopeTranslation] = useState<ScopeSnapshotTranslation | null>(null);
   const [translatingScope, setTranslatingScope] = useState(false);
@@ -99,6 +104,7 @@ export default function App() {
   const [approved, setApproved] = useState(false);
   const [sectionId, setSectionId] = useState('');
   const [pushResults, setPushResults] = useState('');
+  const [pushedCases, setPushedCases] = useState<{ ids: number[]; jiraKey: string } | null>(null);
   const [error, setError] = useState('');
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
@@ -152,6 +158,14 @@ export default function App() {
             await refreshAuxiliaryData();
           } finally {
             setLoadingSuggestions(false);
+          }
+          // Inbound deep link from the TestRail Reporter: ?ticket=ORB-1234 → generate.
+          const inboundTicket = new URLSearchParams(window.location.search).get('ticket');
+          if (inboundTicket) {
+            const cleaned = new URL(window.location.href);
+            cleaned.searchParams.delete('ticket');
+            window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+            handleQuickStart(inboundTicket.trim().toUpperCase());
           }
         }
       })
@@ -282,16 +296,28 @@ export default function App() {
     if (!payload) return;
     const response = await pushCases(payload);
     setPushResults(formatPushResults(response, lang));
+    const ids = response.results
+      .filter((entry) => entry.ok && entry.caseId !== undefined && entry.caseId !== null)
+      .map((entry) => Number(entry.caseId))
+      .filter((id) => Number.isFinite(id));
+    setPushedCases(ids.length && context ? { ids, jiraKey: context.ticketKey } : null);
     pushToast('success', toastText.pushSuccessTitle, toastText.pushSuccessMessage);
     setDuplicateReview(null);
     await refreshAuxiliaryData();
   }
 
-  async function handleAnalyze() {
+  function handleQuickStart(jiraKey: string) {
+    setView('generate');
+    void handleAnalyze({ jiraKey });
+  }
+
+  async function handleAnalyze(override?: Partial<AnalyzeRequest>) {
+    const payload = override ? { ...form, ...override } : form;
+    if (override) setForm(payload);
     setAnalyzing(true);
     setError('');
     try {
-      const response = await analyzeContext(form);
+      const response = await analyzeContext(payload);
       setContext(response.context);
       setTestCases([]);
       setValidation([]);
@@ -302,6 +328,7 @@ export default function App() {
       setOverrideReason('');
       setApproved(false);
       setPushResults('');
+      setPushedCases(null);
       setGeneratedRunId('');
       setPendingGeneration(null);
       setDuplicateReview(null);
@@ -622,6 +649,49 @@ export default function App() {
           </button>
           <strong>QA Agent</strong>
         </div>
+        <nav className="workbench-areanav" role="tablist" aria-label="Area">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'home'}
+            className={`workbench-areanav-item ${view === 'home' ? 'is-active' : ''}`}
+            onClick={() => setView('home')}
+            title={t.home.areaHome}
+          >
+            <span className="workbench-areanav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M3 11l9-8 9 8" /><path d="M5 10v10h14V10" /></svg>
+            </span>
+            <span className="workbench-areanav-label">{t.home.areaHome}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'generate'}
+            className={`workbench-areanav-item ${view === 'generate' ? 'is-active' : ''}`}
+            onClick={() => setView('generate')}
+            title={t.dashboard.areaGenerate}
+          >
+            <span className="workbench-areanav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 4v16M4 12h16" /></svg>
+            </span>
+            <span className="workbench-areanav-label">{t.dashboard.areaGenerate}</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === 'testrail'}
+            className={`workbench-areanav-item ${view === 'testrail' ? 'is-active' : ''}`}
+            onClick={() => setView('testrail')}
+            title={t.dashboard.areaTestRail}
+          >
+            <span className="workbench-areanav-ic" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+            </span>
+            <span className="workbench-areanav-label">{t.dashboard.areaTestRail}</span>
+          </button>
+        </nav>
+        {view === 'generate' ? (
+        <>
         <nav className="workbench-nav" aria-label={t.stepper.ariaLabel}>
           {stepperSteps.map((step, index) => (
             <button
@@ -677,6 +747,8 @@ export default function App() {
             <span className="workbench-nav-label">Pushes</span>
           </button>
         </div>
+        </>
+        ) : null}
         <button className="workbench-collapse" type="button" onClick={() => setSidebarCollapsed((value) => !value)}>
           ‹ <span>{sidebarCollapsed ? 'Expand' : 'Collapse'}</span>
         </button>
@@ -685,8 +757,8 @@ export default function App() {
       <main className="workbench-main">
         <header className="workbench-topbar">
           <div>
-            <h1>{t.heroTitle}</h1>
-            <p>{activeWorkflowLabel}</p>
+            <h1>{view === 'home' ? t.home.title : view === 'testrail' ? t.dashboard.title : t.heroTitle}</h1>
+            <p>{view === 'home' ? t.home.subtitle : view === 'testrail' ? t.dashboard.subtitle : activeWorkflowLabel}</p>
           </div>
           <div className="workbench-top-actions">
             <button className="button button-secondary button-small" type="button" onClick={() => setShowWorkflowHelp(true)}>
@@ -712,6 +784,29 @@ export default function App() {
         <div className="workbench-content">
           {error ? <div className="global-error">{error}</div> : null}
 
+          {view === 'home' ? (
+            <HomeView
+              lang={lang}
+              authenticated={Boolean(config?.authenticated)}
+              testrailReady={Boolean(config?.ready?.testrail)}
+              suggestions={ticketSuggestions}
+              recentRuns={historyRuns}
+              onQuickStart={handleQuickStart}
+              onOpenDashboard={() => setView('testrail')}
+              onOpenHistory={() => setShowHistory(true)}
+              onLogin={handleLogin}
+            />
+          ) : view === 'testrail' ? (
+            <DashboardView
+              lang={lang}
+              authenticated={Boolean(config?.authenticated)}
+              testrailReady={Boolean(config?.ready?.testrail)}
+              defaultSectionId={config?.defaults?.testrailSectionId || ''}
+              reporterUrl={config?.defaults?.reporterUrl || ''}
+              onLogin={handleLogin}
+            />
+          ) : (
+          <>
           <section ref={analyzeSectionRef} className="workbench-anchor">
           <AnalyzePanel
             lang={lang}
@@ -790,8 +885,24 @@ export default function App() {
                 onSectionIdChange={setSectionId}
                 onPush={handlePush}
               />
+              {pushedCases ? (
+                context?.scopeParentIssue ? (
+                  <PlanLinkCard
+                    lang={lang}
+                    caseIds={pushedCases.ids}
+                    taskKey={pushedCases.jiraKey}
+                    taskSummary={context.mainIssue.summary || ''}
+                    storyKey={context.scopeParentIssue.key}
+                    storySummary={context.scopeParentIssue.summary || ''}
+                  />
+                ) : (
+                  <AddToRunCard lang={lang} caseIds={pushedCases.ids} jiraKey={pushedCases.jiraKey} />
+                )
+              ) : null}
             </section>
           </div>
+          </>
+          )}
         </div>
 
       </main>

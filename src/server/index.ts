@@ -17,7 +17,8 @@ import { buildQaContext } from './services/context-builder';
 import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildTicketSuggestionsJql } from './services/suggestions';
-import { findExistingCasesByJiraRef, pushCases } from './services/testrail';
+import { buildManageCaseBody, findExistingCasesByJiraRef, pushCases, trWrite } from './services/testrail';
+import { clearDashboardCaches, findPlansForStory, getSummary, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -27,6 +28,8 @@ import type {
   ConfigResponse,
   DiagnosticsResponse,
   GenerateRequest,
+  ManageCaseRequest,
+  ManageRunRequest,
   PushPreflightRequest,
   PushRequest,
   QaContext,
@@ -97,7 +100,9 @@ const config = {
     user: process.env.TESTRAIL_USER || '',
     apiKey: process.env.TESTRAIL_API_KEY || '',
     projectId: process.env.TESTRAIL_PROJECT_ID || '',
+    suiteId: process.env.TESTRAIL_SUITE_ID || '1',
   },
+  reporterUrl: (process.env.TESTRAIL_REPORTER_URL || '').replace(/\/$/, ''),
 };
 
 const persistence = createPersistence({
@@ -317,7 +322,8 @@ function shouldLogRequestAtInfo(pathname: string, statusCode: number): boolean {
     pathname === '/api/push' ||
     pathname === '/api/diagnostics' ||
     pathname === '/api/history/runs' ||
-    pathname.startsWith('/api/history/runs/')
+    pathname.startsWith('/api/history/runs/') ||
+    pathname.startsWith('/api/testrail/')
   ) {
     return true;
   }
@@ -331,6 +337,154 @@ function shouldEnforceAcceptanceCriteria(context: QaContext | null, _confidenceP
 
 async function appendAudit(event: Record<string, unknown>): Promise<void> {
   await persistence.appendAudit(event);
+}
+
+/**
+ * TestRail management writes (Phase C). All routes require a session + configured TestRail.
+ * Every action supports `dryRun` — it returns the resolved endpoint + payload without
+ * calling TestRail. Successful writes clear the dashboard caches so reads reflect changes.
+ */
+async function handleTestRailManage(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const sessionEnvelope = await requireSession(req, res);
+  if (!sessionEnvelope) return;
+  if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+    sendError(res, 503, 'TestRail is not configured.');
+    return;
+  }
+
+  const segments = url.pathname.split('/').filter(Boolean); // ['api','testrail','manage',...]
+  const resource = segments[3] || '';
+  const idA = segments[4];
+  const idB = segments[5];
+  const method = req.method || 'GET';
+
+  async function run(action: string, endpoint: string, payload: Record<string, unknown>, dryRun: boolean): Promise<void> {
+    if (dryRun) {
+      sendJson(res, 200, { dryRun: true, action, endpoint, payload });
+      return;
+    }
+    try {
+      const result = await trWrite(config.testrail, endpoint, payload);
+      clearDashboardCaches();
+      sendJson(res, 200, { ok: true, action, id: result.id, result });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || `TestRail ${action} failed.`);
+    }
+  }
+
+  try {
+    // ----- cases -----
+    if (resource === 'case' && !idA && method === 'POST') {
+      const body = await readBody<ManageCaseRequest>(req);
+      const sectionId = String(body.sectionId || process.env.TESTRAIL_SECTION_ID || '').trim();
+      if (!sectionId) {
+        sendError(res, 400, 'sectionId is required to create a case.');
+        return;
+      }
+      const payload = buildManageCaseBody(body);
+      if (body.bddScenario !== undefined && body.templateId === undefined) payload.template_id = 4;
+      await run('case.create', `add_case/${encodeURIComponent(sectionId)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'case' && idA && (method === 'PUT' || method === 'POST')) {
+      const body = await readBody<ManageCaseRequest>(req);
+      await run('case.update', `update_case/${encodeURIComponent(idA)}`, buildManageCaseBody(body), Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'case' && idA && method === 'DELETE') {
+      const dryRun = url.searchParams.get('dry_run') === 'true';
+      await run('case.delete', `delete_case/${encodeURIComponent(idA)}`, {}, dryRun);
+      return;
+    }
+
+    // ----- runs -----
+    if (resource === 'run' && !idA && method === 'POST') {
+      const body = await readBody<ManageRunRequest>(req);
+      const projectId = String(body.projectId || config.testrail.projectId || '').trim();
+      if (!projectId) {
+        sendError(res, 400, 'projectId is required to create a run.');
+        return;
+      }
+      const payload: Record<string, unknown> = {
+        name: body.name,
+        ...(body.suiteId !== undefined ? { suite_id: body.suiteId } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
+        include_all: body.includeAll ?? !(body.caseIds && body.caseIds.length),
+        ...(body.caseIds ? { case_ids: body.caseIds } : {}),
+      };
+      await run('run.create', `add_run/${encodeURIComponent(projectId)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'run' && idA && idB === 'cases' && method === 'POST') {
+      const body = await readBody<ManageRunRequest>(req);
+      const payload = { include_all: false, case_ids: body.caseIds || [] };
+      await run('run.setCases', `update_run/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'run' && idA && !idB && (method === 'PUT' || method === 'POST')) {
+      const body = await readBody<ManageRunRequest>(req);
+      const payload: Record<string, unknown> = {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        ...(body.refs !== undefined ? { refs: body.refs } : {}),
+      };
+      await run('run.update', `update_run/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'run' && idA && !idB && method === 'DELETE') {
+      const dryRun = url.searchParams.get('dry_run') === 'true';
+      await run('run.delete', `delete_run/${encodeURIComponent(idA)}`, {}, dryRun);
+      return;
+    }
+
+    // ----- plans -----
+    if (resource === 'plan' && idA && idB === 'entry' && method === 'POST') {
+      const body = await readBody<ManageRunRequest>(req);
+      const suiteId = String(body.suiteId ?? config.testrail.suiteId ?? '1');
+      const payload: Record<string, unknown> = {
+        suite_id: Number(suiteId),
+        name: body.name,
+        include_all: false,
+        case_ids: body.caseIds || [],
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      };
+      await run('plan.addEntry', `add_plan_entry/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'plan' && !idA && method === 'POST') {
+      const body = await readBody<ManageRunRequest>(req);
+      const projectId = String(body.projectId || config.testrail.projectId || '').trim();
+      if (!projectId) {
+        sendError(res, 400, 'projectId is required to create a plan.');
+        return;
+      }
+      const payload: Record<string, unknown> = {
+        name: body.name,
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      };
+      await run('plan.create', `add_plan/${encodeURIComponent(projectId)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'plan' && idA && (method === 'PUT' || method === 'POST')) {
+      const body = await readBody<ManageRunRequest>(req);
+      const payload: Record<string, unknown> = {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      };
+      await run('plan.update', `update_plan/${encodeURIComponent(idA)}`, payload, Boolean(body.dryRun));
+      return;
+    }
+    if (resource === 'plan' && idA && method === 'DELETE') {
+      const dryRun = url.searchParams.get('dry_run') === 'true';
+      await run('plan.delete', `delete_plan/${encodeURIComponent(idA)}`, {}, dryRun);
+      return;
+    }
+
+    sendError(res, 404, 'Unknown TestRail management action.');
+  } catch (error) {
+    sendError(res, 400, (error as Error).message || 'Invalid management request.');
+  }
 }
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger): Promise<void> {
@@ -362,6 +516,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       },
       defaults: {
         testrailSectionId: process.env.TESTRAIL_SECTION_ID || '',
+        reporterUrl: config.reporterUrl,
         llmProviders: config.llm.providers.map((provider) => ({
           name: provider.name,
           model: provider.model,
@@ -466,6 +621,74 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     if (sid) await persistence.deleteSession(sid);
     res.writeHead(204, { 'Set-Cookie': buildSessionCookie('', 0) });
     res.end();
+    return;
+  }
+
+  // --- TestRail management (write) -------------------------------------
+  if (url.pathname.startsWith('/api/testrail/manage/')) {
+    await handleTestRailManage(req, res, url);
+    return;
+  }
+
+  // --- TestRail dashboard (read views) ---------------------------------
+  if (req.method === 'GET' && url.pathname === '/api/testrail/plans') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    try {
+      const projectId = url.searchParams.get('project_id') || config.testrail.projectId || '';
+      const plans = await listPlans(config.testrail, projectId);
+      sendJson(res, 200, { projectId: String(projectId), plans });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to load TestRail plans.');
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/testrail/plan-for-story') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const storyKey = url.searchParams.get('key') || '';
+    if (!storyKey) {
+      sendError(res, 400, 'A story key is required.');
+      return;
+    }
+    try {
+      sendJson(res, 200, { storyKey, plans: await findPlansForStory(config.testrail, storyKey) });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to look up plans.');
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/testrail/summary') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    try {
+      const projectId = url.searchParams.get('project_id') || config.testrail.projectId || '';
+      sendJson(res, 200, await getSummary(config.testrail, projectId));
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to load TestRail summary.');
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/testrail/cache/clear') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    clearDashboardCaches();
+    sendJson(res, 200, { ok: true });
     return;
   }
 
