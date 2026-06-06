@@ -426,6 +426,7 @@ export interface WorkflowHistoryDetail {
 }
 
 export interface WorkflowHistoryListResponse {
+  visibility: 'team';
   runs: WorkflowHistorySummary[];
 }
 

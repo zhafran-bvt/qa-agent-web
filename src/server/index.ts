@@ -48,6 +48,7 @@ const PROJECT_ROOT = process.cwd();
 const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
 const MIGRATIONS_DIR = path.join(PROJECT_ROOT, 'src/server/migrations');
+const OAUTH_VERIFIER_COOKIE = 'qa_oauth';
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
 
@@ -144,6 +145,21 @@ function buildSessionCookie(value: string, maxAge?: number): string {
   return parts.join('; ');
 }
 
+function buildOAuthVerifierCookie(value: string, maxAge = 900): string {
+  const parts = [`${OAUTH_VERIFIER_COOKIE}=${encodeURIComponent(value || '')}`, 'HttpOnly', 'Path=/auth/atlassian/callback', 'SameSite=Lax'];
+  if (typeof maxAge === 'number') parts.push(`Max-Age=${maxAge}`);
+  if (IS_HTTPS) parts.push('Secure');
+  return parts.join('; ');
+}
+
+function clearOAuthVerifierCookie(): string {
+  return buildOAuthVerifierCookie('', 0);
+}
+
+function hashOAuthVerifier(verifier: string): string {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
+}
+
 function parseCookies(req: IncomingMessage): Record<string, string> {
   return Object.fromEntries(
     String(req.headers.cookie || '')
@@ -159,6 +175,10 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
 
 function getSessionId(req: IncomingMessage): string | null {
   return parseCookies(req).qa_sid || null;
+}
+
+function getOAuthVerifier(req: IncomingMessage): string | null {
+  return parseCookies(req)[OAUTH_VERIFIER_COOKIE] || null;
 }
 
 async function getSession(req: IncomingMessage) {
@@ -596,7 +616,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   if (req.method === 'GET' && url.pathname === '/api/history/runs') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
-    sendJson(res, 200, { runs: await persistence.listHistoryRuns(100) });
+    sendJson(res, 200, { visibility: historyVisibility(), runs: await persistence.listHistoryRuns(100) });
     return;
   }
 
@@ -1203,9 +1223,10 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
       return;
     }
     const state = crypto.randomBytes(16).toString('hex');
-    await persistence.storeOAuthState(state, Date.now());
+    const verifier = crypto.randomBytes(24).toString('base64url');
+    await persistence.storeOAuthState(state, Date.now(), hashOAuthVerifier(verifier));
     log.info('auth.atlassian.start');
-    res.writeHead(302, { Location: buildAuthUrl(config.atlassian, state) });
+    res.writeHead(302, { Location: buildAuthUrl(config.atlassian, state), 'Set-Cookie': buildOAuthVerifierCookie(verifier) });
     res.end();
     return;
   }
@@ -1213,7 +1234,9 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
   if (url.pathname === '/auth/atlassian/callback') {
     const state = url.searchParams.get('state');
     const code = url.searchParams.get('code');
-    if (!state || !code || !(await persistence.consumeOAuthState(state))) {
+    const verifier = getOAuthVerifier(req);
+    if (!state || !code || !verifier || !(await persistence.consumeOAuthState(state, hashOAuthVerifier(verifier)))) {
+      res.setHeader('Set-Cookie', clearOAuthVerifierCookie());
       sendError(res, 400, 'Invalid OAuth callback.');
       return;
     }
@@ -1273,7 +1296,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
     });
     res.writeHead(302, {
       Location: '/',
-      'Set-Cookie': buildSessionCookie(sid),
+      'Set-Cookie': [buildSessionCookie(sid), clearOAuthVerifierCookie()],
     });
     res.end();
     return;
@@ -1387,4 +1410,15 @@ function validateStartupConfig(): void {
   if (hosted && !process.env.DATABASE_URL) {
     throw new Error('DATABASE_URL is required for hosted Phase 2 deployments.');
   }
+  if (hosted && !encryptionAvailable()) {
+    logger.warn('startup.config.encryption_key_missing');
+  }
+}
+
+function historyVisibility(): 'team' {
+  const configured = String(process.env.QA_HISTORY_VISIBILITY || 'team').trim().toLowerCase();
+  if (configured !== 'team') {
+    logger.warn('startup.config.history_visibility_unsupported', { configured, effective: 'team' });
+  }
+  return 'team';
 }

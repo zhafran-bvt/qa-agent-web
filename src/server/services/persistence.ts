@@ -11,6 +11,7 @@ import type {
   WorkflowHistorySummary,
 } from '../../shared/contracts';
 import type { AccessibleResource } from './atlassian';
+import { decryptSecret, encryptionAvailable, encryptSecret } from './crypto';
 import type { Logger } from './logger';
 
 export interface SessionRecord {
@@ -87,8 +88,8 @@ export interface UserTestrailCreds {
 export interface Persistence {
   initialize(): Promise<void>;
   ping(): Promise<{ ok: boolean; database: boolean; mode: 'postgres' | 'file+memory-fallback'; error?: string }>;
-  storeOAuthState(state: string, createdAt: number): Promise<void>;
-  consumeOAuthState(state: string): Promise<boolean>;
+  storeOAuthState(state: string, createdAt: number, verifierHash?: string | null): Promise<void>;
+  consumeOAuthState(state: string, verifierHash?: string | null): Promise<boolean>;
   getSession(sid: string): Promise<SessionRecord | null>;
   setSession(sid: string, session: SessionRecord): Promise<void>;
   deleteSession(sid: string): Promise<void>;
@@ -169,12 +170,12 @@ class ResilientPersistence implements Persistence {
     return this.active.ping();
   }
 
-  storeOAuthState(state: string, createdAt: number): Promise<void> {
-    return this.active.storeOAuthState(state, createdAt);
+  storeOAuthState(state: string, createdAt: number, verifierHash?: string | null): Promise<void> {
+    return this.active.storeOAuthState(state, createdAt, verifierHash);
   }
 
-  consumeOAuthState(state: string): Promise<boolean> {
-    return this.active.consumeOAuthState(state);
+  consumeOAuthState(state: string, verifierHash?: string | null): Promise<boolean> {
+    return this.active.consumeOAuthState(state, verifierHash);
   }
 
   getSession(sid: string): Promise<SessionRecord | null> {
@@ -272,7 +273,7 @@ class ResilientPersistence implements Persistence {
 
 class FileBackedPersistence implements Persistence {
   private readonly sessions = new Map<string, SessionRecord>();
-  private readonly oauthStates = new Map<string, number>();
+  private readonly oauthStates = new Map<string, { createdAt: number; verifierHash: string | null }>();
   private readonly privacyStates = new Map<string, { lastReportedAt: number; lastCyclePeriodDays: number; lastStatus: 'ok' | 'closed' | 'updated'; lastReportedAgeSeconds: number }>();
   private readonly userTestrailCreds = new Map<string, UserTestrailCreds>();
   private lastPrivacyRunAt: number | null = null;
@@ -290,13 +291,14 @@ class FileBackedPersistence implements Persistence {
     };
   }
 
-  async storeOAuthState(state: string, createdAt: number): Promise<void> {
-    this.oauthStates.set(state, createdAt);
+  async storeOAuthState(state: string, createdAt: number, verifierHash?: string | null): Promise<void> {
+    this.oauthStates.set(state, { createdAt, verifierHash: verifierHash || null });
   }
 
-  async consumeOAuthState(state: string): Promise<boolean> {
-    const createdAt = this.oauthStates.get(state);
-    if (!createdAt) return false;
+  async consumeOAuthState(state: string, verifierHash?: string | null): Promise<boolean> {
+    const stored = this.oauthStates.get(state);
+    if (!stored) return false;
+    if (stored.verifierHash && stored.verifierHash !== verifierHash) return false;
     this.oauthStates.delete(state);
     return true;
   }
@@ -535,27 +537,29 @@ class PostgresPersistence implements Persistence {
     }
   }
 
-  async storeOAuthState(state: string, createdAt: number): Promise<void> {
+  async storeOAuthState(state: string, createdAt: number, verifierHash?: string | null): Promise<void> {
     await this.pool.query(
       `
-        INSERT INTO oauth_states (state, created_at)
-        VALUES ($1, to_timestamp($2 / 1000.0))
+        INSERT INTO oauth_states (state, created_at, verifier_hash)
+        VALUES ($1, to_timestamp($2 / 1000.0), $3)
         ON CONFLICT (state)
-        DO UPDATE SET created_at = EXCLUDED.created_at
+        DO UPDATE SET created_at = EXCLUDED.created_at,
+                      verifier_hash = EXCLUDED.verifier_hash
       `,
-      [state, createdAt]
+      [state, createdAt, verifierHash || null]
     );
   }
 
-  async consumeOAuthState(state: string): Promise<boolean> {
+  async consumeOAuthState(state: string, verifierHash?: string | null): Promise<boolean> {
     const result = await this.pool.query(
       `
         DELETE FROM oauth_states
         WHERE state = $1
           AND created_at >= NOW() - INTERVAL '15 minutes'
+          AND (verifier_hash IS NULL OR verifier_hash = $2)
         RETURNING state
       `,
-      [state]
+      [state, verifierHash || null]
     );
     await this.pool.query(`DELETE FROM oauth_states WHERE created_at < NOW() - INTERVAL '15 minutes'`);
     return Boolean(result.rowCount);
@@ -570,9 +574,12 @@ class PostgresPersistence implements Persistence {
     );
     const row = result.rows[0];
     if (!row) return null;
+    const accessToken = decodeStoredToken(row.access_token);
+    const refreshToken = row.refresh_token ? decodeStoredToken(row.refresh_token) : undefined;
+    if (!accessToken) return null;
     return {
-      accessToken: row.access_token,
-      refreshToken: row.refresh_token || undefined,
+      accessToken,
+      refreshToken,
       cloudId: row.cloud_id,
       resources: Array.isArray(row.resources_json) ? row.resources_json : [],
       selectedResource: row.selected_resource_json || null,
@@ -606,8 +613,8 @@ class PostgresPersistence implements Persistence {
          updated_at = NOW()`,
       [
         sid,
-        session.accessToken,
-        session.refreshToken || null,
+        encodeStoredToken(session.accessToken),
+        session.refreshToken ? encodeStoredToken(session.refreshToken) : null,
         session.cloudId,
         JSON.stringify(session.resources || []),
         JSON.stringify(session.selectedResource || null),
@@ -636,11 +643,14 @@ class PostgresPersistence implements Persistence {
     );
     const row = result.rows[0];
     if (!row) return null;
+    const accessToken = decodeStoredToken(row.access_token);
+    const refreshToken = row.refresh_token ? decodeStoredToken(row.refresh_token) : undefined;
+    if (!accessToken || !refreshToken) return null;
     return {
       sid: row.sid,
       session: {
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token || undefined,
+        accessToken,
+        refreshToken,
         cloudId: row.cloud_id,
         resources: Array.isArray(row.resources_json) ? row.resources_json : [],
         selectedResource: row.selected_resource_json || null,
@@ -666,11 +676,14 @@ class PostgresPersistence implements Persistence {
     );
     const row = result.rows[0];
     if (!row) return null;
+    const accessToken = decodeStoredToken(row.access_token);
+    const refreshToken = row.refresh_token ? decodeStoredToken(row.refresh_token) : undefined;
+    if (!accessToken || !refreshToken) return null;
     return {
       sid: row.sid,
       session: {
-        accessToken: row.access_token,
-        refreshToken: row.refresh_token || undefined,
+        accessToken,
+        refreshToken,
         cloudId: row.cloud_id,
         resources: Array.isArray(row.resources_json) ? row.resources_json : [],
         selectedResource: row.selected_resource_json || null,
@@ -1127,7 +1140,7 @@ export function createPersistence({
   const pool = new Pool({
     connectionString: databaseUrl,
     connectionTimeoutMillis: databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1') ? 5000 : 30000,
-    ssl: databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1') ? false : { rejectUnauthorized: false },
+    ssl: buildPostgresSslConfig(databaseUrl),
   });
   return new ResilientPersistence(
     new PostgresPersistence(pool, logger, migrationsDir || path.join(process.cwd(), 'src/server/migrations')),
@@ -1137,4 +1150,26 @@ export function createPersistence({
     allowFallbackOnInitError ? 1 : 6,
     5000
   );
+}
+
+export function buildPostgresSslConfig(databaseUrl: string): false | { rejectUnauthorized: boolean; ca?: string } {
+  const isLocal = databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1');
+  if (isLocal) return false;
+  const ca = process.env.DATABASE_CA_CERT || process.env.PGSSLROOTCERT_CONTENT;
+  return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
+}
+
+const TOKEN_PREFIX = 'enc:v1:';
+
+export function encodeStoredToken(token: string): string {
+  return encryptionAvailable() ? `${TOKEN_PREFIX}${encryptSecret(token)}` : token;
+}
+
+export function decodeStoredToken(token: string): string {
+  if (!token.startsWith(TOKEN_PREFIX)) return token;
+  try {
+    return decryptSecret(token.slice(TOKEN_PREFIX.length));
+  } catch {
+    return '';
+  }
 }
