@@ -75,12 +75,16 @@ test('file-backed persistence binds oauth state to verifier hash when present', 
   assert.equal(await persistence.consumeOAuthState('state-123', 'hash-a'), false);
 });
 
-test('remote postgres ssl config verifies certificates by default', () => {
+test('postgres ssl config: off locally, encrypted-but-unverified remote without a CA, strict with a CA', () => {
   const previousCa = process.env.DATABASE_CA_CERT;
   delete process.env.DATABASE_CA_CERT;
   try {
     assert.equal(buildPostgresSslConfig('postgres://user:pass@localhost:5432/db'), false);
-    assert.deepEqual(buildPostgresSslConfig('postgres://user:pass@db.example.com:5432/db'), { rejectUnauthorized: true });
+    // remote, no CA → encrypted but not chain-verified (managed PG serves a self-signed cert)
+    assert.deepEqual(buildPostgresSslConfig('postgres://user:pass@db.example.com:5432/db'), { rejectUnauthorized: false });
+    // remote, with a CA → strict verification against it
+    process.env.DATABASE_CA_CERT = 'FAKE-CA-PEM';
+    assert.deepEqual(buildPostgresSslConfig('postgres://user:pass@db.example.com:5432/db'), { rejectUnauthorized: true, ca: 'FAKE-CA-PEM' });
   } finally {
     if (previousCa === undefined) delete process.env.DATABASE_CA_CERT;
     else process.env.DATABASE_CA_CERT = previousCa;

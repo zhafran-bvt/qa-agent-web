@@ -1156,7 +1156,10 @@ export function buildPostgresSslConfig(databaseUrl: string): false | { rejectUna
   const isLocal = databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1');
   if (isLocal) return false;
   const ca = process.env.DATABASE_CA_CERT || process.env.PGSSLROOTCERT_CONTENT;
-  return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: true };
+  // With a CA we can verify strictly. Otherwise stay TLS-encrypted but don't verify the
+  // chain — managed Postgres (Railway/Heroku/etc.) serves a self-signed cert and provides
+  // no CA, so `rejectUnauthorized: true` would fail with "self-signed certificate in chain".
+  return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: false };
 }
 
 const TOKEN_PREFIX = 'enc:v1:';
