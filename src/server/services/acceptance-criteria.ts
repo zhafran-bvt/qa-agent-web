@@ -114,6 +114,7 @@ function isFeTestableRequirement(text: string): boolean {
 }
 
 export function parseMainIssueSections(text: string): ParsedIssueSection[] {
+  // Parse known Jira section headings so synthesis can reason over design-ticket structure.
   const lines = normalizeMultilineText(text)
     .split('\n')
     .map((line) => line.trim())
@@ -151,6 +152,7 @@ export function parseMainIssueSections(text: string): ParsedIssueSection[] {
 }
 
 export function assessAcceptanceCriteriaQuality(criteria: ScopedItem[]): CriteriaQualityAssessment {
+  // Gate deterministic extraction before synthesis; noisy fragments should not become canonical AC.
   if (!criteria.length) {
     return {
       quality: 'none',
@@ -228,6 +230,7 @@ function determineGranularityTarget(parsedSections: ParsedIssueSection[], descri
 }
 
 function determineContextGranularityTarget(context: QaContext, parsedSections: ParsedIssueSection[], description: string): GranularityTarget | null {
+  // Some ticket shapes need medium granularity to avoid one broad AC hiding several testable behaviors.
   const technicalTarget = determineGranularityTarget(parsedSections, description);
   if (technicalTarget) return technicalTarget;
 
@@ -494,6 +497,7 @@ function selectSourceExcerptMatches(
 }
 
 function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
+  // Attach small source excerpts for traceability without letting generic boilerplate become evidence.
   const authority = resolveAuthorityExcerptSource(context);
   if (!authority || !normalizeInlineText(authority.body)) {
     logger?.info('context.ac_excerpt_selection', {
@@ -609,6 +613,7 @@ export async function finalizeAcceptanceCriteria(
   context: QaContext,
   options: AcceptanceCriteriaFinalizationOptions = {}
 ): Promise<QaContext> {
+  // Finalization is the last chance to dedupe, repair granularity, synthesize weak AC, and attach traceability.
   const quality = assessAcceptanceCriteriaQuality(context.acceptanceCriteria || []);
   const mainIssueBody = context.mainIssue.description || context.mainIssue.renderedDescription || '';
   const parsedSections = parseMainIssueSections(mainIssueBody);

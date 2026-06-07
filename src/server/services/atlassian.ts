@@ -75,6 +75,7 @@ export interface SimplifiedIssue {
 const ATLASSIAN_TIMEOUT_MS = Number(process.env.ATLASSIAN_TIMEOUT_MS) || 20000;
 
 function requestJsonWithHeaders<T>(url: string, options: RequestOptions = {}, body?: unknown): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  // Centralizes Atlassian error handling so callers receive a useful Error instead of raw response bodies.
   return requestHttpsJson<T>({
     url,
     method: options.method || 'GET',
@@ -121,6 +122,7 @@ function buildConfluenceWebUrl(siteUrl: string | null | undefined, webUi?: strin
 }
 
 export function buildAuthUrl(config: AtlassianAuthConfig, state: string): string {
+  // Atlassian OAuth is authorization-code only here; state is bound again in index.ts with a verifier cookie.
   const url = new URL(ATLASSIAN_AUTH_URL);
   url.searchParams.set('audience', 'api.atlassian.com');
   url.searchParams.set('client_id', config.clientId);
@@ -208,6 +210,7 @@ export async function reportPersonalData(accessToken: string, accounts: Personal
 }
 
 export function extractText(value: unknown): string {
+  // Atlassian returns descriptions/comments as ADF, rendered HTML, or JSON strings; flatten all of them for QA prompts.
   if (!value) return '';
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -361,6 +364,7 @@ export class AtlassianClient {
   }
 
   private async requestWithRefresh<T>(request: () => Promise<T>): Promise<T> {
+    // Refresh shortly before expiry and retry once on 401 to cover clock skew or revoked short-lived access tokens.
     await this.ensureFreshToken();
     try {
       return await request();
@@ -431,6 +435,7 @@ export class AtlassianClient {
   }
 
   async getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string; adf?: unknown }> {
+    // A Jira site and its Confluence page can resolve under different cloud IDs, so try every authorized resource.
     const tried = new Set<string>();
     const candidates = [this.cloudId, ...this.resources.map((resource) => resource.id)].filter((id) => {
       if (!id || tried.has(id)) return false;
@@ -505,6 +510,7 @@ export class AtlassianClient {
 }
 
 function simplifyIssue(issue: Record<string, any>, siteUrl?: string | null): SimplifiedIssue {
+  // Collapse the Jira REST shape into the stable context object consumed by scope extraction and prompts.
   const fields = issue.fields || {};
   const descriptionText = extractText(fields.description);
   const renderedDescription = (issue.renderedFields && issue.renderedFields.description) || '';

@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import type { TrPlanSummary, TrStatusDistribution } from '../../../shared/contracts';
-import { loadPlanRunCounts } from '../../api';
+import type { TrPlanReviewResponse, TrPlanSummary, TrStatusDistribution } from '../../../shared/contracts';
+import { loadPlanRunCounts, loadTestRailPlanReview } from '../../api';
 import type { UiLanguage } from '../../i18n';
 import { uiText } from '../../i18n';
+import { PlanReviewModal } from './PlanReviewModal';
 import { statusTone, STATUS_ORDER } from './status';
 
 const PAGE_SIZE = 20;
@@ -49,9 +50,10 @@ interface PlanSectionProps {
   reporterUrl: string;
   runCounts: Record<string, number>;
   onVisibleIds: (ids: string[]) => void;
+  onReviewPlan: (plan: TrPlanSummary) => void;
 }
 
-function PlanSection({ lang, plans, reporterUrl, runCounts, onVisibleIds }: PlanSectionProps) {
+function PlanSection({ lang, plans, reporterUrl, runCounts, onVisibleIds, onReviewPlan }: PlanSectionProps) {
   const t = uiText[lang].dashboard;
   const [page, setPage] = useState(0);
   const totalPages = Math.max(1, Math.ceil(plans.length / PAGE_SIZE));
@@ -86,12 +88,15 @@ function PlanSection({ lang, plans, reporterUrl, runCounts, onVisibleIds }: Plan
           {pagePlans.map((plan) => (
             <tr key={plan.planId}>
               <td>
-                <a className="tr-plan-name" href={planReportHref(reporterUrl, plan)} target="_blank" rel="noreferrer" title={t.openReport}>
+                <button className="tr-plan-name" type="button" title={t.reviewOpen} onClick={() => onReviewPlan(plan)}>
                   {plan.planName}
+                </button>
+                <a className="tr-plan-ext" href={plan.webUrl} target="_blank" rel="noreferrer" title={t.openInTestRail} aria-label={t.openInTestRail}>
+                  ↗
                 </a>
                 {reporterUrl ? (
-                  <a className="tr-plan-ext" href={plan.webUrl} target="_blank" rel="noreferrer" title={t.openInTestRail} aria-label={t.openInTestRail}>
-                    ↗
+                  <a className="tr-plan-ext tr-plan-report" href={planReportHref(reporterUrl, plan)} target="_blank" rel="noreferrer" title={t.openReport} aria-label={t.openReport}>
+                    Report
                   </a>
                 ) : null}
                 <span className={`tr-state tr-state-${plan.isCompleted ? 'completed' : 'active'}`}>
@@ -137,6 +142,10 @@ function PlanSection({ lang, plans, reporterUrl, runCounts, onVisibleIds }: Plan
 export function PlanList({ lang, plans, reporterUrl }: PlanListProps) {
   const t = uiText[lang].dashboard;
   const [runCounts, setRunCounts] = useState<Record<string, number>>({});
+  const [reviewPlan, setReviewPlan] = useState<TrPlanSummary | null>(null);
+  const [review, setReview] = useState<TrPlanReviewResponse | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState('');
 
   function requestCounts(ids: string[]) {
     const missing = ids.filter((id) => runCounts[id] === undefined);
@@ -144,6 +153,30 @@ export function PlanList({ lang, plans, reporterUrl }: PlanListProps) {
     loadPlanRunCounts(missing)
       .then((res) => setRunCounts((current) => ({ ...current, ...res.counts })))
       .catch(() => {});
+  }
+
+  function requestVisible(ids: string[]) {
+    requestCounts(ids);
+  }
+
+  function openReview(plan: TrPlanSummary) {
+    setReviewPlan(plan);
+    setReview(null);
+    setReviewError('');
+    setReviewLoading(true);
+    loadTestRailPlanReview(plan.planId)
+      .then((response) => {
+        setReview(response);
+        setReviewError('');
+      })
+      .catch((error) => {
+        setReviewError((error as Error).message || t.reviewError);
+      })
+      .finally(() => setReviewLoading(false));
+  }
+
+  function retryReview() {
+    if (reviewPlan) openReview(reviewPlan);
   }
 
   const sprint = plans.filter((p) => hasJiraKey(p.planName));
@@ -161,7 +194,26 @@ export function PlanList({ lang, plans, reporterUrl }: PlanListProps) {
           {t.sectionNonSprint} <span className="tr-plan-count">{nonSprint.length}</span>
         </button>
       </div>
-      <PlanSection key={tab} lang={lang} plans={active} reporterUrl={reporterUrl} runCounts={runCounts} onVisibleIds={requestCounts} />
+      <PlanSection
+        key={tab}
+        lang={lang}
+        plans={active}
+        reporterUrl={reporterUrl}
+        runCounts={runCounts}
+        onVisibleIds={requestVisible}
+        onReviewPlan={openReview}
+      />
+      {reviewPlan ? (
+        <PlanReviewModal
+          lang={lang}
+          plan={reviewPlan}
+          review={review}
+          loading={reviewLoading}
+          error={reviewError}
+          onRetry={retryReview}
+          onClose={() => setReviewPlan(null)}
+        />
+      ) : null}
     </div>
   );
 }

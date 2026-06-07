@@ -18,6 +18,7 @@ import type {
   ScopeSnapshotTranslationResponse,
   TestrailCredentialsStatus,
   TestRailManageResponse,
+  TrPlanReviewResponse,
   TestRailPlansResponse,
   TestRailSummaryResponse,
   TicketSuggestionsResponse,
@@ -28,6 +29,7 @@ import type {
 } from '../shared/contracts';
 
 async function requestJson<T>(path: string, options: RequestInit = {}): Promise<T> {
+  // Browser API wrapper: every backend route returns JSON errors, so surface those messages directly to the UI.
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -53,6 +55,19 @@ export function loadTicketSuggestions(): Promise<TicketSuggestionsResponse> {
 export function loadTestRailPlans(projectId?: string): Promise<TestRailPlansResponse> {
   const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
   return requestJson<TestRailPlansResponse>(`/api/testrail/plans${query}`);
+}
+
+export function loadTestRailPlanReview(planId: string | number): Promise<TrPlanReviewResponse> {
+  return requestJson<TrPlanReviewResponse>(`/api/testrail/plans/${encodeURIComponent(String(planId))}/review`);
+}
+
+/** URL for the attachment proxy — used as a <video>/<img> src or an Open/Download href. */
+export function testrailAttachmentUrl(id: string | number, name?: string, download = false): string {
+  const params = new URLSearchParams();
+  if (name) params.set('name', name);
+  if (download) params.set('download', '1');
+  const query = params.toString();
+  return `/api/testrail/attachments/${encodeURIComponent(String(id))}${query ? `?${query}` : ''}`;
 }
 
 export function loadTestRailSummary(): Promise<TestRailSummaryResponse> {
@@ -146,6 +161,7 @@ export function updateTestRailPlan(planId: string | number, payload: ManageRunRe
 }
 
 function deleteManage(resource: 'case' | 'run' | 'plan', id: string | number, dryRun = false): Promise<TestRailManageResponse> {
+  // TestRail delete endpoints support dry-run through the server so dangerous actions can be previewed.
   const query = dryRun ? '?dry_run=true' : '';
   return requestJson<TestRailManageResponse>(`/api/testrail/manage/${resource}/${encodeURIComponent(String(id))}${query}`, {
     method: 'DELETE',

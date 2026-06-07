@@ -29,6 +29,7 @@ export async function runPrivacyReportingCycle({
   };
   logger: Logger;
 }): Promise<void> {
+  // Atlassian requires periodic personal-data reporting for stored account ids; this batches due accounts.
   const now = Date.now();
   const status = await persistence.getPrivacyReportingStatus(DEFAULT_CYCLE_DAYS, now);
   const dueAccounts = await persistence.listPrivacyReportingAccountsDue(now, status.lastCyclePeriodDays || DEFAULT_CYCLE_DAYS, MAX_REPORT_BATCH);
@@ -115,6 +116,7 @@ export function startPrivacyReportingLoop({
   enabled?: boolean;
   intervalMs?: number;
 }): { stop(): void } {
+  // The loop is non-blocking for app startup and guards against overlapping cycles.
   if (!enabled) {
     logger.info('privacy.reporting.disabled');
     return { stop() {} };

@@ -83,6 +83,7 @@ function stripAcceptanceCriteriaSections(text: string): string {
 }
 
 export function buildScopePriorityContext(context: GenerateContext) {
+  // Compress the analyzed context into the authority model the generation prompt uses to avoid scope drift.
   if (context.scopeAuthority && context.scopeAuthority.type !== 'none') {
     return {
       primaryAuthority: context.scopeAuthority.type,
@@ -175,6 +176,7 @@ function requestJson<T>(url: string, headers: Record<string, string>, body: unkn
 }
 
 function extractJson(text: string): unknown {
+  // Providers sometimes wrap JSON in markdown or prose; accept common wrappers but still parse strict JSON.
   const trimmed = String(text || '').trim();
   if (!trimmed) throw new Error('LLM provider returned an empty response.');
 
@@ -193,6 +195,7 @@ function extractJson(text: string): unknown {
 }
 
 export function findCaseArray(value: unknown): unknown[] | null {
+  // Be tolerant of provider-specific response keys while requiring an array that looks like test cases.
   if (Array.isArray(value)) return value;
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
@@ -263,6 +266,7 @@ export function buildDeterministicDuplicateRecommendations(
   existingCases: ExistingTestRailCase[],
   generatedCases: GeneratedTestCase[]
 ): DuplicateCaseRecommendation[] {
+  // Exact normalized-title matches are deterministic duplicates and do not need an LLM opinion.
   const existingByTitle = new Map<string, ExistingTestRailCase[]>();
   for (const existingCase of existingCases) {
     const normalizedTitle = normalizeComparableText(existingCase.title);
@@ -421,6 +425,7 @@ function normalizeScopedItems(
   sourceExcerptUrl?: string;
   sourceExcerptKind?: 'jira' | 'prd';
 }> {
+  // Localized scope snapshots must preserve ids and source excerpts from the original English context.
   if (!Array.isArray(value)) return fallback;
   const fallbackById = new Map(fallback.map((item) => [item.id, item]));
   const localizedItems = value.map((item) => ((item || {}) as Record<string, unknown>));
@@ -507,6 +512,7 @@ export function normalizeScopeSnapshotTranslation(
 }
 
 export function normalizeCase(testCase: Record<string, unknown>, index: number): GeneratedTestCase {
+  // Normalize several likely LLM/TestRail field names into the app's stable GeneratedTestCase contract.
   const evidenceRecord = (testCase.evidence && typeof testCase.evidence === 'object' ? (testCase.evidence as Record<string, unknown>) : {}) || {};
 
   return {
@@ -623,6 +629,7 @@ export function buildGenerationPromptContext(context: GenerateContext) {
 }
 
 async function synthesizeWithProvider(provider: ProviderConfig, input: AcceptanceCriteriaSynthesisInput): Promise<ProviderSynthesisResult> {
+  // Synthesis is conservative: it canonicalizes or splits supported requirements, but must not broaden scope.
   const prdScopedThinTicket = input.acceptanceCriteriaSource === 'parent_story_confluence_section' && input.thinTicketFallbackUsed;
   const targetInstruction =
     input.targetMinCriteria && input.targetMaxCriteria

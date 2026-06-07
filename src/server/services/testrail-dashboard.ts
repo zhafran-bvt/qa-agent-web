@@ -1,6 +1,27 @@
-import type { TrPlanSummary, TrSummary } from '../../shared/contracts';
-import { extractRunsFromPlan, getCases, getPlan, getPlans, getUser, normalizeRefTokens, type TestRailConfig } from './testrail';
+import type {
+  TrAttachmentSummary,
+  TrEvidenceStatus,
+  TrPlanReviewResponse,
+  TrPlanReviewRun,
+  TrPlanReviewTest,
+  TrPlanSummary,
+  TrSummary,
+} from '../../shared/contracts';
 import {
+  extractRunsFromPlan,
+  getAttachmentsForTest,
+  getCases,
+  getPlan,
+  getPlans,
+  getResultsForRun,
+  getStatuses,
+  getTests,
+  getUser,
+  normalizeRefTokens,
+  type TestRailConfig,
+} from './testrail';
+import {
+  DEFAULT_STATUS_MAP,
   calculateCompletionRate,
   calculatePassRate,
   statusDistributionFromCounts,
@@ -19,6 +40,10 @@ function distributionTotal(distribution: StatusDistribution): number {
 
 function planWebUrl(config: TestRailConfig, planId: number): string {
   return `${config.baseUrl.replace(/\/$/, '')}/index.php?/plans/view/${planId}`;
+}
+
+function runWebUrl(config: TestRailConfig, runId: number): string {
+  return `${config.baseUrl.replace(/\/$/, '')}/index.php?/runs/view/${runId}`;
 }
 
 function summarizePlan(config: TestRailConfig, plan: Record<string, unknown>, userMap?: Map<number, string>): TrPlanSummary {
@@ -43,6 +68,11 @@ function summarizePlan(config: TestRailConfig, plan: Record<string, unknown>, us
     createdByName: createdBy ? userMap?.get(createdBy) || '' : '',
     webUrl: planWebUrl(config, planId),
   };
+}
+
+function statusName(statusId: number | null, statusMap: Record<number, string>): string {
+  if (statusId === null) return 'Untested';
+  return statusMap[statusId] || 'Unknown';
 }
 
 const usersTtl = Number(process.env.DASHBOARD_USERS_CACHE_TTL_MS || 600_000);
@@ -169,6 +199,30 @@ export async function findPlansForStory(config: TestRailConfig, storyKey: string
 const planRunCountTtl = Number(process.env.DASHBOARD_PLAN_RUNS_CACHE_TTL_MS || 180_000);
 const planRunCountCache = new TtlCache<number>(planRunCountTtl, 512);
 
+const planReviewTtl = Number(process.env.DASHBOARD_PLAN_REVIEW_CACHE_TTL_MS || 60_000);
+const planReviewCache = new TtlCache<TrPlanReviewResponse>(planReviewTtl, 128);
+const statusesCache = new TtlCache<Record<number, string>>(Number(process.env.DASHBOARD_STATUSES_CACHE_TTL_MS || 600_000), 32);
+
+async function getStatusMap(config: TestRailConfig): Promise<Record<number, string>> {
+  const cacheKey = `statuses:${config.baseUrl}`;
+  const cached = statusesCache.get(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const statuses = await getStatuses(config);
+    const statusMap = { ...DEFAULT_STATUS_MAP };
+    for (const status of statuses) {
+      const id = num(status.id, 0);
+      const label = String(status.label || status.name || '').trim();
+      if (id && label) statusMap[id] = label;
+    }
+    statusesCache.set(cacheKey, statusMap);
+    return statusMap;
+  } catch {
+    return DEFAULT_STATUS_MAP;
+  }
+}
+
 /** Run counts for specific plans, fetched per-plan (detail) with bounded concurrency + cache. */
 export async function getPlanRunCounts(config: TestRailConfig, planIds: Array<number | string>): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
@@ -198,9 +252,228 @@ export async function getSummary(config: TestRailConfig, projectId?: string): Pr
   return summarizePlans(plans, pid);
 }
 
+function resultId(value: Record<string, unknown> | null | undefined): number | string | null {
+  if (!value || typeof value !== 'object') return null;
+  const id = value.id ?? value.result_id;
+  if (typeof id === 'number' || typeof id === 'string') return id;
+  return null;
+}
+
+function attachmentLinkedResultId(value: Record<string, unknown>): number | string | null {
+  const entityType = String(value.entity_type || '').toLowerCase();
+  const raw = value.result_id ?? (entityType === 'result' || entityType === 'test_change' ? value.entity_id : null);
+  if (typeof raw === 'number' || typeof raw === 'string') return raw;
+  return null;
+}
+
+function idsEqual(left: number | string | null, right: number | string | null): boolean {
+  if (left === null || right === null) return false;
+  return String(left) === String(right);
+}
+
+function latestPassedResult(results: Record<string, unknown>[]): Record<string, unknown> | null {
+  const passed = results.filter((result) => num(result.status_id, 0) === 1);
+  if (!passed.length) return null;
+  return passed.sort((left, right) => {
+    const createdDelta = num(right.created_on, 0) - num(left.created_on, 0);
+    if (createdDelta) return createdDelta;
+    return num(right.id ?? right.result_id, 0) - num(left.id ?? left.result_id, 0);
+  })[0];
+}
+
+function attachmentSummary(raw: Record<string, unknown>): TrAttachmentSummary {
+  const id = raw.id ?? raw.attachment_id ?? raw.data_id ?? '';
+  return {
+    id: String(id),
+    name: String(raw.name || raw.filename || raw.id || 'Attachment'),
+    createdOn: typeof raw.created_on === 'number' ? raw.created_on : null,
+    size: typeof raw.size === 'number' ? raw.size : null,
+  };
+}
+
+function evidenceForPassedTest(
+  latestResult: Record<string, unknown> | null,
+  attachments: Record<string, unknown>[]
+): { evidenceStatus: TrEvidenceStatus; latestResultId: number | string | null; matchedAttachments: TrAttachmentSummary[] } {
+  const latestResultId = resultId(latestResult);
+  if (!latestResult || latestResultId === null) {
+    return { evidenceStatus: 'unknown', latestResultId, matchedAttachments: [] };
+  }
+  if (!attachments.length) {
+    return { evidenceStatus: 'missing', latestResultId, matchedAttachments: [] };
+  }
+
+  const linked = attachments.filter((attachment) => idsEqual(attachmentLinkedResultId(attachment), latestResultId));
+  if (linked.length) {
+    return { evidenceStatus: 'present', latestResultId, matchedAttachments: linked.map(attachmentSummary) };
+  }
+
+  const hasReliableResultLink = attachments.some((attachment) => attachmentLinkedResultId(attachment) !== null);
+  return {
+    evidenceStatus: hasReliableResultLink ? 'missing' : 'unknown',
+    latestResultId,
+    matchedAttachments: [],
+  };
+}
+
+export function buildPlanReviewRun(
+  config: TestRailConfig,
+  run: Record<string, unknown>,
+  tests: Record<string, unknown>[],
+  resultsByTestId: Map<number, Record<string, unknown>[]>,
+  attachmentsByTestId: Map<number, Record<string, unknown>[]>,
+  userMap = new Map<number, string>(),
+  statusMap: Record<number, string> = DEFAULT_STATUS_MAP
+): TrPlanReviewRun {
+  const runId = num(run.id);
+  const reviewTests: TrPlanReviewTest[] = tests.map((test) => {
+    const testId = num(test.id);
+    const caseId = num(test.case_id);
+    const statusId = test.status_id === null || test.status_id === undefined ? null : num(test.status_id, 0);
+    const status = statusName(statusId, statusMap);
+    const assigneeId = test.assignedto_id === null || test.assignedto_id === undefined ? null : num(test.assignedto_id, 0);
+
+    if (status !== 'Passed') {
+      return {
+        testId,
+        caseId,
+        title: String(test.title || `Test ${testId}`),
+        statusId,
+        status,
+        assigneeId,
+        assigneeName: assigneeId ? userMap.get(assigneeId) || '' : '',
+        refs: String(test.refs || ''),
+        elapsed: String(test.elapsed || ''),
+        defects: String(test.defects || ''),
+        latestResultId: null,
+        evidenceStatus: 'not_required',
+        attachments: [],
+      };
+    }
+
+    const evidence = evidenceForPassedTest(
+      latestPassedResult(resultsByTestId.get(testId) || []),
+      attachmentsByTestId.get(testId) || []
+    );
+
+    return {
+      testId,
+      caseId,
+      title: String(test.title || `Test ${testId}`),
+      statusId,
+      status,
+      assigneeId,
+      assigneeName: assigneeId ? userMap.get(assigneeId) || '' : '',
+      refs: String(test.refs || ''),
+      elapsed: String(test.elapsed || ''),
+      defects: String(test.defects || ''),
+      latestResultId: evidence.latestResultId,
+      evidenceStatus: evidence.evidenceStatus,
+      attachments: evidence.matchedAttachments,
+    };
+  });
+
+  const distribution = calculateReviewDistribution(reviewTests);
+  const evidencePresentCount = reviewTests.filter((test) => test.evidenceStatus === 'present').length;
+  const evidenceMissingCount = reviewTests.filter((test) => test.evidenceStatus === 'missing').length;
+  const evidenceUnknownCount = reviewTests.filter((test) => test.evidenceStatus === 'unknown').length;
+  const evidenceNotRequiredCount = reviewTests.filter((test) => test.evidenceStatus === 'not_required').length;
+  const passedCount = distribution.Passed || reviewTests.filter((test) => test.status === 'Passed').length;
+
+  return {
+    runId,
+    runName: String(run.name || `Run ${runId}`),
+    isCompleted: run.is_completed === true,
+    totalTests: reviewTests.length,
+    statusDistribution: distribution,
+    passRate: calculatePassRate(distribution),
+    completionRate: calculateCompletionRate(distribution),
+    passedCount,
+    evidencePresentCount,
+    evidenceMissingCount,
+    evidenceUnknownCount,
+    evidenceNotRequiredCount,
+    tests: reviewTests,
+    webUrl: runWebUrl(config, runId),
+  };
+}
+
+function calculateReviewDistribution(tests: TrPlanReviewTest[]): StatusDistribution {
+  const distribution: StatusDistribution = {};
+  for (const test of tests) {
+    distribution[test.status] = (distribution[test.status] || 0) + 1;
+  }
+  return distribution;
+}
+
+function summarizeReview(plan: TrPlanSummary, runs: TrPlanReviewRun[]): TrPlanReviewResponse {
+  return {
+    plan,
+    runs,
+    summary: {
+      totalRuns: runs.length,
+      totalTests: runs.reduce((sum, run) => sum + run.totalTests, 0),
+      passedCount: runs.reduce((sum, run) => sum + run.passedCount, 0),
+      evidencePresentCount: runs.reduce((sum, run) => sum + run.evidencePresentCount, 0),
+      evidenceMissingCount: runs.reduce((sum, run) => sum + run.evidenceMissingCount, 0),
+      evidenceUnknownCount: runs.reduce((sum, run) => sum + run.evidenceUnknownCount, 0),
+      evidenceNotRequiredCount: runs.reduce((sum, run) => sum + run.evidenceNotRequiredCount, 0),
+    },
+  };
+}
+
+export async function getPlanReview(config: TestRailConfig, planId: number | string): Promise<TrPlanReviewResponse> {
+  const cacheKey = `review:${config.baseUrl}:${config.projectId || ''}:${planId}`;
+  const cached = planReviewCache.get(cacheKey);
+  if (cached) return cached;
+
+  const rawPlan = await getPlan(config, planId);
+  const plan = summarizePlan(config, rawPlan);
+  const rawRuns = extractRunsFromPlan(rawPlan);
+  const userIds = new Set<number>();
+  const statusMap = await getStatusMap(config);
+
+  const runs = await mapWithConcurrency(rawRuns, 3, async (run) => {
+    const runId = num(run.id);
+    const tests = await getTests(config, runId);
+    for (const test of tests) {
+      const assigneeId = num(test.assignedto_id, 0);
+      if (assigneeId) userIds.add(assigneeId);
+    }
+    const passedTests = tests.filter((test) => num(test.status_id, 0) === 1);
+    // One results call for the whole run (grouped by test) instead of one per passed test.
+    const resultsByTestId = new Map<number, Record<string, unknown>[]>();
+    const allResults = await getResultsForRun(config, runId).catch(() => []);
+    for (const result of allResults) {
+      const testId = num(result.test_id, 0);
+      if (!testId) continue;
+      const bucket = resultsByTestId.get(testId);
+      if (bucket) bucket.push(result);
+      else resultsByTestId.set(testId, [result]);
+    }
+    // Attachments still per passed test (no reliable run-level attachments endpoint).
+    const attachmentsByTestId = new Map<number, Record<string, unknown>[]>();
+    await mapWithConcurrency(passedTests, 4, async (test) => {
+      const testId = num(test.id);
+      attachmentsByTestId.set(testId, await getAttachmentsForTest(config, testId).catch(() => []));
+    });
+    return { run, tests, resultsByTestId, attachmentsByTestId };
+  });
+
+  const userMap = await resolveUserNames(config, [...userIds]);
+  const reviewRuns = runs.map(({ run, tests, resultsByTestId, attachmentsByTestId }) =>
+    buildPlanReviewRun(config, run, tests, resultsByTestId, attachmentsByTestId, userMap, statusMap)
+  );
+  const review = summarizeReview(plan, reviewRuns);
+  planReviewCache.set(cacheKey, review);
+  return review;
+}
+
 export function clearDashboardCaches(): void {
   plansCache.clear();
   coverageCache.clear();
   planRunCountCache.clear();
+  planReviewCache.clear();
+  statusesCache.clear();
   userNameCache.clear();
 }

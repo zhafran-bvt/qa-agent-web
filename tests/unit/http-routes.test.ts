@@ -73,14 +73,15 @@ test('auth start route reports missing OAuth config cleanly', async () => {
 });
 
 test('authenticated API routes reject unauthenticated access', async () => {
-  const [historyResponse, pushResponse, pushPreflightResponse, suggestionsResponse] = await Promise.all([
+  const [historyResponse, pushResponse, pushPreflightResponse, suggestionsResponse, planReviewResponse] = await Promise.all([
     fetch(`http://127.0.0.1:${serverPort}/api/history/runs`),
     fetch(`http://127.0.0.1:${serverPort}/api/push`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     fetch(`http://127.0.0.1:${serverPort}/api/push/preflight`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
     fetch(`http://127.0.0.1:${serverPort}/api/suggestions/tickets`),
+    fetch(`http://127.0.0.1:${serverPort}/api/testrail/plans/241/review`),
   ]);
 
-  for (const response of [historyResponse, pushResponse, pushPreflightResponse, suggestionsResponse]) {
+  for (const response of [historyResponse, pushResponse, pushPreflightResponse, suggestionsResponse, planReviewResponse]) {
     const body = await response.json();
     assert.equal(response.status, 401);
     assert.equal(body.error, 'Atlassian login required.');

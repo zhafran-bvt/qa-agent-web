@@ -17,9 +17,9 @@ import { buildQaContext } from './services/context-builder';
 import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildTicketSuggestionsJql } from './services/suggestions';
-import { buildManageCaseBody, findExistingCasesByJiraRef, getUserByEmail, pushCases, trWrite, type TestRailConfig } from './services/testrail';
+import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
 import { decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
-import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
+import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -53,6 +53,7 @@ const OAUTH_VERIFIER_COOKIE = 'qa_oauth';
 loadEnv(path.join(PROJECT_ROOT, '.env'));
 
 function normalizeAtlassianScopes(rawScopes: string): string {
+  // Always include the scopes the app relies on, even if ATLASSIAN_SCOPES is customized.
   const required = [
     'read:jira-work',
     'read:page:confluence',
@@ -145,6 +146,8 @@ function buildSessionCookie(value: string, maxAge?: number): string {
   return parts.join('; ');
 }
 
+// OAuth state is paired with this callback-scoped verifier cookie so a valid
+// callback URL from one browser cannot create a session in another browser.
 function buildOAuthVerifierCookie(value: string, maxAge = 900): string {
   const parts = [`${OAUTH_VERIFIER_COOKIE}=${encodeURIComponent(value || '')}`, 'HttpOnly', 'Path=/auth/atlassian/callback', 'SameSite=Lax'];
   if (typeof maxAge === 'number') parts.push(`Max-Age=${maxAge}`);
@@ -156,6 +159,8 @@ function clearOAuthVerifierCookie(): string {
   return buildOAuthVerifierCookie('', 0);
 }
 
+// Store only a hash of the browser verifier server-side; the raw verifier stays
+// in the HttpOnly callback cookie and is cleared after success or failure.
 function hashOAuthVerifier(verifier: string): string {
   return crypto.createHash('sha256').update(verifier).digest('base64url');
 }
@@ -201,6 +206,7 @@ async function requireSession(req: IncomingMessage, res: ServerResponse) {
 }
 
 async function readBody<T>(req: IncomingMessage): Promise<T> {
+  // Keep request parsing dependency-free, but cap body size so large payloads cannot exhaust memory.
   const maxBodyBytes = Number(process.env.MAX_REQUEST_BODY_BYTES || 1_000_000);
   let body = '';
   for await (const chunk of req) {
@@ -228,6 +234,7 @@ async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise
   const normalizedClientDir = path.resolve(CLIENT_DIST_DIR);
   const normalizedAssetPath = path.resolve(assetPath);
 
+  // Defend the static file server from path traversal before reading from client-dist.
   if (!normalizedAssetPath.startsWith(normalizedClientDir)) {
     sendError(res, 403, 'Forbidden');
     return;
@@ -244,6 +251,7 @@ async function serveFrontend(req: IncomingMessage, res: ServerResponse): Promise
 }
 
 async function refreshSessionToken(sid: string, session: SessionRecord, log = logger): Promise<SessionRecord> {
+  // Refresh through persistence first so concurrent requests use the newest refresh token.
   const current = (await persistence.getSession(sid)) || session;
   if (!current.refreshToken) {
     throw new Error('Atlassian session cannot be refreshed because no refresh token is stored.');
@@ -292,6 +300,7 @@ function createClient(sid: string, session: SessionRecord, log = logger): Atlass
 }
 
 function choosePrimaryResource(resources: AccessibleResource[]): AccessibleResource | null {
+  // A user can authorize multiple Atlassian sites; prefer explicit env config, then the known production host, then first available.
   if (!resources.length) return null;
   const preferredHost = String(process.env.ATLASSIAN_SITE_HOST || '').trim().toLowerCase();
   if (preferredHost) {
@@ -353,6 +362,7 @@ function shouldLogRequestAtInfo(pathname: string, statusCode: number): boolean {
 }
 
 function shouldEnforceAcceptanceCriteria(context: QaContext | null, _confidencePermissionApproved: boolean): boolean {
+  // Acceptance-criteria coverage is enforced only when the analyzer found criteria trustworthy enough to track.
   if (!context) return false;
   return Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
 }
@@ -770,6 +780,76 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  if (req.method === 'GET' && /^\/api\/testrail\/plans\/[^/]+\/review$/.test(url.pathname)) {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const planId = decodeURIComponent(url.pathname.replace(/^\/api\/testrail\/plans\//, '').replace(/\/review$/, ''));
+    if (!planId.trim()) {
+      sendError(res, 400, 'A plan ID is required.');
+      return;
+    }
+    try {
+      const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
+      sendJson(res, 200, await getPlanReview(trConfig, planId));
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to load plan review.');
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && /^\/api\/testrail\/attachments\/[^/]+$/.test(url.pathname)) {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const attachmentId = decodeURIComponent(url.pathname.replace(/^\/api\/testrail\/attachments\//, ''));
+    if (!attachmentId.trim()) {
+      sendError(res, 400, 'An attachment ID is required.');
+      return;
+    }
+    try {
+      const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
+      const { stream, statusCode, headers } = await fetchAttachment(trConfig, attachmentId);
+      if (statusCode < 200 || statusCode >= 300) {
+        let raw = '';
+        for await (const chunk of stream) raw += chunk;
+        let message = `HTTP ${statusCode}`;
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          if (parsed?.error) message = String(parsed.error);
+        } catch {
+          /* non-JSON upstream error body */
+        }
+        sendError(res, statusCode === 404 ? 404 : 502, message);
+        return;
+      }
+      // Client passes the filename so the Content-Disposition is meaningful; sanitise header-unsafe chars.
+      const rawName = (url.searchParams.get('name') || `attachment-${attachmentId}`).replace(/[\r\n"\\]/g, '').slice(0, 200);
+      const download = url.searchParams.get('download') === '1';
+      const upstreamType = String(headers['content-type'] || '');
+      const contentType =
+        guessAttachmentMime(rawName) || (upstreamType && !/octet-stream/i.test(upstreamType) ? upstreamType : '') || 'application/octet-stream';
+      const length = headers['content-length'];
+      res.writeHead(200, {
+        'Content-Type': contentType,
+        'Content-Disposition': `${download ? 'attachment' : 'inline'}; filename="${rawName}"`,
+        'Cache-Control': 'private, max-age=300',
+        ...(length ? { 'Content-Length': length } : {}),
+      });
+      stream.on('error', () => res.destroy());
+      stream.pipe(res);
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to load attachment.');
+    }
+    return;
+  }
+
   if (req.method === 'GET' && url.pathname === '/api/testrail/coverage') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -837,6 +917,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  // Analyze builds the scope snapshot from Jira/Confluence, then finalizes criteria before anything is generated.
   if (req.method === 'POST' && url.pathname === '/api/analyze') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -921,6 +1002,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  // Generate is intentionally gated by scope confidence and AC coverage so the model cannot silently expand weak scope.
   if (req.method === 'POST' && url.pathname === '/api/generate') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -1045,6 +1127,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  // Preflight catches validation, coverage, and duplicate TestRail cases before the irreversible push.
   if (req.method === 'POST' && url.pathname === '/api/push/preflight') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -1134,6 +1217,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     return;
   }
 
+  // Push repeats the same validation gates as preflight because callers can invoke this route directly.
   if (req.method === 'POST' && url.pathname === '/api/push') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
@@ -1231,6 +1315,7 @@ async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logge
     return;
   }
 
+  // Callback must prove both the server-side state and the browser-bound verifier cookie.
   if (url.pathname === '/auth/atlassian/callback') {
     const state = url.searchParams.get('state');
     const code = url.searchParams.get('code');
@@ -1415,6 +1500,8 @@ function validateStartupConfig(): void {
   }
 }
 
+// Workflow history is intentionally team-visible. Keep this helper explicit so
+// future contributors do not mistake the global history query for an auth bug.
 function historyVisibility(): 'team' {
   const configured = String(process.env.QA_HISTORY_VISIBILITY || 'team').trim().toLowerCase();
   if (configured !== 'team') {

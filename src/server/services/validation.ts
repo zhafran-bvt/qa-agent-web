@@ -60,6 +60,7 @@ export function normalizeList(value: unknown): string[] {
 }
 
 export function validateCase(testCase: GeneratedLikeCase, options: ValidationOptions = {}) {
+  // Server-side validation mirrors the UI gates and protects direct API callers before TestRail writes.
   const errors: string[] = [];
   const warnings: string[] = [];
   const jiraKey = normalizeText(options.jiraKey).toUpperCase();
@@ -155,6 +156,7 @@ export function buildCoverage(
   acceptanceCriteria: Array<{ id: string; text: string; source?: string }>,
   options: { enforceAcceptanceCriteria?: boolean } = {}
 ) {
+  // Coverage maps generated cases back to AC ids; generation/push uses this to block incomplete scope coverage.
   const criteria = Array.isArray(acceptanceCriteria) ? acceptanceCriteria : [];
   const enforceAcceptanceCriteria = options.enforceAcceptanceCriteria !== false;
   const caseList = Array.isArray(testCases) ? testCases : [];

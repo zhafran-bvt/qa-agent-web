@@ -136,6 +136,7 @@ export default function App() {
   const approveSectionRef = useRef<HTMLElement | null>(null);
 
   async function refreshAuxiliaryData() {
+    // Keep dashboard, history, diagnostics, and ticket suggestions in sync after actions that change server state.
     try {
       const [history, diag, suggestions] = await Promise.all([loadHistoryRuns(), loadDiagnostics(), loadTicketSuggestions()]);
       setHistoryRuns(history.runs);
@@ -181,6 +182,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Revalidate edited/generated cases after a short debounce; initial generation already returns server validation.
     if (!context || testCases.length === 0) return;
     if (skipNextValidation.current) {
       skipNextValidation.current = false;
@@ -280,6 +282,7 @@ export default function App() {
   }
 
   function buildPushPayload(casesToPush: GeneratedTestCase[] = testCases): PushRequest | null {
+    // Push and preflight must receive identical payloads so the duplicate review reflects the final write.
     if (!context) return null;
     return {
       approved,
@@ -369,6 +372,7 @@ export default function App() {
   }
 
   function applyGeneration(response: GenerateResponse) {
+    // Applying a generation replaces the editable review set and skips the immediate duplicate validation pass.
     skipNextValidation.current = true;
     setTestCases(response.testCases);
     setValidation(response.validation);
@@ -414,6 +418,7 @@ export default function App() {
   }
 
   async function handlePush() {
+    // Always run duplicate preflight before the final push; only selected non-duplicates are submitted afterward.
     if (!context) return;
     setPushing(true);
     setError('');

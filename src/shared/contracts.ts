@@ -528,6 +528,62 @@ export interface PlanRunCountsResponse {
   counts: Record<string, number>;
 }
 
+export type TrEvidenceStatus = 'not_required' | 'present' | 'missing' | 'unknown';
+
+export interface TrAttachmentSummary {
+  id: string;
+  name: string;
+  createdOn?: number | null;
+  size?: number | null;
+}
+
+export interface TrPlanReviewTest {
+  testId: number;
+  caseId: number;
+  title: string;
+  statusId: number | null;
+  status: string;
+  assigneeId?: number | null;
+  assigneeName?: string;
+  refs?: string;
+  elapsed?: string;
+  defects?: string;
+  latestResultId?: number | string | null;
+  evidenceStatus: TrEvidenceStatus;
+  attachments: TrAttachmentSummary[];
+}
+
+export interface TrPlanReviewRun {
+  runId: number;
+  runName: string;
+  isCompleted: boolean;
+  totalTests: number;
+  statusDistribution: TrStatusDistribution;
+  passRate: number;
+  completionRate: number;
+  passedCount: number;
+  evidencePresentCount: number;
+  evidenceMissingCount: number;
+  evidenceUnknownCount: number;
+  evidenceNotRequiredCount: number;
+  tests: TrPlanReviewTest[];
+  webUrl: string;
+}
+
+export interface TrPlanReviewResponse {
+  plan: TrPlanSummary;
+  runs: TrPlanReviewRun[];
+  summary: {
+    totalRuns: number;
+    totalTests: number;
+    passedCount: number;
+    evidencePresentCount: number;
+    evidenceMissingCount: number;
+    evidenceUnknownCount: number;
+    evidenceNotRequiredCount: number;
+  };
+}
+
 export interface TestrailCredentialsStatus {
   available: boolean;
   configured: boolean;

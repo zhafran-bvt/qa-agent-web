@@ -118,6 +118,7 @@ export interface Persistence {
   isDatabaseBacked(): boolean;
 }
 
+// Keeps local development usable when Postgres is down, while production can fail fast by disabling fallback.
 class ResilientPersistence implements Persistence {
   private active: Persistence;
 
@@ -271,6 +272,7 @@ class ResilientPersistence implements Persistence {
   }
 }
 
+// In-memory state plus append-only audit logging for local/dev fallback; workflow history remains Postgres-only.
 class FileBackedPersistence implements Persistence {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly oauthStates = new Map<string, { createdAt: number; verifierHash: string | null }>();
@@ -482,6 +484,7 @@ class PostgresPersistence implements Persistence {
   ) {}
 
   async initialize(): Promise<void> {
+    // Migrations are file-name ordered and transactional; never reuse a migration number after it reaches main.
     await this.pool.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         version TEXT PRIMARY KEY,
@@ -576,6 +579,7 @@ class PostgresPersistence implements Persistence {
     if (!row) return null;
     const accessToken = decodeStoredToken(row.access_token);
     const refreshToken = row.refresh_token ? decodeStoredToken(row.refresh_token) : undefined;
+    // An undecryptable access token is treated as an invalid session so key rotation forces re-login instead of 500s.
     if (!accessToken) return null;
     return {
       accessToken,
@@ -1156,18 +1160,22 @@ export function buildPostgresSslConfig(databaseUrl: string): false | { rejectUna
   const isLocal = databaseUrl.includes('localhost') || databaseUrl.includes('127.0.0.1');
   if (isLocal) return false;
   const ca = process.env.DATABASE_CA_CERT || process.env.PGSSLROOTCERT_CONTENT;
-  // With a CA we can verify strictly. Otherwise stay TLS-encrypted but don't verify the
-  // chain — managed Postgres (Railway/Heroku/etc.) serves a self-signed cert and provides
-  // no CA, so `rejectUnauthorized: true` would fail with "self-signed certificate in chain".
+  // With a CA we can verify strictly. Otherwise stay TLS-encrypted but do not
+  // verify the chain; Railway-managed Postgres serves a self-signed chain and
+  // boot fails without either this fallback or a provider CA.
   return ca ? { rejectUnauthorized: true, ca } : { rejectUnauthorized: false };
 }
 
 const TOKEN_PREFIX = 'enc:v1:';
 
+// Session tokens are encrypted at rest when ENCRYPTION_KEY is configured. Keep
+// plaintext compatibility so old sessions survive until they are refreshed.
 export function encodeStoredToken(token: string): string {
   return encryptionAvailable() ? `${TOKEN_PREFIX}${encryptSecret(token)}` : token;
 }
 
+// Bad encrypted tokens should invalidate the session instead of throwing a 500
+// on every authenticated request after a key rotation or corrupted row.
 export function decodeStoredToken(token: string): string {
   if (!token.startsWith(TOKEN_PREFIX)) return token;
   try {

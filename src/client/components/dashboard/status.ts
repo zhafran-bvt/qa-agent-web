@@ -1,5 +1,5 @@
 // Shared status tone + colour mapping for the TestRail dashboard.
-export const STATUS_ORDER = ['Passed', 'Failed', 'Blocked', 'Retest', 'Untested'] as const;
+export const STATUS_ORDER = ['Passed', 'Failed', 'Blocked', 'Retest', 'Untested', 'Obsolete'] as const;
 
 const STATUS_TONES: Record<string, string> = {
   Passed: 'passed',
@@ -7,6 +7,7 @@ const STATUS_TONES: Record<string, string> = {
   Blocked: 'blocked',
   Retest: 'retest',
   Untested: 'untested',
+  Obsolete: 'obsolete',
 };
 
 export function statusTone(name: string): string {
@@ -19,5 +20,6 @@ export const TONE_COLORS: Record<string, string> = {
   blocked: '#b45309',
   retest: '#6d28d9',
   untested: '#cbd5e1',
+  obsolete: '#64748b',
   unknown: '#94a3b8',
 };

@@ -1,5 +1,6 @@
+import type { IncomingMessage } from 'node:http';
 import type { ExistingTestRailCase, GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
-import { requestHttpsJson } from './http';
+import { requestHttpsJson, requestHttpsStream } from './http';
 
 export interface TestRailConfig {
   baseUrl: string;
@@ -92,6 +93,7 @@ export async function findExistingCasesByJiraRef(
   sectionId: string,
   jiraKey: string
 ): Promise<ExistingTestRailCase[]> {
+  // TestRail refs filtering is not trusted alone; re-check exact Jira tokens after parsing the response.
   const projectId = String(config.projectId || '').trim();
   if (!projectId) throw new Error('TestRail project ID is required for duplicate lookup.');
 
@@ -129,14 +131,66 @@ function trUrl(config: TestRailConfig, path: string): string {
   return `${config.baseUrl.replace(/\/$/, '')}/index.php?/api/v2/${path}`;
 }
 
-async function trGet<T = unknown>(config: TestRailConfig, path: string): Promise<T> {
-  const response = await requestHttpsJson<T>({
-    url: trUrl(config, path),
-    method: 'GET',
-    headers: { Authorization: authHeader(config) },
-    upstream: 'TestRail',
-    timeoutMs: trTimeout(),
+// --- Rate limiting + 429 retry -------------------------------------------
+// TestRail caps requests (e.g. 180/min). Stay under a configurable ceiling with a
+// rolling-window limiter, and on a 429 honour Retry-After (header or body message)
+// before retrying with exponential-backoff fallback.
+const TR_MAX_RPM = Number(process.env.TESTRAIL_MAX_RPM || 150);
+const TR_MAX_RETRIES = Number(process.env.TESTRAIL_MAX_RETRIES || 4);
+const RATE_WINDOW_MS = 60_000;
+const recentRequests: number[] = [];
+let rateGate: Promise<void> = Promise.resolve();
+
+function acquireRateSlot(): Promise<void> {
+  rateGate = rateGate.then(async () => {
+    const now = Date.now();
+    while (recentRequests.length && recentRequests[0] <= now - RATE_WINDOW_MS) recentRequests.shift();
+    if (recentRequests.length >= TR_MAX_RPM) {
+      const waitMs = recentRequests[0] + RATE_WINDOW_MS - now + 50;
+      if (waitMs > 0) await delay(waitMs);
+    }
+    recentRequests.push(Date.now());
   });
+  return rateGate;
+}
+
+export function retryAfterMs(headers: Record<string, string | string[] | undefined>, body: unknown): number {
+  const header = headers['retry-after'];
+  const headerValue = Array.isArray(header) ? header[0] : header;
+  const fromHeader = headerValue ? Number(headerValue) : NaN;
+  if (Number.isFinite(fromHeader) && fromHeader >= 0) return Math.min(fromHeader, 60) * 1000;
+  const message = body && typeof body === 'object' ? String((body as Record<string, unknown>).error || '') : '';
+  const match = message.match(/retry after (\d+)/i);
+  return match ? Math.min(Number(match[1]), 60) * 1000 : 0;
+}
+
+async function trFetch(
+  config: TestRailConfig,
+  opts: { method: string; path: string; body?: unknown }
+): Promise<{ body: unknown; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  let last: { body: unknown; headers: Record<string, string | string[] | undefined>; statusCode: number } | null = null;
+  for (let attempt = 0; attempt <= TR_MAX_RETRIES; attempt += 1) {
+    await acquireRateSlot();
+    const response = await requestHttpsJson<unknown>({
+      url: trUrl(config, opts.path),
+      method: opts.method,
+      headers: { Authorization: authHeader(config) },
+      body: opts.body,
+      upstream: 'TestRail',
+      timeoutMs: trTimeout(),
+    });
+    if (response.statusCode !== 429) return response;
+    last = response;
+    if (attempt < TR_MAX_RETRIES) {
+      const waitMs = retryAfterMs(response.headers, response.body) || Math.min(1000 * 2 ** attempt, 30_000);
+      await delay(waitMs);
+    }
+  }
+  return last as { body: unknown; headers: Record<string, string | string[] | undefined>; statusCode: number };
+}
+
+async function trGet<T = unknown>(config: TestRailConfig, path: string): Promise<T> {
+  const response = await trFetch(config, { method: 'GET', path });
   if (response.statusCode < 200 || response.statusCode >= 300) {
     const parsed = (response.body || {}) as Record<string, unknown>;
     throw new Error(String(parsed.error || `HTTP ${response.statusCode}`));
@@ -187,6 +241,69 @@ export function getPlan(config: TestRailConfig, planId: number | string): Promis
   return trGet<Record<string, unknown>>(config, `get_plan/${encodeURIComponent(String(planId))}`);
 }
 
+export function getTests(config: TestRailConfig, runId: number | string): Promise<Record<string, unknown>[]> {
+  return trGetPaginated(config, `get_tests/${encodeURIComponent(String(runId))}`, 'tests');
+}
+
+export function getResults(config: TestRailConfig, testId: number | string): Promise<Record<string, unknown>[]> {
+  return trGetPaginated(config, `get_results/${encodeURIComponent(String(testId))}`, 'results');
+}
+
+/** All results for a run in one paginated call — far fewer requests than per-test get_results. */
+export function getResultsForRun(config: TestRailConfig, runId: number | string): Promise<Record<string, unknown>[]> {
+  return trGetPaginated(config, `get_results_for_run/${encodeURIComponent(String(runId))}`, 'results');
+}
+
+export function getAttachmentsForTest(config: TestRailConfig, testId: number | string): Promise<Record<string, unknown>[]> {
+  return trGetPaginated(config, `get_attachments_for_test/${encodeURIComponent(String(testId))}`, 'attachments');
+}
+
+// TestRail returns attachments as application/octet-stream, so we infer a useful Content-Type from
+// the filename — without it the browser won't play a .mov inline or render an image.
+const MIME_BY_EXT: Record<string, string> = {
+  mov: 'video/quicktime',
+  mp4: 'video/mp4',
+  m4v: 'video/x-m4v',
+  webm: 'video/webm',
+  ogv: 'video/ogg',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  pdf: 'application/pdf',
+  txt: 'text/plain',
+  log: 'text/plain',
+  json: 'application/json',
+  mp3: 'audio/mpeg',
+  wav: 'audio/wav',
+};
+
+export function guessAttachmentMime(name: string): string {
+  const match = /\.([a-z0-9]+)$/i.exec(name || '');
+  return match ? MIME_BY_EXT[match[1].toLowerCase()] || '' : '';
+}
+
+/** Stream a single attachment's bytes from TestRail (auth stays server-side). Caller pipes to client. */
+export async function fetchAttachment(
+  config: TestRailConfig,
+  attachmentId: number | string
+): Promise<{ stream: IncomingMessage; statusCode: number; headers: Record<string, string | string[] | undefined> }> {
+  await acquireRateSlot();
+  return requestHttpsStream({
+    url: trUrl(config, `get_attachment/${encodeURIComponent(String(attachmentId))}`),
+    method: 'GET',
+    headers: { Authorization: authHeader(config) },
+    upstream: 'TestRail',
+    timeoutMs: trTimeout(),
+  });
+}
+
+export function getStatuses(config: TestRailConfig): Promise<Record<string, unknown>[]> {
+  return trGet(config, 'get_statuses').then((body) => parseList(body, 'statuses'));
+}
+
 export function getUsers(config: TestRailConfig): Promise<Record<string, unknown>[]> {
   return trGet(config, 'get_users').then((body) => parseList(body, 'users'));
 }
@@ -231,15 +348,8 @@ export async function trWrite(
   endpoint: string,
   payload: Record<string, unknown> = {}
 ): Promise<Record<string, unknown>> {
-  const response = await requestHttpsJson<Record<string, unknown>>({
-    url: trUrl(config, endpoint),
-    method: 'POST',
-    headers: { Authorization: authHeader(config) },
-    body: payload,
-    upstream: 'TestRail',
-    timeoutMs: trTimeout(),
-  });
-  if (response.statusCode >= 200 && response.statusCode < 300) return response.body || {};
+  const response = await trFetch(config, { method: 'POST', path: endpoint, body: payload });
+  if (response.statusCode >= 200 && response.statusCode < 300) return (response.body as Record<string, unknown>) || {};
   const parsed = (response.body || {}) as Record<string, unknown>;
   throw new Error(String(parsed.error || `HTTP ${response.statusCode}`));
 }
@@ -285,6 +395,7 @@ export function mapType(type: string): number {
 }
 
 export async function pushCases(config: TestRailConfig, sectionId: string, testCases: GeneratedTestCase[]): Promise<PushCaseResult[]> {
+  // Push cases one by one so a single TestRail failure is reported without aborting the whole batch.
   const results: PushCaseResult[] = [];
   for (const testCase of testCases) {
     try {

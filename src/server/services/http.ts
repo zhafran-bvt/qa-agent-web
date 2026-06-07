@@ -1,4 +1,5 @@
 import https from 'node:https';
+import type { IncomingMessage } from 'node:http';
 
 export class UpstreamTimeoutError extends Error {
   statusCode = 504;
@@ -27,6 +28,7 @@ export async function requestHttpsJson<T>({
   upstream: string;
   timeoutMs?: number;
 }): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  // Shared JSON transport for upstream APIs; callers decide whether non-2xx responses are errors.
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const payload = body === undefined ? null : JSON.stringify(body);
@@ -78,6 +80,56 @@ export async function requestHttpsJson<T>({
       });
     }
     if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Streaming variant for binary upstream payloads (e.g. TestRail attachments). Resolves once the
+ * response headers arrive; the caller pipes the stream to the client. Non-2xx responses still
+ * resolve (the caller inspects statusCode and may read the body for an error message).
+ */
+export async function requestHttpsStream({
+  url,
+  method = 'GET',
+  headers = {},
+  upstream,
+  timeoutMs = Number(process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+}: {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  upstream: string;
+  timeoutMs?: number;
+}): Promise<{ stream: IncomingMessage; statusCode: number; headers: Record<string, string | string[] | undefined> }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    let settled = false;
+    const req = https.request(
+      {
+        hostname: parsed.hostname,
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers: { Accept: '*/*', ...headers },
+      },
+      (res) => {
+        if (settled) return;
+        settled = true;
+        resolve({ stream: res, statusCode: res.statusCode || 500, headers: res.headers });
+      }
+    );
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
+      req.setTimeout(timeoutMs, () => {
+        if (settled) return;
+        settled = true;
+        req.destroy(new UpstreamTimeoutError(upstream, timeoutMs));
+      });
+    }
     req.end();
   });
 }

@@ -73,6 +73,7 @@ interface QaClient {
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, iteratee: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  // Fetch linked Jira/Confluence data in parallel without opening an unbounded number of upstream requests.
   const safeLimit = Math.max(1, Math.min(limit, items.length || 1));
   const results = new Array<R>(items.length);
   let nextIndex = 0;
@@ -294,6 +295,7 @@ function expandInlineRequirementLines(lines: string[]): string[] {
 }
 
 function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtractionMode): CriteriaExtractionResult {
+  // Prefer explicit AC/requirements sections; broader inference is a fallback and is stricter for parent stories.
   const lines = expandInlineRequirementLines(
     normalizeMultilineText(text)
     .split('\n')
@@ -482,6 +484,7 @@ function addPageRef(pageRefs: Map<string, PageRef>, ref: (ConfluenceReference & 
 }
 
 export function extractConfluencePageRefsFromText(text: string, issueKey: string, sourceType: string): ConfluenceReference[] {
+  // Pull Confluence links from Jira descriptions/comments where remote-link metadata is often missing.
   const refs: ConfluenceReference[] = [];
   const urls = String(text || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
   for (const rawUrl of urls) {
@@ -507,6 +510,7 @@ function addIssueTextPageRefs(pageRefs: Map<string, PageRef>, issue: SimplifiedI
 }
 
 async function getRemoteLinkPageRefs(client: QaClient, issueKey: string, sourceType: string): Promise<ConfluenceReference[]> {
+  // Remote links are the most reliable place to get the PRD title and relationship label.
   const remoteLinks = await client.getRemoteLinks(issueKey).catch(() => []);
   const refs: Array<ConfluenceReference & { title?: string }> = [];
   for (const link of remoteLinks || []) {
@@ -588,6 +592,7 @@ function isJunkScopeFragment(text: string): boolean {
 }
 
 function isThinMainIssue(mainIssue: SimplifiedIssue, mainIssueCriteria: ScopedItem[]): boolean {
+  // Thin implementation tasks borrow scope from the parent story or matched PRD section instead of inventing it.
   if (mainIssueCriteria.length > 0) return false;
   const description = normalizeMultilineText([mainIssue.summary || '', mainIssue.description || '', mainIssue.renderedDescription || ''].join('\n'));
   const stripped = stripBracketPrefixes(description);
@@ -646,13 +651,8 @@ function isPrdSubheading(line: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9 /&()_-]*$/.test(text);
 }
 
-// --- Fix 2: ADF heading-hierarchy parsing -----------------------------------
-// Flattened text loses heading levels, so PRD table cells get mistaken for
-// headings and an H3's H4 children fragment into sibling sections. Working from
-// the raw ADF tree fixes both: only `heading` nodes are headings (table cells
-// live inside `table` nodes), and level awareness lets children fold into their
-// parent. These run only when raw ADF is available; otherwise the text-based
-// parsers below remain the fallback.
+// ADF heading-hierarchy parsing keeps PRD sections accurate when flattened text
+// would confuse table cells for headings or split H4 children away from their H3.
 
 function flattenAdfBlocks(adf: unknown): AdfBlock[] {
   const doc = adf && typeof adf === 'object' ? (adf as Record<string, unknown>) : null;
@@ -913,6 +913,7 @@ function rankPrdSubsection(
   storySummary: string,
   precomputedSubsections?: Array<{ heading: string; body: string }> | null
 ): StorySection | null {
+  // Rank PRD subsections against title/story signals so thin tasks use the closest scoped subsection, not the whole PRD.
   const subsections =
     precomputedSubsections && precomputedSubsections.length
       ? precomputedSubsections
@@ -1035,6 +1036,7 @@ function selectAcceptanceCriteria(
   storyMetadataLabels: string[],
   mainIssueThin: boolean
 ): CriteriaSelectionResult {
+  // Authority order is deliberate: main Jira AC wins, then scoped PRD subsection, then parent Story AC.
   if (mainIssueCriteria.length > 0) {
     return {
       acceptanceCriteria: mainIssueCriteria,
@@ -1091,6 +1093,7 @@ function buildScopeAuthority(
   scopeConfluenceSection: ScopeConfluenceSection | null,
   scopeParentIssue: LinkedIssueSummary | null
 ): ScopeAuthority {
+  // ScopeAuthority is the single source of truth the LLM sees for "what counts as in scope".
   if (selection.acceptanceCriteriaSource === 'main_jira') {
     const descriptionWithoutAc = stripAcceptanceCriteriaSections(mainIssue.description || mainIssue.renderedDescription || '');
     const meaningfulDescription = normalizeInlineText(descriptionWithoutAc);
@@ -1196,11 +1199,8 @@ function determineConfidence(
   };
 }
 
-// Fix 1: the single most authoritative pointer is often the anchor on a sibling
-// in the implementation chain (e.g. the blocking BE twin), not the parent Story
-// — whose PRD link is frequently bare. Recover the best anchor for the chosen
-// PRD page from every issue in the chain plus the page's own aggregated
-// sourceRefs, ranked by overlap with the main ticket title.
+// The most useful PRD anchor can live on a sibling implementation ticket rather
+// than the parent Story, so recover the best anchor from every issue in the chain.
 function scoreAnchorOverlap(anchor: string, mainIssue: SimplifiedIssue, storySummary: string): number {
   const headingTokens = new Set(tokenizeMatchText(anchorToHeading(anchor)));
   if (!headingTokens.size) return 0;
