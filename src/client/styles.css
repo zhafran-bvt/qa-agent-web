@@ -2870,6 +2870,89 @@ details[open] .source-caret { transform: rotate(90deg); }
   color: var(--danger);
 }
 
+.jira-burndown {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfcfe;
+}
+.jira-burndown-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.jira-burndown h4 {
+  margin: 0;
+  color: var(--text);
+  font-size: 15px;
+}
+.jira-burndown p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.jira-burndown-rate {
+  font-size: 28px;
+  font-weight: 780;
+  color: var(--primary);
+  line-height: 1;
+}
+.jira-burndown-meter {
+  display: flex;
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e5e7eb;
+}
+.jira-burndown-meter-done {
+  background: var(--ok, #15803d);
+}
+.jira-burndown-meter-remaining {
+  background: #f59e0b;
+}
+.jira-burndown-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.jira-burndown-metrics div {
+  display: grid;
+  gap: 3px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.jira-burndown-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.jira-burndown-metrics strong {
+  color: var(--text);
+  font-size: 18px;
+}
+.jira-burndown-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.jira-burndown-statuses span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+.jira-burndown-statuses strong {
+  color: var(--text);
+}
+
 .tr-plan-table {
   width: 100%;
   border-collapse: collapse;
@@ -3487,6 +3570,12 @@ details[open] .source-caret { transform: rotate(90deg); }
   width: 100%;
   max-width: 1480px;
   margin: 0 auto; /* centered in the main area */
+}
+.home .jira-burndown {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow, 0 1px 2px rgba(15, 23, 42, 0.04));
 }
 .home-muted { color: var(--muted); font-size: 13px; }
 .home-empty-row { padding: 14px 0; }

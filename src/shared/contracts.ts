@@ -45,6 +45,28 @@ export interface TicketSuggestionsResponse {
   jql: string;
 }
 
+export interface JiraSprintBurndownIssue {
+  key: string;
+  summary: string;
+  status: string;
+  issueType: string;
+  assignee?: string;
+  webUrl?: string;
+  updatedAt?: string;
+}
+
+export interface JiraSprintBurndownResponse {
+  jql: string;
+  totalIssues: number;
+  doneIssues: number;
+  remainingIssues: number;
+  completionRate: number;
+  statusDistribution: Record<string, number>;
+  issueTypeDistribution: Record<string, number>;
+  updatedAt: string;
+  issues: JiraSprintBurndownIssue[];
+}
+
 export interface AnalyzeRequest {
   jiraKey: string;
   feOnly: boolean;

@@ -418,7 +418,7 @@ export class AtlassianClient {
         {
           jql,
           fields,
-          maxResults: Math.max(1, Math.min(maxResults, 50)),
+          maxResults: Math.max(1, Math.min(maxResults, 100)),
           fieldsByKeys: false,
         }
       )

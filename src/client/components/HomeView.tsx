@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { CoverageResponse, TrSummary, WorkflowHistorySummary } from '../../shared/contracts';
-import { loadCoverage, loadTestRailSummary } from '../api';
+import type { CoverageResponse, JiraSprintBurndownResponse, TrSummary, WorkflowHistorySummary } from '../../shared/contracts';
+import { loadCoverage, loadJiraSprintBurndown, loadTestRailSummary } from '../api';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
+import { SprintBurndownPanel } from './dashboard/SprintBurndownPanel';
 
 interface HomeSuggestion {
   key: string;
@@ -97,6 +98,9 @@ export function HomeView({
   const [healthLoading, setHealthLoading] = useState(false);
   const [healthError, setHealthError] = useState('');
   const [coverage, setCoverage] = useState<CoverageResponse['coverage'] | null>(null);
+  const [burndown, setBurndown] = useState<JiraSprintBurndownResponse | null>(null);
+  const [burndownLoading, setBurndownLoading] = useState(false);
+  const [burndownError, setBurndownError] = useState('');
 
   const suggestionKeys = suggestions.map((s) => s.key).join(',');
   useEffect(() => {
@@ -144,6 +148,32 @@ export function HomeView({
       cancelled = true;
     };
   }, [authenticated, testrailReady, h.healthError]);
+
+  useEffect(() => {
+    if (!authenticated) {
+      setBurndown(null);
+      return;
+    }
+    let cancelled = false;
+    setBurndownLoading(true);
+    setBurndownError('');
+    loadJiraSprintBurndown()
+      .then((data) => {
+        if (!cancelled) setBurndown(data);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setBurndownError((err as Error).message || uiText[lang].dashboard.error);
+          setBurndown(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setBurndownLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, lang]);
 
   if (!authenticated) {
     return (
@@ -203,6 +233,8 @@ export function HomeView({
           ) : null}
         </form>
       </div>
+
+      <SprintBurndownPanel lang={lang} burndown={burndown} loading={burndownLoading} error={burndownError} />
 
       {/* QA health KPIs */}
       <div className="home-sec-head">

@@ -11,6 +11,7 @@ vi.mock('../../src/client/api', () => ({
   loadDiagnostics: vi.fn(),
   loadHistoryRun: vi.fn(),
   loadHistoryRuns: vi.fn(),
+  loadJiraSprintBurndown: vi.fn(),
   loadTicketSuggestions: vi.fn(),
   loadTestRailSummary: vi.fn(),
   loadCoverage: vi.fn(),
@@ -44,6 +45,17 @@ describe('App utility UI', () => {
     vi.mocked(api.loadHistoryRuns).mockResolvedValue({ runs: [] } as any);
     vi.mocked(api.loadTicketSuggestions).mockResolvedValue({ tickets: [], jql: '' } as any);
     vi.mocked(api.loadCoverage).mockResolvedValue({ coverage: {} } as any);
+    vi.mocked(api.loadJiraSprintBurndown).mockResolvedValue({
+      jql: 'sprint in openSprints()',
+      totalIssues: 0,
+      doneIssues: 0,
+      remainingIssues: 0,
+      completionRate: 0,
+      statusDistribution: {},
+      issueTypeDistribution: {},
+      updatedAt: '2026-06-08T00:00:00.000Z',
+      issues: [],
+    } as any);
     vi.mocked(api.loadTestRailSummary).mockResolvedValue({
       projectId: '69',
       plans: 0,
@@ -152,5 +164,32 @@ describe('App utility UI', () => {
 
     const jiraInput = screen.getByLabelText('Jira Ticket Key') as HTMLInputElement;
     expect(jiraInput.value).toBe('ORB-3157');
+  });
+
+  it('shows sprint burndown on the home page above QA health', async () => {
+    vi.mocked(api.loadConfig).mockResolvedValueOnce({
+      ...configResponse,
+      authenticated: true,
+      user: 'qa.user',
+    } as any);
+    vi.mocked(api.loadJiraSprintBurndown).mockResolvedValueOnce({
+      jql: 'sprint in openSprints()',
+      totalIssues: 100,
+      doneIssues: 37,
+      remainingIssues: 63,
+      completionRate: 37,
+      statusDistribution: { Done: 37, 'To Do': 13, 'In Progress': 12 },
+      issueTypeDistribution: { Task: 100 },
+      updatedAt: '2026-06-08T00:00:00.000Z',
+      issues: [],
+    } as any);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText('Sprint burndown')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('QA health')).toBeTruthy());
+    const bodyText = document.body.textContent || '';
+    expect(bodyText.indexOf('Sprint burndown')).toBeLessThan(bodyText.indexOf('QA health'));
+    expect(screen.getByText('37%')).toBeTruthy();
   });
 });

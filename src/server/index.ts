@@ -16,7 +16,8 @@ import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
 import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
-import { buildTicketSuggestionsJql } from './services/suggestions';
+import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/suggestions';
+import { summarizeSprintBurndown } from './services/sprint-burndown';
 import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
 import { decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
 import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
@@ -37,6 +38,7 @@ import type {
   ScopeSnapshotTranslationRequest,
   ScopeSnapshotTranslationResponse,
   TicketSuggestionsResponse,
+  JiraSprintBurndownResponse,
   ValidateRequest,
 } from '../shared/contracts';
 
@@ -157,6 +159,17 @@ function buildOAuthVerifierCookie(value: string, maxAge = 900): string {
 
 function clearOAuthVerifierCookie(): string {
   return buildOAuthVerifierCookie('', 0);
+}
+
+function canonicalAuthStartUrl(req: IncomingMessage): string | null {
+  const configured = new URL(APP_BASE_URL);
+  const requestHost = String(req.headers.host || '').toLowerCase();
+  const configuredHost = configured.host.toLowerCase();
+  if (!requestHost || requestHost === configuredHost) return null;
+  configured.pathname = '/auth/atlassian';
+  configured.search = '';
+  configured.hash = '';
+  return configured.toString();
 }
 
 // Store only a hash of the browser verifier server-side; the raw verifier stays
@@ -649,6 +662,17 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         createdAt: issue.createdAt || '',
       })),
     };
+    sendJson(res, 200, body);
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/jira/sprint-burndown') {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    const { sid, session } = sessionEnvelope;
+    const jql = buildSprintBurndownJql();
+    const issues = await createClient(sid, session, log).searchIssues(jql, 100);
+    const body: JiraSprintBurndownResponse = summarizeSprintBurndown(jql, issues);
     sendJson(res, 200, body);
     return;
   }
@@ -1302,6 +1326,12 @@ function summarizeResults(results: Array<{ ok: boolean }>) {
 async function handleAuth(req: IncomingMessage, res: ServerResponse, log = logger): Promise<void> {
   const url = new URL(req.url || '/', APP_BASE_URL);
   if (url.pathname === '/auth/atlassian') {
+    const canonicalUrl = canonicalAuthStartUrl(req);
+    if (canonicalUrl) {
+      res.writeHead(302, { Location: canonicalUrl });
+      res.end();
+      return;
+    }
     if (!config.atlassian.clientId || !config.atlassian.clientSecret) {
       sendError(res, 400, 'Atlassian OAuth is not configured.');
       return;

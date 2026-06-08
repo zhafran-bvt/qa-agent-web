@@ -2,6 +2,7 @@ import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PlanList } from '../../src/client/components/dashboard/PlanList';
+import { SprintBurndownPanel } from '../../src/client/components/dashboard/SprintBurndownPanel';
 import { StatusDonut } from '../../src/client/components/dashboard/StatusDonut';
 import type { TrPlanSummary } from '../../src/shared/contracts';
 import * as api from '../../src/client/api';
@@ -219,5 +220,34 @@ describe('StatusDonut', () => {
     const { container } = render(<StatusDonut distribution={{}} />);
     expect(container.querySelectorAll('circle').length).toBe(1);
     expect(screen.getByText('0')).toBeTruthy();
+  });
+});
+
+describe('SprintBurndownPanel', () => {
+  it('renders completion, remaining count, and status breakdown', () => {
+    render(
+      <SprintBurndownPanel
+        lang="en"
+        loading={false}
+        error=""
+        burndown={{
+          jql: 'sprint in openSprints()',
+          totalIssues: 5,
+          doneIssues: 2,
+          remainingIssues: 3,
+          completionRate: 40,
+          statusDistribution: { Done: 2, 'In Progress': 1, 'To Do': 2 },
+          issueTypeDistribution: { Task: 5 },
+          updatedAt: '2026-06-08T00:00:00.000Z',
+          issues: [],
+        }}
+      />
+    );
+
+    expect(screen.getByText('Sprint burndown')).toBeTruthy();
+    expect(screen.getByText('40%')).toBeTruthy();
+    expect(screen.getByText('Remaining')).toBeTruthy();
+    expect(screen.getByText('3')).toBeTruthy();
+    expect(screen.getByText('In Progress')).toBeTruthy();
   });
 });

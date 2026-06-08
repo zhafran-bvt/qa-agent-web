@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTicketSuggestionsJql } from '../../src/server/services/suggestions';
+import { buildSprintBurndownJql, buildTicketSuggestionsJql } from '../../src/server/services/suggestions';
 
 test('ticket suggestions JQL is limited to active sprint frontend tasks only', () => {
   const jql = buildTicketSuggestionsJql('"qa assignee[user picker (single user)]"');
@@ -10,4 +10,13 @@ test('ticket suggestions JQL is limited to active sprint frontend tasks only', (
   assert.match(jql, /\blabels = frontend\b/);
   assert.ok(jql.includes('sprint in openSprints()'));
   assert.match(jql, /\bstatusCategory != Done\b/);
+});
+
+test('sprint burndown JQL loads active sprint product work', () => {
+  const jql = buildSprintBurndownJql();
+  assert.ok(jql.includes('issuetype IN (Bug, Task)'));
+  assert.ok(jql.includes('sprint IN openSprints()'));
+  assert.ok(jql.includes('project = ORB'));
+  assert.ok(jql.includes('type IN (Task, Bug)'));
+  assert.ok(jql.includes('ORDER BY updated DESC, created DESC'));
 });

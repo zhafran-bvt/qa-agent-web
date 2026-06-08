@@ -5,6 +5,7 @@ import type {
   DiagnosticsResponse,
   GenerateRequest,
   GenerateResponse,
+  JiraSprintBurndownResponse,
   PushPreflightRequest,
   PushPreflightResponse,
   PushRequest,
@@ -50,6 +51,10 @@ export function loadConfig(): Promise<ConfigResponse> {
 
 export function loadTicketSuggestions(): Promise<TicketSuggestionsResponse> {
   return requestJson<TicketSuggestionsResponse>('/api/suggestions/tickets');
+}
+
+export function loadJiraSprintBurndown(): Promise<JiraSprintBurndownResponse> {
+  return requestJson<JiraSprintBurndownResponse>('/api/jira/sprint-burndown');
 }
 
 export function loadTestRailPlans(projectId?: string): Promise<TestRailPlansResponse> {
