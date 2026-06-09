@@ -162,6 +162,14 @@ test('normalizes list preconditions into textarea-friendly text', () => {
   assert.equal(normalizeTextList(['User is logged in.', 'Dataset page is open.']), 'User is logged in.\nDataset page is open.');
 });
 
+test('stringifies object payloads as JSON instead of [object Object]', () => {
+  assert.equal(
+    normalizeTextList({ grid_config: { output_mode: 'custom', catchment_radius_m: 500 } }),
+    JSON.stringify({ grid_config: { output_mode: 'custom', catchment_radius_m: 500 } }, null, 2)
+  );
+  assert.equal(normalizeTextList([{ a: 1 }]), JSON.stringify({ a: 1 }, null, 2));
+});
+
 test('normalizes structured BDD objects into Gherkin text', () => {
   assert.equal(
     normalizeBddScenario({

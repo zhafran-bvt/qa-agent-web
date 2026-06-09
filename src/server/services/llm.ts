@@ -227,10 +227,23 @@ export function findAcceptanceCriteriaArray(value: unknown): unknown[] | null {
 }
 
 export function normalizeTextList(value: unknown): string {
+  // LLMs sometimes return structured fields (e.g. a JSON request body) as objects rather than
+  // strings; stringify those as pretty JSON instead of letting String() yield "[object Object]".
+  const stringifyItem = (item: unknown): string => {
+    if (item === null || item === undefined) return '';
+    if (typeof item === 'object') {
+      try {
+        return JSON.stringify(item, null, 2);
+      } catch {
+        return '';
+      }
+    }
+    return String(item).trim();
+  };
   if (Array.isArray(value)) {
-    return value.map((item) => String(item || '').trim()).filter(Boolean).join('\n');
+    return value.map(stringifyItem).map((item) => item.trim()).filter(Boolean).join('\n');
   }
-  return String(value || '').trim();
+  return stringifyItem(value).trim();
 }
 
 export function normalizeJiraReference(value: unknown): string {
@@ -243,6 +256,14 @@ export function normalizeJiraReference(value: unknown): string {
 function normalizeCaseIntent(value: unknown): 'positive' | 'negative' | 'edge' | undefined {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'positive' || normalized === 'negative' || normalized === 'edge') return normalized;
+  return undefined;
+}
+
+function normalizeExecutionType(value: unknown): 'postman' | 'manual_db' | 'manual_other' | undefined {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'postman' || normalized === 'api') return 'postman';
+  if (normalized === 'manual_db' || normalized === 'db' || normalized === 'database') return 'manual_db';
+  if (normalized === 'manual_other' || normalized === 'manual') return 'manual_other';
   return undefined;
 }
 
@@ -514,17 +535,52 @@ export function normalizeScopeSnapshotTranslation(
 export function normalizeCase(testCase: Record<string, unknown>, index: number): GeneratedTestCase {
   // Normalize several likely LLM/TestRail field names into the app's stable GeneratedTestCase contract.
   const evidenceRecord = (testCase.evidence && typeof testCase.evidence === 'object' ? (testCase.evidence as Record<string, unknown>) : {}) || {};
+  const apiSpecRecord = ((testCase.apiSpec || testCase.api_spec) && typeof (testCase.apiSpec || testCase.api_spec) === 'object'
+    ? ((testCase.apiSpec || testCase.api_spec) as Record<string, unknown>)
+    : {}) || {};
+  const manualRecord = ((testCase.manualVerification || testCase.manual_verification) && typeof (testCase.manualVerification || testCase.manual_verification) === 'object'
+    ? ((testCase.manualVerification || testCase.manual_verification) as Record<string, unknown>)
+    : {}) || {};
+  const apiMethod = String(apiSpecRecord.method || testCase.method || '').trim().toUpperCase();
+  const apiPath = String(apiSpecRecord.path || testCase.path || testCase.endpoint || '').trim();
+  const title = String(testCase.title || '');
+  const inferredExecutionType = /^\[DB\]/i.test(title) ? 'manual_db' : /^\[API\]/i.test(title) ? 'postman' : undefined;
+  const executionType = normalizeExecutionType(testCase.executionType || testCase.execution_type) || inferredExecutionType;
+  const manualSteps = Array.isArray(manualRecord.steps)
+    ? manualRecord.steps.map((step) => String(step || '').trim()).filter(Boolean)
+    : normalizeTextList(manualRecord.steps || '').split('\n').map((step) => step.trim()).filter(Boolean);
 
   return {
     id: String(testCase.id || testCase.testCaseId || testCase.test_case_id || `TC-${String(index + 1).padStart(2, '0')}`),
-    title: String(testCase.title || ''),
+    title,
     type: String(testCase.type || ''),
+    ...(executionType ? { executionType } : {}),
     caseIntent: normalizeCaseIntent(testCase.caseIntent || testCase.case_intent) || inferCaseIntent(testCase),
     jiraReference: normalizeJiraReference(testCase.jiraReference || testCase.jira_reference || testCase.refs || ''),
     preconditions: normalizeTextList(testCase.preconditions || testCase.custom_preconds || ''),
     bddScenario: normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
     coversAcceptanceCriteria: normalizeIdList(testCase.coversAcceptanceCriteria || testCase.covers_acceptance_criteria || ''),
     sourceScope: normalizeIdList(testCase.sourceScope || testCase.source_scope || ''),
+    ...(apiMethod || apiPath
+      ? {
+          apiSpec: {
+            method: apiMethod,
+            path: apiPath,
+            samplePayload: normalizeTextList(apiSpecRecord.samplePayload || apiSpecRecord.sample_payload || testCase.samplePayload || ''),
+            expectedResponse: normalizeTextList(apiSpecRecord.expectedResponse || apiSpecRecord.expected_response || testCase.expectedResponse || ''),
+            assertions: normalizeIdList(apiSpecRecord.assertions || testCase.assertions || ''),
+          },
+        }
+      : {}),
+    ...(Object.keys(manualRecord).length
+      ? {
+          manualVerification: {
+            target: String(manualRecord.target || '').trim(),
+            steps: manualSteps,
+            expectedResult: String(manualRecord.expectedResult || manualRecord.expected_result || '').trim(),
+          },
+        }
+      : {}),
     evidence: {
       prdSectionTitle: String(evidenceRecord.prdSectionTitle || evidenceRecord.prd_section_title || ''),
       acceptanceCriteria: [],
@@ -621,6 +677,8 @@ export function buildGenerationPromptContext(context: GenerateContext) {
     confidenceLevel: context.confidenceLevel,
     confidenceReasons: context.confidenceReasons,
     constraints: context.constraints,
+    apiDocsUrl: context.apiDocsUrl || '',
+    apiContract: context.apiContract || null,
     actualDevScopeGuidance: context.actualDevScopeGuidance,
     coverageEnforced: context.coverageEnforced,
     manualScopeOverride: context.manualScopeOverride,
@@ -636,15 +694,15 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       ? `Target ${input.targetMinCriteria}-${input.targetMaxCriteria} medium-granularity criteria unless the ticket is clearly simpler.`
       : 'Prefer a concise but complete canonical set.';
   const systemPrompt = [
-    'You are a senior QA engineer deriving final FE acceptance criteria from Jira implementation scope.',
+    'You are a senior QA engineer deriving final acceptance criteria from Jira implementation scope.',
     prdScopedThinTicket
       ? 'The main Jira ticket is too thin. Use the matched PRD subsection as the primary authority, with the task title as the scope key and the parent story as routing context only.'
       : 'The main Jira ticket is the authority for implemented scope.',
     prdScopedThinTicket
       ? 'Do not broaden beyond the matched PRD subsection and the thin ticket title.'
       : 'Parent Story and PRD are supporting context only and must not expand scope beyond the main ticket.',
-    'Prefer FE-testable behavior and FE-owned payload contracts.',
-    'Ignore background, non-goals, BE-only dependency notes, code scaffolding, partial flow-control lines, and duplicate rendered/plain fragments.',
+    'Prefer testable behavior and owned payload or data contracts for the resolved ticket scope.',
+    'Ignore background, non-goals, unrelated dependency notes, code scaffolding, partial flow-control lines, and duplicate rendered/plain fragments.',
     'If the raw acceptance criteria are already strong, preserve them semantically while normalizing wording and deduplicating.',
     targetInstruction,
     input.granularityHint || '',
@@ -985,6 +1043,11 @@ export function isFallbackError(error: Error & { statusCode?: number }): boolean
 
 async function generateWithProvider(provider: ProviderConfig, context: GenerateContext) {
   const enforceCoverage = Boolean(context.coverageEnforced);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api' || scopeType === 'hybrid';
+  // A backend ticket that doesn't change the HTTP API contract (migration/backfill/DB) should
+  // produce manual verification cases, not Postman/API cases. Default true for back-compat.
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
   const scopePriority = buildScopePriorityContext(context);
   const prdScopedThinTicket =
     scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';
@@ -1003,12 +1066,28 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       : 'The main Jira ticket description is empty or too thin. Treat the main Jira ticket acceptance criteria as the primary coverage authority. Parent Story and PRD are supporting context only.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
-    'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    apiMode
+      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
+      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
     'caseIntent must be exactly one of: positive, negative, edge.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
-    'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
+    apiMode
+      ? 'API cases must use titles [API][{Epic}][{Ticket ID}] Title and executionType "postman". Manual database verification cases must use [DB][{Epic}][{Ticket ID}] Title and executionType "manual_db". Web cases, only in hybrid mode, use [Web][{Epic}][{Ticket ID}] Title.'
+      : 'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
+    apiMode
+      ? 'For every postman case, include apiSpec with method, path, samplePayload when the endpoint accepts a body, expectedResponse, and assertions. The bddScenario must also include the sample payload and expected response/assertions in triple-quoted blocks so it is executable from Postman guidance.'
+      : '',
+    apiMode
+      ? 'For migration, backfill, dataset_schema, SQL, or DB verification scope, include manual_db cases with manualVerification target, steps, and expectedResult. Make the BDD clear that the case is not Postman-testable.'
+      : '',
+    apiMode
+      ? 'Use context.apiContract.matchedEndpoints as the endpoint contract when present. Do not invent endpoints outside Jira, Confluence, or apiContract.'
+      : '',
+    apiMode && !apiContractRelevant
+      ? 'This backend ticket does NOT change the HTTP API contract (no endpoint references). Do not create Postman/API cases and do not invent endpoints. Produce manual_db cases (manualVerification with target, steps, expectedResult) for data/schema/DB work, or manual_other when DB is not involved.'
+      : '',
     enforceCoverage
       ? 'Use only acceptance criterion ids that exist in context.acceptanceCriteria, such as AC-1.'
       : 'If context.coverageEnforced is false, coversAcceptanceCriteria may be an empty array.',
@@ -1027,7 +1106,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       : scopePriority.hasMeaningfulTicketDescription
       ? 'Do not generate extra cases solely because they appear in the Story or PRD if they are not supported by the main ticket description or its acceptance criteria.'
       : 'When relying on acceptance criteria fallback, still keep Story and PRD context supportive only; do not broaden scope beyond what the ticket acceptance criteria imply.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   const userPrompt = JSON.stringify(
     {
@@ -1073,6 +1152,9 @@ async function repairMissingCoverageWithProvider(
   missingCriteria: Array<{ id: string; text: string }>
 ): Promise<ProviderGenerationResult> {
   const scopePriority = buildScopePriorityContext(context);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api' || scopeType === 'hybrid';
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
   const prdScopedThinTicket =
     scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';
   const systemPrompt = [
@@ -1090,13 +1172,19 @@ async function repairMissingCoverageWithProvider(
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
     'Generate repair cases from the same selected scope authority and final acceptance criteria only.',
-    'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    apiMode
+      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
+      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
     'caseIntent must be exactly one of: positive, negative, edge.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
     'The evidence object must include coverageNote only.',
+    apiMode && apiContractRelevant ? 'Use [API] postman cases for endpoint coverage and [DB] manual_db cases for database-only migration/backfill verification.' : '',
+    apiMode && !apiContractRelevant
+      ? 'This backend ticket does NOT change the HTTP API contract. Do not create Postman/API cases or invent endpoints. Use manual_db cases for data/schema/DB work, or manual_other otherwise.'
+      : '',
     'Each returned case must map to at least one missing acceptance criterion id.',
     'Keep the set minimal but sufficient.',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 
   const userPrompt = JSON.stringify(
     {

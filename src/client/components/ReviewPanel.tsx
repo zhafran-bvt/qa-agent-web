@@ -147,7 +147,7 @@ export function ReviewPanel({
 }: ReviewPanelProps) {
   const t = uiText[lang].review;
   const [selectedCaseIndex, setSelectedCaseIndex] = useState(0);
-  const [activeFilter, setActiveFilter] = useState<'all' | 'valid' | 'needsFix' | 'unmapped'>('all');
+  const [activeFilter, setActiveFilter] = useState<'all' | 'postman' | 'manualDb' | 'valid' | 'needsFix' | 'unmapped'>('all');
   const [activeTab, setActiveTab] = useState<'details' | 'validation' | 'mapping' | 'evidence' | 'history'>('details');
   const [searchQuery, setSearchQuery] = useState('');
   const searchRef = useRef<HTMLInputElement>(null);
@@ -157,6 +157,8 @@ export function ReviewPanel({
   const isUnmapped = (testCase: GeneratedTestCase) =>
     unmappedCaseIds.has(testCase.id) || !(testCase.coversAcceptanceCriteria && testCase.coversAcceptanceCriteria.length);
   const unmappedCount = coverage ? coverage.unmappedCases.length : testCases.filter(isUnmapped).length;
+  const postmanCount = testCases.filter((testCase) => testCase.executionType === 'postman').length;
+  const manualDbCount = testCases.filter((testCase) => testCase.executionType === 'manual_db').length;
   const coveragePercent = coverage?.totalCriteria ? Math.round((coverage.coveredCriteria / coverage.totalCriteria) * 100) : 0;
   const selectedCase = testCases[selectedCaseIndex] || testCases[0] || null;
   const selectedValidation = selectedCase ? validation[selectedCaseIndex] : null;
@@ -166,6 +168,8 @@ export function ReviewPanel({
     .map((testCase, index) => ({ testCase, index, validationEntry: validation[index] }))
     .filter((entry) => {
       if (activeFilter === 'valid' && !entry.validationEntry?.valid) return false;
+      if (activeFilter === 'postman' && entry.testCase.executionType !== 'postman') return false;
+      if (activeFilter === 'manualDb' && entry.testCase.executionType !== 'manual_db') return false;
       if (activeFilter === 'needsFix' && entry.validationEntry?.valid) return false;
       if (activeFilter === 'unmapped' && !isUnmapped(entry.testCase)) return false;
       if (query && !`${entry.testCase.id} ${entry.testCase.title}`.toLowerCase().includes(query)) return false;
@@ -296,6 +300,8 @@ export function ReviewPanel({
                 onChange={(event) => setSearchQuery(event.target.value)}
               />
               <button className={`review-filter ${activeFilter === 'all' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('all')}>{t.filterAll} {testCases.length}</button>
+              <button className={`review-filter ${activeFilter === 'postman' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('postman')}>{t.filterPostman} {postmanCount}</button>
+              <button className={`review-filter ${activeFilter === 'manualDb' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('manualDb')}>{t.filterManualDb} {manualDbCount}</button>
               <button className={`review-filter ${activeFilter === 'valid' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('valid')}>{t.filterValid} {validCount}</button>
               <button className={`review-filter ${activeFilter === 'needsFix' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('needsFix')}>{t.filterNeedsFix} {invalidCount}</button>
               <button className={`review-filter ${activeFilter === 'unmapped' ? 'active' : ''}`} type="button" onClick={() => setActiveFilter('unmapped')}>{t.filterUnmapped} {unmappedCount}</button>
@@ -397,6 +403,27 @@ export function ReviewPanel({
                         onChange={(next) => onCaseChange(selectedCaseIndex, 'bddScenario', next)}
                       />
                     </div>
+                    {selectedCase.apiSpec ? (
+                      <div className="evidence-row">
+                        <span className="evidence-label">{t.apiSpec}</span>
+                        <div className="readonly-block">
+                          <strong>{`${selectedCase.apiSpec.method} ${selectedCase.apiSpec.path}`}</strong>
+                          {selectedCase.apiSpec.samplePayload ? <pre>{selectedCase.apiSpec.samplePayload}</pre> : null}
+                          {selectedCase.apiSpec.expectedResponse ? <pre>{selectedCase.apiSpec.expectedResponse}</pre> : null}
+                          {selectedCase.apiSpec.assertions?.length ? <div>{selectedCase.apiSpec.assertions.join('\n')}</div> : null}
+                        </div>
+                      </div>
+                    ) : null}
+                    {selectedCase.manualVerification ? (
+                      <div className="evidence-row">
+                        <span className="evidence-label">{t.manualVerification}</span>
+                        <div className="readonly-block">
+                          <strong>{selectedCase.manualVerification.target}</strong>
+                          {selectedCase.manualVerification.steps.length ? <div>{selectedCase.manualVerification.steps.join('\n')}</div> : null}
+                          {selectedCase.manualVerification.expectedResult ? <div>{selectedCase.manualVerification.expectedResult}</div> : null}
+                        </div>
+                      </div>
+                    ) : null}
                   </>
                 ) : null}
 

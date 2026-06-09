@@ -2,6 +2,7 @@ interface ValidationOptions {
   jiraKey?: string;
   epic?: string;
   feOnly?: boolean;
+  scopeType?: 'web' | 'api' | 'hybrid';
   allowNonMainRefs?: boolean;
   acceptanceCriteria?: Array<{ id: string; text: string }>;
   enforceAcceptanceCriteria?: boolean;
@@ -11,6 +12,7 @@ interface GeneratedLikeCase {
   id?: string;
   title?: string;
   type?: string;
+  executionType?: 'postman' | 'manual_db' | 'manual_other';
   jiraReference?: string;
   refs?: string;
   preconditions?: string;
@@ -18,6 +20,18 @@ interface GeneratedLikeCase {
   bddScenario?: string;
   coversAcceptanceCriteria?: string[] | string;
   sourceScope?: string[] | string;
+  apiSpec?: {
+    method?: string;
+    path?: string;
+    samplePayload?: string;
+    expectedResponse?: string;
+    assertions?: string[];
+  };
+  manualVerification?: {
+    target?: string;
+    steps?: string[];
+    expectedResult?: string;
+  };
   evidence?: {
     coverageNote?: string;
   };
@@ -66,6 +80,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const jiraKey = normalizeText(options.jiraKey).toUpperCase();
   const epic = normalizeText(options.epic);
   const feOnly = Boolean(options.feOnly);
+  const scopeType = options.scopeType || (feOnly ? 'web' : 'web');
   const allowNonMainRefs = Boolean(options.allowNonMainRefs);
   const acceptanceCriteria = Array.isArray(options.acceptanceCriteria) ? options.acceptanceCriteria : [];
   const enforceAcceptanceCriteria = options.enforceAcceptanceCriteria !== false;
@@ -80,6 +95,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const coversAcceptanceCriteria = normalizeList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
   const sourceScope = normalizeList(testCase.sourceScope);
   const coverageNote = normalizeText(testCase.evidence?.coverageNote);
+  const executionType = testCase.executionType || (scopeType === 'api' || scopeType === 'hybrid' ? 'postman' : undefined);
 
   if (!title) errors.push('Title is required.');
   if (!refs) errors.push('Jira reference is required.');
@@ -89,8 +105,18 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     errors.push('Test case must map to at least one acceptance criterion.');
   }
 
-  if (title && !/^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/.test(title)) {
-    errors.push('Title must match [Web][{Epic}][Ticket ID] Title.');
+  if (title) {
+    const platformPattern =
+      scopeType === 'api' || scopeType === 'hybrid'
+        ? /^\[(Web|API|DB)\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
+        : /^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/;
+    if (!platformPattern.test(title)) {
+      errors.push(
+        scopeType === 'api' || scopeType === 'hybrid'
+          ? 'Title must match [API|DB|Web][{Epic}][Ticket ID] Title.'
+          : 'Title must match [Web][{Epic}][Ticket ID] Title.'
+      );
+    }
   }
 
   if (epic && title && !title.includes(`[${epic}]`)) {
@@ -126,6 +152,42 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     if (apiTerms.some((term) => lower.includes(term))) {
       errors.push('FE-only scope cannot include backend/API test coverage.');
     }
+  }
+
+  if ((scopeType === 'api' || scopeType === 'hybrid') && executionType === 'postman') {
+    const method = normalizeText(testCase.apiSpec?.method).toUpperCase();
+    const path = normalizeText(testCase.apiSpec?.path);
+    const bddLower = bdd.toLowerCase();
+    if (!method || !/^(GET|POST|PUT|PATCH|DELETE)$/.test(method)) {
+      errors.push('Postman API case must include apiSpec.method.');
+    }
+    if (!path || !path.startsWith('/')) {
+      errors.push('Postman API case must include apiSpec.path.');
+    }
+    if (method && path && !bddLower.includes(method.toLowerCase()) && !bdd.includes(path)) {
+      warnings.push('BDD scenario should mention the API method or path from apiSpec.');
+    }
+    if (/^(POST|PUT|PATCH)$/.test(method)) {
+      const payload = normalizeText(testCase.apiSpec?.samplePayload);
+      if (!payload && !/payload|request body|with body/i.test(bdd)) {
+        errors.push('Write API case must include sample payload in apiSpec or BDD steps.');
+      }
+    }
+    const expectedResponse = normalizeText(testCase.apiSpec?.expectedResponse);
+    if (!expectedResponse && !/response status|status should|response body|expected response/i.test(bdd)) {
+      errors.push('Postman API case must include expected response or response assertions.');
+    }
+  }
+
+  if ((scopeType === 'api' || scopeType === 'hybrid') && executionType === 'manual_db') {
+    const target = normalizeText(testCase.manualVerification?.target);
+    const steps = Array.isArray(testCase.manualVerification?.steps) ? testCase.manualVerification?.steps || [] : [];
+    const expectedResult = normalizeText(testCase.manualVerification?.expectedResult);
+    if (!target) errors.push('Manual DB case must include manualVerification.target.');
+    if (!steps.length && !/\b(select|sql|database|dataset_schema|db)\b/i.test(bdd)) {
+      errors.push('Manual DB case must include DB verification steps.');
+    }
+    if (!expectedResult) errors.push('Manual DB case must include manualVerification.expectedResult.');
   }
 
   if (!coverageNote) {

@@ -49,6 +49,7 @@ import type {
 
 const initialForm: AnalyzeRequest = {
   jiraKey: '',
+  scopeType: 'auto',
   feOnly: true,
   beAlreadyTested: false,
   includeComments: true,
@@ -194,6 +195,7 @@ export default function App() {
         jiraKey: context.ticketKey,
         epic: context.epic,
         feOnly: context.constraints.feOnly,
+        scopeType: context.constraints.scopeType,
         acceptanceCriteria: context.acceptanceCriteria,
         enforceAcceptanceCriteria: coverageEnforced,
         context,
@@ -291,6 +293,7 @@ export default function App() {
       jiraKey: context.ticketKey,
       epic: context.epic,
       feOnly: context.constraints.feOnly,
+      scopeType: context.constraints.scopeType,
       acceptanceCriteria: context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
       testCases: casesToPush,

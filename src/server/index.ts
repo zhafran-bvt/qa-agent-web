@@ -20,6 +20,7 @@ import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/su
 import { summarizeSprintBurndown } from './services/sprint-burndown';
 import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
 import { decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
+import { buildApiContract, assessApiContractRelevance } from './services/api-docs';
 import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
@@ -109,6 +110,7 @@ const config = {
     suiteId: process.env.TESTRAIL_SUITE_ID || process.env.TESTRAIL_PROJECT_ID || '1',
   },
   reporterUrl: (process.env.TESTRAIL_REPORTER_URL || '').replace(/\/$/, ''),
+  apiDocsUrl: process.env.API_DOCS_URL || 'https://dev.lokasi.com/api-docs/',
 };
 
 const persistence = createPersistence({
@@ -579,6 +581,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       defaults: {
         testrailSectionId: process.env.TESTRAIL_SECTION_ID || '',
         reporterUrl: config.reporterUrl,
+        apiDocsUrl: config.apiDocsUrl,
         llmProviders: config.llm.providers.map((provider) => ({
           name: provider.name,
           model: provider.model,
@@ -956,11 +959,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       jiraKey,
       user: session.user,
       feOnly: body.feOnly !== false,
+      scopeType: body.scopeType || 'auto',
+      apiDocsUrl: body.apiDocsUrl || config.apiDocsUrl,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
     });
     const context = await buildQaContext(createClient(sid, session, log), jiraKey, {
       feOnly: body.feOnly !== false,
+      scopeType: body.scopeType || 'auto',
+      apiDocsUrl: body.apiDocsUrl || config.apiDocsUrl,
       beAlreadyTested: Boolean(body.beAlreadyTested),
       includeComments: body.includeComments !== false,
       logger: log,
@@ -969,6 +976,26 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
       logger: log,
     });
+    if (finalizedContext.constraints.scopeType === 'api' || finalizedContext.constraints.scopeType === 'hybrid') {
+      // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
+      // actually API-contract work; internal backend work (migration/backfill/DB) skips the crawl.
+      const relevance = assessApiContractRelevance(finalizedContext);
+      finalizedContext.constraints.apiContractRelevant = relevance.relevant;
+      finalizedContext.constraints.apiContractRelevanceReason = relevance.reason;
+      if (relevance.relevant) {
+        try {
+          finalizedContext.apiContract = await buildApiContract(finalizedContext, finalizedContext.apiDocsUrl || config.apiDocsUrl);
+        } catch (error) {
+          finalizedContext.apiContract = {
+            sourceUrl: finalizedContext.apiDocsUrl || config.apiDocsUrl,
+            matchedEndpoints: [],
+            warnings: [`API docs enrichment failed: ${(error as Error).message}`],
+          };
+        }
+      } else {
+        log.info('context.api_docs_skipped', { jiraKey, reason: relevance.reason });
+      }
+    }
     log.info('context.ac_finalized', {
       jiraKey,
       source: finalizedContext.acceptanceCriteriaSource,
@@ -986,6 +1013,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       acceptanceCriteriaCount: finalizedContext.acceptanceCriteria.length,
       userStoryCount: finalizedContext.userStories.length,
       confidenceLevel: finalizedContext.confidenceLevel,
+      scopeType: finalizedContext.constraints.scopeType,
+      apiEndpointCount: finalizedContext.apiContract?.matchedEndpoints.length || 0,
     });
     await appendAudit({ type: 'analyze', user: session.user, jiraKey, linkedIssueCount: context.linkedIssues.length });
     sendJson(res, 200, { context: finalizedContext });
@@ -1059,6 +1088,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       coverageEnforced,
       acceptanceCriteriaCount: body.context.acceptanceCriteria.length,
       scopeAuthorityType: body.context.scopeAuthority?.type || 'none',
+      scopeType: body.context.constraints.scopeType,
       manualScopeOverride: generationContext.manualScopeOverride,
     });
     const generation = await generateTestCases(config.llm, generationContext);
@@ -1067,6 +1097,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       jiraKey: body.context.ticketKey,
       epic: body.context.epic,
       feOnly: body.context.constraints && body.context.constraints.feOnly,
+      scopeType: body.context.constraints?.scopeType,
       acceptanceCriteria: body.context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
     });
@@ -1131,6 +1162,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       jiraKey: body.jiraKey,
       epic: body.epic,
       feOnly: body.feOnly,
+      scopeType: body.scopeType || body.context?.constraints.scopeType,
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
@@ -1175,6 +1207,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       jiraKey: body.jiraKey,
       epic: body.epic,
       feOnly: body.feOnly,
+      scopeType: body.scopeType,
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
@@ -1264,6 +1297,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       jiraKey: body.jiraKey,
       epic: body.epic,
       feOnly: body.feOnly,
+      scopeType: body.scopeType,
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
