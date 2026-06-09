@@ -108,7 +108,7 @@ function isFragmentaryCriterion(text: string): boolean {
 }
 
 function isFeTestableRequirement(text: string): boolean {
-  return /(should|must|required|display|shown|hidden|enabled|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync|summary|narrative|score|scoring|risk|takeaways|tab|characteristics|signals|zone)/i.test(
+  return /(should|must|required|display|shown|hidden|enabled|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync|summary|narrative|score|scoring|risk|takeaways|tab|characteristics|signals|zone|api|endpoint|schema|validation|response|request|post|put|get|patch|delete|database|db|migration|backfill|dataset_schema|is_dimension|is_measure)/i.test(
     text
   );
 }

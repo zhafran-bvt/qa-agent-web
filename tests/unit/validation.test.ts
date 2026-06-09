@@ -143,3 +143,79 @@ test('marks coverage as not enforced when enforcement is explicitly disabled', (
   const coverage = buildCoverage([validCase], acceptanceCriteria, { enforceAcceptanceCriteria: false });
   assert.equal(coverage.enforced, false);
 });
+
+test('validates a Postman API case with payload and expected response', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[API][Spatial Analysis][ORB-3227] Create custom catchment config',
+      jiraReference: 'ORB-3227',
+      executionType: 'postman',
+      apiSpec: {
+        method: 'POST',
+        path: '/v1/analysis-configs',
+        samplePayload: '{"analysis_output":{"output_mode":"custom_catchment"}}',
+        expectedResponse: '{"id":"<id>"}',
+        assertions: ['response status is 200 or 201'],
+      },
+      bddScenario: `Feature: Analysis config API
+Scenario: Create custom catchment config
+Given the user is authenticated
+When the user sends POST /v1/analysis-configs with payload:
+"""
+{"analysis_output":{"output_mode":"custom_catchment"}}
+"""
+Then the response status should be 201
+And the response body should include "id"`,
+    },
+    { jiraKey: 'ORB-3227', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria }
+  );
+
+  assert.equal(result.valid, true);
+});
+
+test('rejects API write case without payload or expected response', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[API][Spatial Analysis][ORB-3227] Create custom catchment config',
+      jiraReference: 'ORB-3227',
+      executionType: 'postman',
+      apiSpec: { method: 'POST', path: '/v1/analysis-configs' },
+      bddScenario: `Feature: Analysis config API
+Scenario: Create custom catchment config
+Given the user is authenticated
+When the user sends POST /v1/analysis-configs
+Then it succeeds`,
+    },
+    { jiraKey: 'ORB-3227', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria }
+  );
+
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /sample payload/);
+  assert.match(result.errors.join('\n'), /expected response/);
+});
+
+test('validates manual DB verification cases in API scope', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[DB][Spatial Analysis][ORB-3016] Verify old dataset schema inference',
+      jiraReference: 'ORB-3016',
+      executionType: 'manual_db',
+      manualVerification: {
+        target: 'dataset_schema',
+        steps: ['Run SELECT attribute_column, is_dimension, is_measure FROM dataset_schema WHERE dataset_metadata_id = <id>'],
+        expectedResult: 'Inference flags are populated according to the AC.',
+      },
+      bddScenario: `Feature: Dataset schema backfill
+Scenario: Verify old dataset schema inference in DB
+Given the migration has run
+When QA checks dataset_schema using SQL
+Then is_dimension and is_measure should match the inference rules`,
+    },
+    { jiraKey: 'ORB-3016', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria }
+  );
+
+  assert.equal(result.valid, true);
+});

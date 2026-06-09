@@ -1,4 +1,5 @@
 import https from 'node:https';
+import http from 'node:http';
 import type { IncomingMessage } from 'node:http';
 
 export class UpstreamTimeoutError extends Error {
@@ -80,6 +81,59 @@ export async function requestHttpsJson<T>({
       });
     }
     if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+export async function requestText({
+  url,
+  method = 'GET',
+  headers = {},
+  upstream,
+  timeoutMs = Number(process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+}: {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  upstream: string;
+  timeoutMs?: number;
+}): Promise<{ body: string; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === 'http:' ? http : https;
+    let settled = false;
+    const req = transport.request(
+      {
+        hostname: parsed.hostname,
+        port: parsed.port || undefined,
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers: { Accept: 'application/json,text/html,text/plain,*/*', ...headers },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          resolve({ body: data, headers: res.headers, statusCode: res.statusCode || 500 });
+        });
+      }
+    );
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
+      req.setTimeout(timeoutMs, () => {
+        if (settled) return;
+        settled = true;
+        req.destroy(new UpstreamTimeoutError(upstream, timeoutMs));
+      });
+    }
     req.end();
   });
 }

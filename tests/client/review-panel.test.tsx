@@ -196,7 +196,8 @@ describe('ReviewPanel', () => {
     expect(document.querySelector('.source-link')?.getAttribute('href')).toBe('https://example.test/prd#AI-Summary-NO-SCORE');
   });
 
-  it('renders the BDD scenario as editable Given/When/Then steps', () => {
+  it('renders the BDD scenario as text by default and supports switching to steps', async () => {
+    const user = userEvent.setup();
     render(
       <ReviewPanel
         context={context}
@@ -211,7 +212,12 @@ describe('ReviewPanel', () => {
       />
     );
 
-    // Details tab is the default; the BDD string parses into step inputs.
+    // Details tab is the default; the BDD editor now opens in free-text mode (single textarea).
+    const textboxes = screen.getAllByRole('textbox') as HTMLTextAreaElement[];
+    expect(textboxes.some((el) => el.value.includes('Given x') && el.value.includes('Then z'))).toBe(true);
+
+    // Toggling to structured mode parses the scenario into Given/When/Then step inputs.
+    await user.click(screen.getByRole('button', { name: 'Edit as steps' }));
     expect(screen.getByDisplayValue('AI Summary')).toBeTruthy(); // Feature
     expect(screen.getByDisplayValue('View summary')).toBeTruthy(); // Scenario
     expect(screen.getByDisplayValue('x')).toBeTruthy(); // Given

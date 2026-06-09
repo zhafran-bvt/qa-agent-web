@@ -2061,9 +2061,9 @@ details[open] .source-caret { transform: rotate(90deg); }
 
 .analysis-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(340px, .68fr);
-  gap: 24px;
-  align-items: stretch;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
   padding: 20px 22px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -2073,8 +2073,8 @@ details[open] .source-caret { transform: rotate(90deg); }
 }
 
 .analysis-ticket {
-  padding-right: 24px;
-  border-right: 1px solid var(--line);
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--line);
 }
 
 .analysis-card h2,

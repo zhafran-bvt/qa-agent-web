@@ -10,7 +10,9 @@ interface BddEditorProps {
 
 export function BddEditor({ value, lang, onChange }: BddEditorProps) {
   const t = uiText[lang].review;
-  const [rawMode, setRawMode] = useState(false);
+  // Default to the free-text view: structured step rows fragment multi-line content (e.g. a
+  // triple-quoted JSON payload) into dozens of inputs. Step editing stays available via the toggle.
+  const [rawMode, setRawMode] = useState(true);
   const { parts, structured } = parseBddScenario(value);
 
   // Free-form (non-Gherkin) content, or explicit raw mode → never lose data.

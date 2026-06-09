@@ -1,9 +1,12 @@
 import { extractPageId, extractText, type SimplifiedIssue } from './atlassian';
+import { resolveScopeType } from './api-docs';
 import type { Logger } from './logger';
-import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, ScopeAuthority, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
+import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, QaScopeType, ScopeAuthority, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
 
 interface QaContextOptions {
   feOnly?: boolean;
+  scopeType?: QaScopeType;
+  apiDocsUrl?: string;
   beAlreadyTested?: boolean;
   includeComments?: boolean;
   logger?: Logger;
@@ -1333,6 +1336,13 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   const linkedIssueFetchConcurrency = Number(process.env.QA_CONTEXT_ISSUE_CONCURRENCY || 4);
   const confluenceFetchConcurrency = Number(process.env.QA_CONTEXT_CONFLUENCE_CONCURRENCY || 4);
   const mainIssue = await client.getIssue(jiraKey);
+  const resolvedScopeType = resolveScopeType({
+    requestedScopeType: options.scopeType || 'auto',
+    feOnly: options.feOnly,
+    title: mainIssue.summary || '',
+    text: [mainIssue.description || '', mainIssue.renderedDescription || '', ...(mainIssue.comments || [])].join('\n'),
+    labels: mainIssue.labels || [],
+  });
   const linkedIssueKeys = new Set<string>();
 
   for (const linked of mainIssue.linkedIssues || []) {
@@ -1673,10 +1683,15 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
       scopeAnchorResolvedFromChain: anchorResolvedFromChain,
     },
     constraints: {
-      feOnly: Boolean(options.feOnly),
+      feOnly: resolvedScopeType === 'web' ? options.feOnly !== false : false,
       beAlreadyTested: Boolean(options.beAlreadyTested),
+      scopeType: resolvedScopeType,
+      requestedScopeType: options.scopeType || (options.feOnly === false ? 'api' : 'web'),
     },
+    apiDocsUrl: options.apiDocsUrl,
     actualDevScopeGuidance:
-      'Use the main Jira issue for implementation-specific acceptance criteria, then the linked parent Story and its targeted PRD subsection for canonical scope. Blocking and BE tickets are context only.',
+      resolvedScopeType === 'api'
+        ? 'Use the main Jira issue for implementation-specific API and backend acceptance criteria, then linked technical design and API docs for endpoint contracts. UI-only PRD behavior is supporting context only.'
+        : 'Use the main Jira issue for implementation-specific acceptance criteria, then the linked parent Story and its targeted PRD subsection for canonical scope. Blocking and BE tickets are context only.',
   };
 }

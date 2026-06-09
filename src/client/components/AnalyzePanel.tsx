@@ -64,10 +64,6 @@ export function AnalyzePanel({
 
         <div className="toggle-row">
           <label className="checkbox">
-            <input type="checkbox" checked={form.feOnly} onChange={(event) => onChange({ feOnly: event.target.checked })} />
-            <span>{t.feOnlyScope}</span>
-          </label>
-          <label className="checkbox">
             <input type="checkbox" checked={form.beAlreadyTested} onChange={(event) => onChange({ beAlreadyTested: event.target.checked })} />
             <span>{t.beAlreadyTested}</span>
           </label>
@@ -76,7 +72,7 @@ export function AnalyzePanel({
             <span>{t.includeComments}</span>
           </label>
         </div>
-        {analyzeBlocker ? <div className="action-hint">{analyzeBlocker}</div> : null}
+        {analyzeBlocker && analyzeBlocker !== t.blockerTicket ? <div className="action-hint">{analyzeBlocker}</div> : null}
       </div>
 
       <div className="analysis-suggestions">

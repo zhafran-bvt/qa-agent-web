@@ -25,6 +25,7 @@ export interface ConfigResponse {
   defaults: {
     testrailSectionId: string;
     reporterUrl: string;
+    apiDocsUrl: string;
     llmProviders: LlmProviderStatus[];
   };
 }
@@ -69,10 +70,15 @@ export interface JiraSprintBurndownResponse {
 
 export interface AnalyzeRequest {
   jiraKey: string;
+  scopeType?: QaScopeType;
   feOnly: boolean;
   beAlreadyTested: boolean;
   includeComments: boolean;
+  apiDocsUrl?: string;
 }
+
+export type QaScopeType = 'web' | 'api' | 'auto';
+export type ResolvedQaScopeType = Exclude<QaScopeType, 'auto'>;
 
 export interface LinkedIssueSummary {
   key: string;
@@ -129,6 +135,20 @@ export interface SourceExcerptMatch {
   url?: string;
   kind?: 'jira' | 'prd';
   confidence?: 'verbatim' | 'closest' | 'weak';
+}
+
+export interface ApiContractEndpoint {
+  method: string;
+  path: string;
+  summary?: string;
+  source: 'jira' | 'confluence' | 'api_docs';
+  documentationExcerpt?: string;
+}
+
+export interface ApiContractSummary {
+  sourceUrl: string;
+  matchedEndpoints: ApiContractEndpoint[];
+  warnings: string[];
 }
 
 export interface ParentIssueSummary {
@@ -229,7 +249,16 @@ export interface QaContext {
   constraints: {
     feOnly: boolean;
     beAlreadyTested: boolean;
+    scopeType?: ResolvedQaScopeType;
+    requestedScopeType?: QaScopeType;
+    // For backend (api) scope: whether the ticket actually changes the HTTP API contract
+    // (endpoint refs or contract keywords) vs. internal backend work (migration, backfill, DB).
+    // Only API-contract work uses the API docs as reference.
+    apiContractRelevant?: boolean;
+    apiContractRelevanceReason?: string;
   };
+  apiDocsUrl?: string;
+  apiContract?: ApiContractSummary;
   actualDevScopeGuidance: string;
 }
 
@@ -260,12 +289,25 @@ export interface GeneratedTestCase {
   id: string;
   title: string;
   type: string;
+  executionType?: 'postman' | 'manual_db' | 'manual_other';
   caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference: string;
   preconditions: string;
   bddScenario: string;
   coversAcceptanceCriteria: string[];
   sourceScope: string[];
+  apiSpec?: {
+    method: string;
+    path: string;
+    samplePayload?: string;
+    expectedResponse?: string;
+    assertions?: string[];
+  };
+  manualVerification?: {
+    target: string;
+    steps: string[];
+    expectedResult: string;
+  };
   evidence: TestCaseEvidence;
 }
 
@@ -337,6 +379,7 @@ export interface ValidateRequest {
   jiraKey: string;
   epic: string;
   feOnly: boolean;
+  scopeType?: ResolvedQaScopeType;
   allowNonMainRefs?: boolean;
   acceptanceCriteria: ScopedItem[];
   enforceAcceptanceCriteria: boolean;

@@ -16,6 +16,7 @@ function delay(ms: number): Promise<void> {
 
 /** TestRail `add_case` body for a generated BDD case. Shared by push + manage. */
 export function buildGeneratedCaseBody(testCase: GeneratedTestCase): Record<string, unknown> {
+  const bddScenario = enrichBddScenario(testCase);
   return {
     title: testCase.title,
     template_id: 4,
@@ -23,8 +24,34 @@ export function buildGeneratedCaseBody(testCase: GeneratedTestCase): Record<stri
     priority_id: 2,
     refs: testCase.jiraReference,
     custom_preconds: testCase.preconditions,
-    custom_testrail_bdd_scenario: [{ content: testCase.bddScenario }],
+    custom_testrail_bdd_scenario: [{ content: bddScenario }],
   };
+}
+
+function enrichBddScenario(testCase: GeneratedTestCase): string {
+  const sections = [String(testCase.bddScenario || '').trim()];
+  if (testCase.apiSpec) {
+    const lines = [
+      '',
+      'API Spec:',
+      `${testCase.apiSpec.method || ''} ${testCase.apiSpec.path || ''}`.trim(),
+      testCase.apiSpec.samplePayload ? `Sample Payload:\n${testCase.apiSpec.samplePayload}` : '',
+      testCase.apiSpec.expectedResponse ? `Expected Response:\n${testCase.apiSpec.expectedResponse}` : '',
+      testCase.apiSpec.assertions?.length ? `Assertions:\n${testCase.apiSpec.assertions.map((item) => `- ${item}`).join('\n')}` : '',
+    ].filter(Boolean);
+    sections.push(lines.join('\n'));
+  }
+  if (testCase.manualVerification) {
+    const lines = [
+      '',
+      'Manual Verification:',
+      testCase.manualVerification.target ? `Target: ${testCase.manualVerification.target}` : '',
+      testCase.manualVerification.steps?.length ? `Steps:\n${testCase.manualVerification.steps.map((item) => `- ${item}`).join('\n')}` : '',
+      testCase.manualVerification.expectedResult ? `Expected Result: ${testCase.manualVerification.expectedResult}` : '',
+    ].filter(Boolean);
+    sections.push(lines.join('\n'));
+  }
+  return sections.filter(Boolean).join('\n');
 }
 
 function authHeader(config: TestRailConfig): string {

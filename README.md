@@ -77,6 +77,7 @@ Create an Atlassian OAuth 3LO app and set its callback to `http://localhost:5180
 | `ATLASSIAN_SCOPES` | prod | e.g. `read:jira-work read:confluence-content.all read:confluence-space.summary offline_access` |
 | `DATABASE_URL` | prod | Enables Postgres persistence; dev falls back to `file+memory` if init fails |
 | `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | ✅ (≥1) | Primary / fallback LLM. `OPENAI_MODEL`, `DEEPSEEK_MODEL` optional overrides |
+| `API_DOCS_URL` | optional | Default API documentation URL for API/hybrid ticket analysis; per-analysis override is available in the UI |
 | `TESTRAIL_BASE_URL` / `_USER` / `_API_KEY` | for push | TestRail credentials. `TESTRAIL_SECTION_ID` optional default |
 | `TESTRAIL_PROJECT_ID` | recommended for push | Enables the pre-push duplicate check that searches existing TestRail cases by Jira ref. Push still works without it, but duplicate review is skipped |
 | `ENCRYPTION_KEY` | prod | Encrypts stored Atlassian session tokens and per-user TestRail API keys. Rotating it invalidates encrypted stored credentials unless you migrate/re-encrypt them |

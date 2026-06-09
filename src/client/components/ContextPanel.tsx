@@ -26,6 +26,7 @@ function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTransl
     [t.ticket, context.ticketKey],
     [t.epic, context.epic],
     [t.acSource, context.acceptanceCriteriaSource || 'none'],
+    [t.scopeType, (context.constraints.scopeType || 'web').toUpperCase()],
     [t.confidence, context.confidenceLevel.toUpperCase()],
     [t.mainSummary, translation?.mainSummary || context.mainIssue.summary || '-'],
     [
@@ -126,6 +127,19 @@ export function ContextPanel({
         [t.prdMatchQuality, diagnostics.prdSubsectionMatchQuality || t.none],
         [t.matchedPrdHeading, diagnostics.matchedPrdSubsectionHeading || t.none],
         [t.discardedUserStoryFragments, String(diagnostics.userStoryFragmentsDiscardedCount || 0)],
+        ...(context?.constraints?.scopeType === 'api'
+          ? ([
+              [
+                t.apiDocsReference,
+                `${context?.constraints?.apiContractRelevant ? t.apiDocsUsed : t.apiDocsSkipped}${
+                  context?.constraints?.apiContractRelevanceReason ? ` — ${context.constraints.apiContractRelevanceReason}` : ''
+                }`,
+              ],
+            ] as Array<[string, string]>)
+          : []),
+        [t.apiDocs, context?.apiContract?.sourceUrl || t.none],
+        [t.apiEndpointMatches, String(context?.apiContract?.matchedEndpoints.length || 0)],
+        [t.apiWarnings, context?.apiContract?.warnings.join(' | ') || t.none],
       ]
     : [];
   return (
