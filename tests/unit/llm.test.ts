@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyOpenAiLogging,
   buildGenerationPromptContext,
   buildDeterministicDuplicateRecommendations,
   buildScopePriorityContext,
@@ -13,6 +14,27 @@ import {
   normalizeScopeSnapshotTranslation,
   normalizeTextList,
 } from '../../src/server/services/llm';
+
+test('applyOpenAiLogging adds store + metadata only for OpenAI hosts', () => {
+  const body = { model: 'gpt-5.4-mini', messages: [] };
+  const openai = applyOpenAiLogging(body, 'api.openai.com') as Record<string, unknown>;
+  assert.equal(openai.store, true);
+  assert.deepEqual(openai.metadata, { app: 'qa-agent-web' });
+  // non-OpenAI provider is left untouched
+  assert.deepEqual(applyOpenAiLogging(body, 'api.deepseek.com'), body);
+});
+
+test('applyOpenAiLogging respects OPENAI_STORE_LOGS=false', () => {
+  const body = { model: 'gpt-5.4-mini', messages: [] };
+  const prev = process.env.OPENAI_STORE_LOGS;
+  process.env.OPENAI_STORE_LOGS = 'false';
+  try {
+    assert.deepEqual(applyOpenAiLogging(body, 'api.openai.com'), body);
+  } finally {
+    if (prev === undefined) delete process.env.OPENAI_STORE_LOGS;
+    else process.env.OPENAI_STORE_LOGS = prev;
+  }
+});
 
 test('finds generated cases from common LLM JSON wrappers', () => {
   const testCases = [{ title: 'Case', bddScenario: 'Feature: Example' }];
