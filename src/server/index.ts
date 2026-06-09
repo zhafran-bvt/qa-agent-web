@@ -14,7 +14,7 @@ import {
 } from './services/atlassian';
 import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
-import { generateTestCases, recommendDuplicateCases, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
+import { generateTestCases, recommendDuplicateCases, selectScopedApiEndpoints, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/suggestions';
 import { summarizeSprintBurndown } from './services/sprint-burndown';
@@ -985,7 +985,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       finalizedContext.constraints.apiContractRelevanceReason = relevance.reason;
       if (relevance.relevant) {
         try {
-          finalizedContext.apiContract = await buildApiContract(finalizedContext, finalizedContext.apiDocsUrl || config.apiDocsUrl);
+          finalizedContext.apiContract = await buildApiContract(
+            finalizedContext,
+            finalizedContext.apiDocsUrl || config.apiDocsUrl,
+            (input) => selectScopedApiEndpoints(config.llm, input)
+          );
         } catch (error) {
           finalizedContext.apiContract = {
             sourceUrl: finalizedContext.apiDocsUrl || config.apiDocsUrl,

@@ -14,6 +14,29 @@ export class UpstreamTimeoutError extends Error {
   }
 }
 
+/**
+ * Turn a low-level socket error (ETIMEDOUT, ECONNRESET, …) into a human-readable, upstream-named
+ * message. These happen when the connection drops before any response arrives, so there is no
+ * provider error body to surface — we explain the network condition instead of leaking "read ETIMEDOUT".
+ */
+export function describeNetworkError(error: unknown, upstream: string): Error {
+  const code = (error as { code?: string })?.code || '';
+  const raw = error instanceof Error ? error.message : String(error);
+  const byCode: Record<string, string> = {
+    ETIMEDOUT: `${upstream} did not respond in time (connection timed out). Please try again.`,
+    ECONNRESET: `${upstream} closed the connection unexpectedly (reset). Please try again.`,
+    ECONNREFUSED: `Could not connect to ${upstream} (connection refused).`,
+    ENOTFOUND: `Could not resolve ${upstream} host (DNS lookup failed).`,
+    EAI_AGAIN: `Temporary DNS failure reaching ${upstream}. Please try again.`,
+    EPIPE: `${upstream} connection broke mid-request (broken pipe). Please try again.`,
+  };
+  const friendly = byCode[code] || (/timed out|etimedout/i.test(raw) ? `${upstream} did not respond in time. Please try again.` : '');
+  const decorated = new Error(friendly || `${upstream} request failed: ${raw}`) as Error & { code?: string; cause?: unknown };
+  if (code) decorated.code = code;
+  decorated.cause = error;
+  return decorated;
+}
+
 export async function requestHttpsJson<T>({
   url,
   method = 'GET',
@@ -71,7 +94,7 @@ export async function requestHttpsJson<T>({
     req.on('error', (error) => {
       if (settled) return;
       settled = true;
-      reject(error);
+      reject(describeNetworkError(error, upstream));
     });
     if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
       req.setTimeout(timeoutMs, () => {
@@ -125,7 +148,7 @@ export async function requestText({
     req.on('error', (error) => {
       if (settled) return;
       settled = true;
-      reject(error);
+      reject(describeNetworkError(error, upstream));
     });
     if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
       req.setTimeout(timeoutMs, () => {
@@ -175,7 +198,7 @@ export async function requestHttpsStream({
     req.on('error', (error) => {
       if (settled) return;
       settled = true;
-      reject(error);
+      reject(describeNetworkError(error, upstream));
     });
     if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
       req.setTimeout(timeoutMs, () => {

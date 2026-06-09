@@ -99,10 +99,50 @@ export function assessApiContractRelevance(context: QaContext): { relevant: bool
 function uniqueEndpoints(endpoints: ApiContractEndpoint[]): ApiContractEndpoint[] {
   const byKey = new Map<string, ApiContractEndpoint>();
   for (const endpoint of endpoints) {
-    const key = `${endpoint.method} ${endpoint.path}`;
+    // Endpoints without a resolved path are keyed by their label so they don't all collide.
+    const key = `${endpoint.method} ${endpoint.path || `~${(endpoint.label || '').toLowerCase()}`}`;
     if (!byKey.has(key)) byKey.set(key, endpoint);
   }
   return [...byKey.values()];
+}
+
+/** Type of the injected LLM endpoint selector (kept here so callers and api-docs agree on shape). */
+export type ApiEndpointSelector = (input: {
+  scopeText: string;
+  documentedEndpoints: ApiContractEndpoint[];
+}) => Promise<ApiContractEndpoint[]>;
+
+/**
+ * Normalize the LLM's chosen endpoints into validated ApiContractEndpoint records. Pure (no I/O) so
+ * the selection-parsing logic is unit-testable without calling a model. Confirms claimed paths
+ * against the documented set to set `source`/`inDocs` and borrow the real summary.
+ */
+export function normalizeSelectedEndpoints(raw: unknown, documented: ApiContractEndpoint[]): ApiContractEndpoint[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === 'object' && Array.isArray((raw as Record<string, unknown>).endpoints)
+      ? ((raw as Record<string, unknown>).endpoints as unknown[])
+      : [];
+  const out: ApiContractEndpoint[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const method = normalizeMethod(String(record.method || ''));
+    if (!HTTP_METHODS.includes(method as (typeof HTTP_METHODS)[number])) continue;
+    const path = normalizePath(String(record.path || ''));
+    const label = String(record.label || record.name || '').trim() || undefined;
+    if (!path && !label) continue;
+    const doc = path ? documented.find((candidate) => candidate.method === method && pathMatches(candidate.path, path)) : undefined;
+    out.push({
+      method,
+      path,
+      label,
+      source: doc ? 'api_docs' : 'jira',
+      summary: String(record.summary || doc?.summary || '').trim() || undefined,
+      documentationExcerpt: doc?.documentationExcerpt,
+    });
+  }
+  return uniqueEndpoints(out);
 }
 
 function tryParseJson(text: string): unknown | null {
@@ -142,17 +182,30 @@ function pathMatches(left: string, right: string): boolean {
   return normalizeTemplate(left) === normalizeTemplate(right);
 }
 
-function matchDocs(ticketEndpoints: ApiContractEndpoint[], docsEndpoints: ApiContractEndpoint[]): ApiContractEndpoint[] {
-  const matches: ApiContractEndpoint[] = [];
-  for (const endpoint of ticketEndpoints) {
-    const doc = docsEndpoints.find((candidate) => candidate.method === endpoint.method && pathMatches(candidate.path, endpoint.path));
-    matches.push(doc ? { ...endpoint, source: 'api_docs', summary: doc.summary, documentationExcerpt: doc.documentationExcerpt } : endpoint);
-  }
-  return uniqueEndpoints(matches);
-}
 
 function docsTimeoutMs(): number {
   return Number(process.env.API_DOCS_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 12_000);
+}
+
+function docsTotalBudgetMs(): number {
+  return Number(process.env.API_DOCS_TOTAL_TIMEOUT_MS || 20_000);
+}
+
+/** Reject if a promise outruns the budget, so a hung crawl can't block the caller. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }
 
 interface DocPortalPage {
@@ -225,8 +278,11 @@ async function crawlDocPortal(baseUrl: string): Promise<ApiContractEndpoint[]> {
   if (configResponse.statusCode < 200 || configResponse.statusCode >= 300) return [];
   const config = tryParseJson(configResponse.body) as DocPortalConfig | null;
   if (!config || !Array.isArray(config.groups)) return [];
-  const paths = collectDocPagePaths(config);
-  if (!paths.length) return [];
+  const allPaths = collectDocPagePaths(config);
+  if (!allPaths.length) return [];
+  // Hard cap on crawled pages so a huge portal can't make analysis grind for minutes.
+  const maxPages = Number(process.env.API_DOCS_MAX_PAGES || 40);
+  const paths = allPaths.slice(0, maxPages);
   const concurrency = Number(process.env.API_DOCS_CRAWL_CONCURRENCY || 6);
   const perPage = await mapWithConcurrency(paths, concurrency, async (path) => {
     try {
@@ -271,25 +327,46 @@ async function fetchApiDocs(url: string): Promise<ApiContractEndpoint[]> {
   return crawlDocPortal(url);
 }
 
-export async function buildApiContract(context: QaContext, apiDocsUrl: string): Promise<ApiContractSummary | undefined> {
+export async function buildApiContract(
+  context: QaContext,
+  apiDocsUrl: string,
+  selectEndpoints?: ApiEndpointSelector
+): Promise<ApiContractSummary | undefined> {
   const sourceUrl = String(apiDocsUrl || '').trim();
   if (!sourceUrl) return undefined;
   const warnings: string[] = [];
-  const ticketEndpoints = uniqueEndpoints([
-    ...extractEndpointMentions(contextSearchText(context), 'jira'),
-  ]);
-  if (!ticketEndpoints.length) {
-    warnings.push('No API endpoint mentions were found in Jira or Confluence scope.');
-  }
+
   let docsEndpoints: ApiContractEndpoint[] = [];
   try {
-    docsEndpoints = await fetchApiDocs(sourceUrl);
+    // Overall budget so a slow/large docs portal can never stall analysis (per-page timeout alone
+    // is unbounded across many pages). On timeout we proceed with Jira/Confluence as the source.
+    docsEndpoints = await withTimeout(fetchApiDocs(sourceUrl), docsTotalBudgetMs(), 'API docs lookup');
   } catch (error) {
     warnings.push(`API docs could not be fetched: ${(error as Error).message}`);
   }
   if (!docsEndpoints.length) {
     warnings.push('API docs were unavailable or did not expose parseable endpoints; Jira and Confluence remain the source of truth.');
   }
-  const matchedEndpoints = docsEndpoints.length ? matchDocs(ticketEndpoints, docsEndpoints) : ticketEndpoints;
+
+  // Endpoint identification is delegated to the LLM: it reads the ticket scope and the documented
+  // endpoints and decides which are in scope (matching prose like "Get dataset list" by meaning).
+  // No regex/keyword heuristic — if the selector is unavailable or fails, we surface no endpoints.
+  let matchedEndpoints: ApiContractEndpoint[] = [];
+  if (!selectEndpoints) {
+    warnings.push('Endpoint selection is unavailable (no LLM selector configured); endpoints were not identified.');
+  } else {
+    try {
+      matchedEndpoints = await withTimeout(
+        selectEndpoints({ scopeText: contextSearchText(context), documentedEndpoints: docsEndpoints }),
+        docsTotalBudgetMs(),
+        'API endpoint selection'
+      );
+    } catch (error) {
+      warnings.push(`API endpoint selection failed: ${(error as Error).message}`);
+    }
+  }
+  if (selectEndpoints && !matchedEndpoints.length && !warnings.some((w) => /selection failed/.test(w))) {
+    warnings.push('No API endpoints were identified as in-scope for this ticket.');
+  }
   return { sourceUrl, matchedEndpoints, warnings };
 }

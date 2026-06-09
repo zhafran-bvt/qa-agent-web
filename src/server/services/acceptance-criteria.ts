@@ -496,6 +496,8 @@ function selectSourceExcerptMatches(
   return selected;
 }
 
+type ExcerptSourceMeta = { location: string; url?: string; kind: 'jira' | 'prd' };
+
 function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
   // Attach small source excerpts for traceability without letting generic boilerplate become evidence.
   const authority = resolveAuthorityExcerptSource(context);
@@ -509,7 +511,30 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
     return criteria;
   }
 
-  const candidates = splitAuthorityIntoExcerptCandidates(authority.body);
+  // Search the scope authority AND the scoped parent PRD section. Synthesized ACs (e.g. behaviour
+  // inferred for a terse backend ticket) often trace to the PRD even when the authority is the Jira
+  // ticket — so include the PRD section as a second corpus. Authority candidates take priority on ties.
+  const sources: Array<{ body: string } & ExcerptSourceMeta> = [authority];
+  const section = context.scopeConfluenceSection;
+  if (section?.body && normalizeInlineText(section.body) && canonicalize(section.body) !== canonicalize(authority.body)) {
+    const sectionTitle = section.matchedHeading || section.title || '';
+    sources.push({
+      body: section.body,
+      location: sectionTitle ? `PRD: ${sectionTitle}` : 'PRD',
+      url: withAnchor(section.url, section.anchor),
+      kind: 'prd',
+    });
+  }
+
+  const candidateSources = new Map<string, ExcerptSourceMeta>();
+  const candidates: string[] = [];
+  for (const source of sources) {
+    for (const text of splitAuthorityIntoExcerptCandidates(source.body)) {
+      if (candidateSources.has(text)) continue;
+      candidateSources.set(text, { location: source.location, url: source.url, kind: source.kind });
+      candidates.push(text);
+    }
+  }
   if (!candidates.length) {
     logger?.info('context.ac_excerpt_selection', {
       jiraKey: context.ticketKey,
@@ -578,13 +603,16 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
 
     if (!selected.length && !weakFallback.length) return criterion;
 
-    const excerptMatches: NonNullable<ScopedItem['sourceExcerpts']> = (selected.length ? selected : weakFallback).map((entry) => ({
-      text: trimExcerpt(entry.candidate),
-      location: authority.location,
-      url: authority.url,
-      kind: authority.kind,
-      confidence: selected.length ? (entry.verbatim ? 'verbatim' : 'closest') : 'weak',
-    }));
+    const excerptMatches: NonNullable<ScopedItem['sourceExcerpts']> = (selected.length ? selected : weakFallback).map((entry) => {
+      const source = candidateSources.get(entry.candidate) || { location: authority.location, url: authority.url, kind: authority.kind };
+      return {
+        text: trimExcerpt(entry.candidate),
+        location: source.location,
+        url: source.url,
+        kind: source.kind,
+        confidence: selected.length ? (entry.verbatim ? 'verbatim' : 'closest') : 'weak',
+      };
+    });
     const primary = excerptMatches[0];
 
     return {

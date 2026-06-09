@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assessApiContractRelevance, collectDocPagePaths, extractEndpointMentions, resolveScopeType } from '../../src/server/services/api-docs';
+import { assessApiContractRelevance, collectDocPagePaths, extractEndpointMentions, normalizeSelectedEndpoints, resolveScopeType } from '../../src/server/services/api-docs';
 
 function makeContext(overrides: Record<string, unknown> = {}): any {
   return {
@@ -23,6 +23,43 @@ test('extracts API endpoint mentions from ticket text', () => {
     'PUT /v1/analysis-configs/{id}',
     'GET /datasets/{id}/analytics',
   ]);
+});
+
+test('normalizeSelectedEndpoints links LLM-chosen endpoints to the documented set', () => {
+  const documented = [
+    { method: 'GET', path: '/v1/datasets', source: 'api_docs' as const, summary: 'List datasets', documentationExcerpt: 'doc-1' },
+    { method: 'POST', path: '/v1/analysis', source: 'api_docs' as const, summary: 'Submit analysis' },
+  ];
+  const llmOutput = {
+    endpoints: [
+      { method: 'get', path: '/v1/datasets', label: 'Get dataset list' },
+      { method: 'POST', path: '/v1/analysis', summary: 'Submit analysis' },
+      { method: 'POST', path: '', label: 'Reset password' }, // referenced but not in docs
+      { method: 'BOGUS', path: '/x' }, // invalid method → dropped
+    ],
+  };
+
+  const out = normalizeSelectedEndpoints(llmOutput, documented);
+  const byKey = Object.fromEntries(out.map((e) => [`${e.method} ${e.path || e.label}`, e]));
+
+  // documented matches inherit source api_docs + the real summary/excerpt
+  assert.equal(byKey['GET /v1/datasets'].source, 'api_docs');
+  assert.equal(byKey['GET /v1/datasets'].summary, 'List datasets');
+  assert.equal(byKey['GET /v1/datasets'].documentationExcerpt, 'doc-1');
+  // a name-only reference not in docs stays source jira with its label
+  assert.equal(byKey['POST Reset password'].source, 'jira');
+  assert.equal(byKey['POST Reset password'].path, '');
+  // invalid method dropped
+  assert.equal(out.some((e) => e.method === 'BOGUS'), false);
+  assert.equal(out.length, 3);
+});
+
+test('normalizeSelectedEndpoints tolerates a bare array and empty input', () => {
+  assert.deepEqual(normalizeSelectedEndpoints(null, []), []);
+  assert.deepEqual(normalizeSelectedEndpoints({}, []), []);
+  const out = normalizeSelectedEndpoints([{ method: 'GET', path: '/a' }], []);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].source, 'jira'); // no documented match → jira
 });
 
 test('auto resolves BE endpoint-heavy tickets to API scope', () => {

@@ -48,13 +48,13 @@ test('rejects missing BDD keywords', () => {
   assert.match(result.errors.join('\n'), /Scenario:/);
 });
 
-test('rejects backend terms for FE-only scope', () => {
+test('allows API/endpoint mentions in FE BDD steps (FE-only backend-term rule removed)', () => {
   const result = validateCase(
     { ...validCase, bddScenario: `${validCase.bddScenario}\n    And the POST /v1/analysis-configs response should be valid` },
     { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria }
   );
-  assert.equal(result.valid, false);
-  assert.match(result.errors.join('\n'), /FE-only/);
+  assert.equal(result.valid, true);
+  assert.doesNotMatch(result.errors.join('\n'), /FE-only/);
 });
 
 test('does not reject FE-only scope when API appears only in title or feature label', () => {

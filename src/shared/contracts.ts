@@ -141,6 +141,8 @@ export interface SourceExcerptMatch {
 export interface ApiContractEndpoint {
   method: string;
   path: string;
+  /** Human phrase when the endpoint was referenced by name (e.g. "Get dataset list") rather than as METHOD /path. */
+  label?: string;
   summary?: string;
   source: 'jira' | 'confluence' | 'api_docs';
   documentationExcerpt?: string;

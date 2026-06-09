@@ -175,6 +175,52 @@ test('preserves strong explicit acceptance criteria through canonical synthesis'
   assert.equal(finalized.acceptanceCriteria[0].sourceExcerptKind, 'jira');
 });
 
+test('traces a synthesized AC to the parent PRD section when the Jira ticket has no matching line', async () => {
+  const prdLine = 'Users accessing the platform through a partner URL shall only access datasets assigned to their partner.';
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3198',
+    mainIssue: {
+      key: 'ORB-3198',
+      summary: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      // Ticket body is just an endpoint list — it does NOT contain the behavioural PRD line below.
+      description: 'Scope\n* Get dataset list\n* Submit analysis\n* Reset password',
+    },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      body: 'Scope\n* Get dataset list\n* Submit analysis\n* Reset password',
+      reason: 'Main Jira requirements from endpoint scope list.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3198',
+    },
+    scopeConfluenceSection: {
+      pageId: '599588937',
+      title: 'Settings & Auth',
+      url: 'https://example.test/prd',
+      anchor: '13.-As-a-Partner',
+      matchedHeading: 'As a Partner, I want a partner URL',
+      matched: true,
+      reason: '',
+      sourceIssueKey: 'ORB-675',
+      body: `Partner access rules:\n${prdLine}\nThe partner URL shows branded logo.`,
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: prdLine, source: 'ORB-3198 synthesized' }],
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async (input) => ({
+      acceptanceCriteria: input.rawSelectedAcceptanceCriteria.map((criterion, index) => ({ id: `AC-${index + 1}`, text: criterion.text })),
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+    }),
+  });
+
+  const ac = finalized.acceptanceCriteria[0];
+  assert.equal(ac.sourceExcerptKind, 'prd');
+  assert.match(String(ac.sourceExcerptLocation), /^PRD:/);
+  assert.match(String(ac.sourceExcerpt), /only access datasets assigned to their partner/);
+});
+
 test('repairs over-merged thin-ticket PRD synthesis into medium-granularity criteria', async () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3157',

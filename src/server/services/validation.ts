@@ -41,18 +41,6 @@ function normalizeText(value: unknown): string {
   return String(value || '').trim();
 }
 
-function extractFeOnlyValidationText(testCase: GeneratedLikeCase): string {
-  const preconditions = normalizeText(testCase.preconditions || testCase.custom_preconds);
-  const bdd = normalizeText(testCase.bddScenario);
-  const bddBehaviorLines = bdd
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => /^(Given|When|Then|And)\b/i.test(line))
-    .join(' ');
-
-  return ` ${preconditions} ${bddBehaviorLines} `.toLowerCase();
-}
-
 export function normalizeAcceptanceCriteriaId(value: unknown): string {
   const text = normalizeText(value)
     .toUpperCase()
@@ -79,7 +67,6 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const warnings: string[] = [];
   const jiraKey = normalizeText(options.jiraKey).toUpperCase();
   const epic = normalizeText(options.epic);
-  const feOnly = Boolean(options.feOnly);
   const scopeType = options.scopeType || 'web';
   const allowNonMainRefs = Boolean(options.allowNonMainRefs);
   const acceptanceCriteria = Array.isArray(options.acceptanceCriteria) ? options.acceptanceCriteria : [];
@@ -143,14 +130,6 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
       if (!validAcceptanceCriteriaIds.has(criterionId)) {
         errors.push(`Unknown acceptance criterion ${criterionId}.`);
       }
-    }
-  }
-
-  if (feOnly) {
-    const lower = extractFeOnlyValidationText(testCase);
-    const apiTerms = [' api ', ' endpoint ', ' request body ', ' response body ', ' post /', ' get /', ' put /', ' delete /'];
-    if (apiTerms.some((term) => lower.includes(term))) {
-      errors.push('FE-only scope cannot include backend/API test coverage.');
     }
   }
 

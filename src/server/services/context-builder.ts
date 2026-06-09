@@ -219,11 +219,20 @@ function isLikelyHeading(line: string): boolean {
   return /^[A-Z0-9][A-Za-z0-9 /&()_-]{2,120}$/.test(text);
 }
 
-function isCriterionText(text: string): boolean {
-  return (
-    text.length >= 8 &&
-    /(should|must|required|able|unable|cannot|can not|display|shown|hidden|enabled|disabled|sync|update|prevent|allow|error|match|return|persist|appear)/i.test(text)
-  );
+function isCriterionText(text: string, apiScope = false): boolean {
+  if (text.length < (apiScope ? 6 : 8)) return false;
+  if (/(should|must|required|able|unable|cannot|can not|display|shown|hidden|enabled|disabled|sync|update|prevent|allow|error|match|return|persist|appear)/i.test(text)) {
+    return true;
+  }
+  // Backend tickets often express scope as endpoint/operation bullets ("Get dataset list",
+  // "Submit analysis", "Reset password") rather than should/must sentences. Capturing these so the
+  // ticket's own scope wins over the parent PRD; the synthesizer refines them downstream.
+  if (apiScope) {
+    return /(get|post|put|patch|delete|retrieve|fetch|list|submit|send|create|read|update|upsert|remove|validate|validation|verify|verification|authenticate|authorize|authorization|login|logout|reset|forgot|activation|register|endpoint|\bapi\b|request|response|schema|dataset|export|import|stream|migration|backfill|database|access|permission|password|token)/i.test(
+      text
+    );
+  }
+  return false;
 }
 
 function isListItemStart(line: string): boolean {
@@ -240,13 +249,13 @@ function isExplicitRequirementHeading(line: string): boolean {
   );
 }
 
-function extractListBlockCriteria(lines: string[], source: string): Array<{ text: string; source: string }> {
+function extractListBlockCriteria(lines: string[], source: string, apiScope = false): Array<{ text: string; source: string }> {
   const criteria: Array<{ text: string; source: string }> = [];
   let currentItem = '';
 
   for (const line of lines) {
     if (isListItemStart(line)) {
-      if (currentItem && isCriterionText(cleanListLine(currentItem))) {
+      if (currentItem && isCriterionText(cleanListLine(currentItem), apiScope)) {
         criteria.push({ text: cleanListLine(currentItem), source });
       }
       currentItem = line;
@@ -255,7 +264,7 @@ function extractListBlockCriteria(lines: string[], source: string): Array<{ text
 
     if (currentItem) {
       if (shouldEndCriteriaSection(line)) {
-        if (isCriterionText(cleanListLine(currentItem))) {
+        if (isCriterionText(cleanListLine(currentItem), apiScope)) {
           criteria.push({ text: cleanListLine(currentItem), source });
         }
         currentItem = '';
@@ -265,7 +274,7 @@ function extractListBlockCriteria(lines: string[], source: string): Array<{ text
     }
   }
 
-  if (currentItem && isCriterionText(cleanListLine(currentItem))) {
+  if (currentItem && isCriterionText(cleanListLine(currentItem), apiScope)) {
     criteria.push({ text: cleanListLine(currentItem), source });
   }
 
@@ -297,7 +306,7 @@ function expandInlineRequirementLines(lines: string[]): string[] {
   return expanded;
 }
 
-function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtractionMode): CriteriaExtractionResult {
+function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtractionMode, apiScope = false): CriteriaExtractionResult {
   // Prefer explicit AC/requirements sections; broader inference is a fallback and is stricter for parent stories.
   const lines = expandInlineRequirementLines(
     normalizeMultilineText(text)
@@ -373,7 +382,7 @@ function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtra
     };
   }
 
-  const listBlockCriteria = extractListBlockCriteria(lines, source);
+  const listBlockCriteria = extractListBlockCriteria(lines, source, apiScope);
   if (listBlockCriteria.length) {
     return {
       items: listBlockCriteria,
@@ -383,7 +392,7 @@ function extractCriteriaByMode(text: string, source: string, mode: CriteriaExtra
 
   const inferred = lines
     .map((line) => cleanListLine(line))
-    .filter((line) => isCriterionText(line))
+    .filter((line) => isCriterionText(line, apiScope))
     .map((line) => ({ text: line, source }));
 
   return {
@@ -543,9 +552,9 @@ function mergeIssueMetadata(mainIssue: SimplifiedIssue, fetchedIssue: Simplified
   };
 }
 
-function extractMainIssueCriteria(mainIssue: SimplifiedIssue): ScopedItem[] {
-  const descriptionResult = extractCriteriaByMode(mainIssue.description, `${mainIssue.key} description`, 'main');
-  const renderedDescriptionResult = extractCriteriaByMode(mainIssue.renderedDescription, `${mainIssue.key} rendered description`, 'main');
+function extractMainIssueCriteria(mainIssue: SimplifiedIssue, apiScope = false): ScopedItem[] {
+  const descriptionResult = extractCriteriaByMode(mainIssue.description, `${mainIssue.key} description`, 'main', apiScope);
+  const renderedDescriptionResult = extractCriteriaByMode(mainIssue.renderedDescription, `${mainIssue.key} rendered description`, 'main', apiScope);
   return dedupeScopedItems(
     [
       ...descriptionResult.items,
@@ -1419,7 +1428,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     ...issue,
     classification: classifyLinkedIssue(issue),
   }));
-  const mainIssueCriteria = extractMainIssueCriteria(mainIssue);
+  const mainIssueCriteria = extractMainIssueCriteria(mainIssue, resolvedScopeType === 'api');
   const mainIssueThin = isThinMainIssue(mainIssue, mainIssueCriteria);
   const scopeParentIssue = classifiedLinkedIssues.find((issue) => issue.classification === 'parent story' && !issue.fetchError) || null;
   const scopeParentRelation = scopeParentIssue ? scopeParentIssue.linkRelation || 'is child of' : '';

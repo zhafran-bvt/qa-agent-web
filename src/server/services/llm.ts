@@ -1,4 +1,5 @@
 import type {
+  ApiContractEndpoint,
   DuplicateCaseRecommendation,
   ExistingTestRailCase,
   GeneratedTestCase,
@@ -6,6 +7,7 @@ import type {
   ScopeSnapshotTranslation,
 } from '../../shared/contracts';
 import { buildCoverage } from './validation';
+import { normalizeSelectedEndpoints } from './api-docs';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 import { requestHttpsJson } from './http';
 
@@ -157,12 +159,18 @@ export function buildScopePriorityContext(context: GenerateContext) {
 }
 
 function requestJson<T>(url: string, headers: Record<string, string>, body: unknown): Promise<T> {
+  let host = 'provider';
+  try {
+    host = new URL(url).host;
+  } catch {
+    /* keep default */
+  }
   return requestHttpsJson<T>({
     url,
     method: 'POST',
     headers,
     body,
-    upstream: 'LLM provider',
+    upstream: `LLM provider (${host})`,
     timeoutMs: Number(process.env.LLM_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 60_000),
   }).then((response) => {
     if (response.statusCode >= 200 && response.statusCode < 300) return response.body;
@@ -1322,4 +1330,73 @@ export async function translateScopeSnapshot(config: LlmConfig, context: QaConte
   }
 
   throw lastError || new Error('Scope snapshot translation failed.');
+}
+
+async function selectApiEndpointsWithProvider(
+  provider: ProviderConfig,
+  input: { scopeText: string; documentedEndpoints: ApiContractEndpoint[] }
+): Promise<ApiContractEndpoint[]> {
+  const systemPrompt = [
+    'You identify which HTTP API endpoints are in scope for a backend QA ticket.',
+    'You are given the ticket scope text and a list of documented endpoints (method, path, summary).',
+    'Return the endpoints the ticket actually targets. Match references written in prose (e.g. "Get dataset list", "Submit analysis", "Reset password") to the documented endpoints by meaning, not by exact string.',
+    'Prefer endpoints that appear in the documented list; copy their exact method and path.',
+    'If the ticket clearly references an endpoint that is NOT in the documented list, include it with your best-guess method and an empty path, and put the human phrase in "label".',
+    'Do not invent endpoints that the ticket does not reference. If nothing is in scope, return an empty array.',
+    'Return strict JSON only with this exact shape: {"endpoints":[{"method":"GET","path":"/v1/...","label":"","summary":""}]}',
+  ].join('\n');
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: JSON.stringify(
+            {
+              scope: input.scopeText.slice(0, 12_000),
+              documentedEndpoints: input.documentedEndpoints
+                .slice(0, 400)
+                .map((endpoint) => ({ method: endpoint.method, path: endpoint.path, summary: endpoint.summary || '' })),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    }
+  );
+
+  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  return normalizeSelectedEndpoints(parsed, input.documentedEndpoints);
+}
+
+export async function selectScopedApiEndpoints(
+  config: LlmConfig,
+  input: { scopeText: string; documentedEndpoints: ApiContractEndpoint[] }
+): Promise<ApiContractEndpoint[]> {
+  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  if (!providers.length) {
+    throw new Error('No LLM provider API key is configured.');
+  }
+
+  let lastError: Error | undefined;
+  for (let index = 0; index < providers.length; index += 1) {
+    try {
+      return await selectApiEndpointsWithProvider(providers[index], input);
+    } catch (error) {
+      lastError = error as Error;
+      const hasFallback = index < providers.length - 1;
+      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError || new Error('API endpoint selection failed.');
 }

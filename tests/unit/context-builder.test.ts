@@ -1173,3 +1173,67 @@ test('parses page id and anchor from story PRD links', () => {
   assert.equal(ref?.pageId, '897351682');
   assert.equal(ref?.anchor, '5.-As-a-PM,-I-want-the-filter-function');
 });
+
+test('backend ticket with an endpoint-list scope extracts its own criteria (main_jira, not parent PRD)', async () => {
+  const issues = {
+    'ORB-3198': {
+      key: 'ORB-3198',
+      summary: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      description:
+        'Scope\n\n* Partner dataset access validation on the following APIs\n    * Get dataset list\n    * Get dataset metadata/schema (detail)\n    * Get dataset data (stream & non-stream)\n    * Submit analysis\n    * User dataset export\n    * Forgot password\n    * Reset password',
+      renderedDescription: '',
+      labels: ['Backend'],
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'White label', issueType: 'Epic' },
+    },
+  };
+
+  const client = {
+    getIssue: async () => issues['ORB-3198'] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({ id: '1', title: 'unused', body: '' }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3198', { includeComments: true });
+
+  // Backend label → api scope.
+  assert.equal(context.constraints.scopeType, 'api');
+  // The endpoint bullets are captured as the ticket's own criteria, so main_jira wins.
+  assert.equal(context.acceptanceCriteriaSource, 'main_jira');
+  assert.ok(context.acceptanceCriteria.length >= 5, `expected >=5 criteria, got ${context.acceptanceCriteria.length}`);
+  assert.ok(
+    context.acceptanceCriteria.some((c) => /dataset list/i.test(c.text)),
+    'expected an extracted criterion mentioning the dataset list endpoint'
+  );
+});
+
+test('frontend ticket does NOT treat an endpoint-list bullet as criteria (control)', async () => {
+  const issues = {
+    'ORB-9001': {
+      key: 'ORB-9001',
+      summary: '[FE] Some UI work',
+      description: 'Scope\n\n* Get dataset list\n* Submit analysis',
+      renderedDescription: '',
+      labels: ['frontend'],
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+    },
+  };
+
+  const client = {
+    getIssue: async () => issues['ORB-9001'] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({ id: '1', title: 'unused', body: '' }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-9001', { includeComments: true });
+  assert.equal(context.constraints.scopeType, 'web');
+  // Endpoint-name bullets are not FE-testable criteria, so none are extracted from the ticket.
+  assert.equal(context.acceptanceCriteria.length, 0);
+});
