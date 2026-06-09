@@ -976,7 +976,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
       logger: log,
     });
-    if (finalizedContext.constraints.scopeType === 'api' || finalizedContext.constraints.scopeType === 'hybrid') {
+    if (finalizedContext.constraints.scopeType === 'api') {
       // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
       // actually API-contract work; internal backend work (migration/backfill/DB) skips the crawl.
       const relevance = assessApiContractRelevance(finalizedContext);

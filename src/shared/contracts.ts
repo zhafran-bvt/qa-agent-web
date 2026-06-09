@@ -77,7 +77,7 @@ export interface AnalyzeRequest {
   apiDocsUrl?: string;
 }
 
-export type QaScopeType = 'web' | 'api' | 'hybrid' | 'auto';
+export type QaScopeType = 'web' | 'api' | 'auto';
 export type ResolvedQaScopeType = Exclude<QaScopeType, 'auto'>;
 
 export interface LinkedIssueSummary {

@@ -2,7 +2,7 @@ interface ValidationOptions {
   jiraKey?: string;
   epic?: string;
   feOnly?: boolean;
-  scopeType?: 'web' | 'api' | 'hybrid';
+  scopeType?: 'web' | 'api';
   allowNonMainRefs?: boolean;
   acceptanceCriteria?: Array<{ id: string; text: string }>;
   enforceAcceptanceCriteria?: boolean;
@@ -80,7 +80,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const jiraKey = normalizeText(options.jiraKey).toUpperCase();
   const epic = normalizeText(options.epic);
   const feOnly = Boolean(options.feOnly);
-  const scopeType = options.scopeType || (feOnly ? 'web' : 'web');
+  const scopeType = options.scopeType || 'web';
   const allowNonMainRefs = Boolean(options.allowNonMainRefs);
   const acceptanceCriteria = Array.isArray(options.acceptanceCriteria) ? options.acceptanceCriteria : [];
   const enforceAcceptanceCriteria = options.enforceAcceptanceCriteria !== false;
@@ -95,7 +95,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const coversAcceptanceCriteria = normalizeList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
   const sourceScope = normalizeList(testCase.sourceScope);
   const coverageNote = normalizeText(testCase.evidence?.coverageNote);
-  const executionType = testCase.executionType || (scopeType === 'api' || scopeType === 'hybrid' ? 'postman' : undefined);
+  const executionType = testCase.executionType || (scopeType === 'api' ? 'postman' : undefined);
 
   if (!title) errors.push('Title is required.');
   if (!refs) errors.push('Jira reference is required.');
@@ -107,13 +107,13 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
 
   if (title) {
     const platformPattern =
-      scopeType === 'api' || scopeType === 'hybrid'
-        ? /^\[(Web|API|DB)\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
+      scopeType === 'api'
+        ? /^\[(API|DB)\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
         : /^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/;
     if (!platformPattern.test(title)) {
       errors.push(
-        scopeType === 'api' || scopeType === 'hybrid'
-          ? 'Title must match [API|DB|Web][{Epic}][Ticket ID] Title.'
+        scopeType === 'api'
+          ? 'Title must match [API|DB][{Epic}][Ticket ID] Title.'
           : 'Title must match [Web][{Epic}][Ticket ID] Title.'
       );
     }
@@ -154,7 +154,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     }
   }
 
-  if ((scopeType === 'api' || scopeType === 'hybrid') && executionType === 'postman') {
+  if (scopeType === 'api' && executionType === 'postman') {
     const method = normalizeText(testCase.apiSpec?.method).toUpperCase();
     const path = normalizeText(testCase.apiSpec?.path);
     const bddLower = bdd.toLowerCase();
@@ -179,7 +179,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     }
   }
 
-  if ((scopeType === 'api' || scopeType === 'hybrid') && executionType === 'manual_db') {
+  if (scopeType === 'api' && executionType === 'manual_db') {
     const target = normalizeText(testCase.manualVerification?.target);
     const steps = Array.isArray(testCase.manualVerification?.steps) ? testCase.manualVerification?.steps || [] : [];
     const expectedResult = normalizeText(testCase.manualVerification?.expectedResult);

@@ -1044,7 +1044,7 @@ export function isFallbackError(error: Error & { statusCode?: number }): boolean
 async function generateWithProvider(provider: ProviderConfig, context: GenerateContext) {
   const enforceCoverage = Boolean(context.coverageEnforced);
   const scopeType = context.constraints?.scopeType || 'web';
-  const apiMode = scopeType === 'api' || scopeType === 'hybrid';
+  const apiMode = scopeType === 'api';
   // A backend ticket that doesn't change the HTTP API contract (migration/backfill/DB) should
   // produce manual verification cases, not Postman/API cases. Default true for back-compat.
   const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
@@ -1073,7 +1073,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     apiMode
-      ? 'API cases must use titles [API][{Epic}][{Ticket ID}] Title and executionType "postman". Manual database verification cases must use [DB][{Epic}][{Ticket ID}] Title and executionType "manual_db". Web cases, only in hybrid mode, use [Web][{Epic}][{Ticket ID}] Title.'
+      ? 'API cases must use titles [API][{Epic}][{Ticket ID}] Title and executionType "postman". Manual database verification cases must use [DB][{Epic}][{Ticket ID}] Title and executionType "manual_db".'
       : 'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
     apiMode
@@ -1153,7 +1153,7 @@ async function repairMissingCoverageWithProvider(
 ): Promise<ProviderGenerationResult> {
   const scopePriority = buildScopePriorityContext(context);
   const scopeType = context.constraints?.scopeType || 'web';
-  const apiMode = scopeType === 'api' || scopeType === 'hybrid';
+  const apiMode = scopeType === 'api';
   const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
   const prdScopedThinTicket =
     scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';

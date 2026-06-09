@@ -41,7 +41,7 @@ export function resolveScopeType(input: {
   text?: string;
   labels?: string[];
 }): ResolvedQaScopeType {
-  if (input.requestedScopeType === 'web' || input.requestedScopeType === 'api' || input.requestedScopeType === 'hybrid') {
+  if (input.requestedScopeType === 'web' || input.requestedScopeType === 'api') {
     return input.requestedScopeType;
   }
   // The Jira label is authoritative: tickets are tagged `frontend` or `backend`.

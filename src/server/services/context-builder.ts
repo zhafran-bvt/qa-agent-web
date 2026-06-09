@@ -1686,7 +1686,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
       feOnly: resolvedScopeType === 'web' ? options.feOnly !== false : false,
       beAlreadyTested: Boolean(options.beAlreadyTested),
       scopeType: resolvedScopeType,
-      requestedScopeType: options.scopeType || (options.feOnly === false ? 'hybrid' : 'web'),
+      requestedScopeType: options.scopeType || (options.feOnly === false ? 'api' : 'web'),
     },
     apiDocsUrl: options.apiDocsUrl,
     actualDevScopeGuidance:

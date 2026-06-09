@@ -127,7 +127,7 @@ export function ContextPanel({
         [t.prdMatchQuality, diagnostics.prdSubsectionMatchQuality || t.none],
         [t.matchedPrdHeading, diagnostics.matchedPrdSubsectionHeading || t.none],
         [t.discardedUserStoryFragments, String(diagnostics.userStoryFragmentsDiscardedCount || 0)],
-        ...(context?.constraints?.scopeType === 'api' || context?.constraints?.scopeType === 'hybrid'
+        ...(context?.constraints?.scopeType === 'api'
           ? ([
               [
                 t.apiDocsReference,
