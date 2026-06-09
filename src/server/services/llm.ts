@@ -158,18 +158,6 @@ export function buildScopePriorityContext(context: GenerateContext) {
   };
 }
 
-/**
- * For OpenAI, opt the Chat Completions request into dashboard logging (`store: true`) plus a
- * metadata tag for filtering. Only applied to OpenAI hosts (other providers may reject unknown
- * fields), and disable-able with OPENAI_STORE_LOGS=false.
- */
-export function applyOpenAiLogging(body: unknown, host: string): unknown {
-  const isOpenAi = /(^|\.)openai\.com$/i.test(host) || /openai/i.test(host);
-  if (!isOpenAi || process.env.OPENAI_STORE_LOGS === 'false') return body;
-  if (!body || typeof body !== 'object') return body;
-  return { ...(body as Record<string, unknown>), store: true, metadata: { app: 'qa-agent-web' } };
-}
-
 function requestJson<T>(url: string, headers: Record<string, string>, body: unknown): Promise<T> {
   let host = 'provider';
   try {
@@ -181,7 +169,7 @@ function requestJson<T>(url: string, headers: Record<string, string>, body: unkn
     url,
     method: 'POST',
     headers,
-    body: applyOpenAiLogging(body, host),
+    body,
     upstream: `LLM provider (${host})`,
     timeoutMs: Number(process.env.LLM_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 60_000),
   }).then((response) => {
