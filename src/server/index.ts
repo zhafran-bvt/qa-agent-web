@@ -579,7 +579,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         database: persistence.isDatabaseBacked(),
       },
       defaults: {
-        testrailSectionId: process.env.TESTRAIL_SECTION_ID || '',
+        testrailSectionId: process.env.TESTRAIL_SECTION_ID || '69',
+        testrailApiSectionId: process.env.TESTRAIL_API_SECTION_ID || '19',
         reporterUrl: config.reporterUrl,
         apiDocsUrl: config.apiDocsUrl,
         llmProviders: config.llm.providers.map((provider) => ({

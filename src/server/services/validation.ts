@@ -108,13 +108,13 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   if (title) {
     const platformPattern =
       scopeType === 'api'
-        ? /^\[(API|DB)\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
-        : /^\[Web\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/;
+        ? /^\[BE\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
+        : /^\[FE\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/;
     if (!platformPattern.test(title)) {
       errors.push(
         scopeType === 'api'
-          ? 'Title must match [API|DB][{Epic}][Ticket ID] Title.'
-          : 'Title must match [Web][{Epic}][Ticket ID] Title.'
+          ? 'Title must match [BE][{Epic}][Ticket ID] Title.'
+          : 'Title must match [FE][{Epic}][Ticket ID] Title.'
       );
     }
   }

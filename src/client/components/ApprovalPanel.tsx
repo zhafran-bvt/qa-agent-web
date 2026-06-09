@@ -12,7 +12,6 @@ interface ApprovalPanelProps {
   pushBlocker: string;
   lang: UiLanguage;
   onApprovedChange: (value: boolean) => void;
-  onSectionIdChange: (value: string) => void;
   onPush: () => void;
 }
 
@@ -26,7 +25,6 @@ export function ApprovalPanel({
   pushBlocker,
   lang,
   onApprovedChange,
-  onSectionIdChange,
   onPush,
 }: ApprovalPanelProps) {
   const t = uiText[lang].approval;
@@ -37,7 +35,6 @@ export function ApprovalPanel({
     { ok: casesValid, label: t.gateCasesValid },
     { ok: coverageComplete, label: t.gateCoverage },
     { ok: approved, label: t.gateApproved },
-    { ok: sectionId.trim().length > 0, label: t.gateSection },
   ];
   const allGatesMet = gates.every((gate) => gate.ok);
 
@@ -67,11 +64,11 @@ export function ApprovalPanel({
         <span>{t.approveForTestrail}</span>
       </label>
 
-      <label className="field">
+      <div className="field">
         <span>{t.sectionId}</span>
-        <input value={sectionId} placeholder="69" onChange={(event) => onSectionIdChange(event.target.value)} />
-      </label>
-      <p className="field-hint">{t.sectionHint}</p>
+        <output className="field-readonly">{sectionId || '—'}</output>
+      </div>
+      <p className="field-hint">{t.sectionAuto}</p>
 
       <div className="push-gates">
         <div className="push-gates-title">{t.gatesTitle}</div>

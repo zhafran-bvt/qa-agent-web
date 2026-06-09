@@ -24,6 +24,7 @@ export interface ConfigResponse {
   };
   defaults: {
     testrailSectionId: string;
+    testrailApiSectionId: string;
     reporterUrl: string;
     apiDocsUrl: string;
     llmProviders: LlmProviderStatus[];

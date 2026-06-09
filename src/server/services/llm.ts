@@ -544,7 +544,9 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
   const apiMethod = String(apiSpecRecord.method || testCase.method || '').trim().toUpperCase();
   const apiPath = String(apiSpecRecord.path || testCase.path || testCase.endpoint || '').trim();
   const title = String(testCase.title || '');
-  const inferredExecutionType = /^\[DB\]/i.test(title) ? 'manual_db' : /^\[API\]/i.test(title) ? 'postman' : undefined;
+  // Titles use a single [BE]/[FE] tag (not [API]/[DB]), so execution type is inferred from the
+  // structured payload: an apiSpec ⇒ postman, a manualVerification block ⇒ manual_db.
+  const inferredExecutionType = apiMethod || apiPath ? 'postman' : Object.keys(manualRecord).length ? 'manual_db' : undefined;
   const executionType = normalizeExecutionType(testCase.executionType || testCase.execution_type) || inferredExecutionType;
   const manualSteps = Array.isArray(manualRecord.steps)
     ? manualRecord.steps.map((step) => String(step || '').trim()).filter(Boolean)
@@ -1073,8 +1075,8 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     apiMode
-      ? 'API cases must use titles [API][{Epic}][{Ticket ID}] Title and executionType "postman". Manual database verification cases must use [DB][{Epic}][{Ticket ID}] Title and executionType "manual_db".'
-      : 'Titles must follow [Web][{Epic}][{Ticket ID}] Title.',
+      ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases and "manual_db" for database/migration/ETL verification cases. Do not put API, DB, or Web in the title — only [BE].'
+      : 'Titles must follow [FE][{Epic}][{Ticket ID}] Title.',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
     apiMode
       ? 'For every postman case, include apiSpec with method, path, samplePayload when the endpoint accepts a body, expectedResponse, and assertions. The bddScenario must also include the sample payload and expected response/assertions in triple-quoted blocks so it is executable from Postman guidance.'
@@ -1178,7 +1180,7 @@ async function repairMissingCoverageWithProvider(
     'caseIntent must be exactly one of: positive, negative, edge.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
     'The evidence object must include coverageNote only.',
-    apiMode && apiContractRelevant ? 'Use [API] postman cases for endpoint coverage and [DB] manual_db cases for database-only migration/backfill verification.' : '',
+    apiMode && apiContractRelevant ? 'Use postman cases (executionType "postman") for endpoint coverage and manual_db cases (executionType "manual_db") for database-only migration/backfill verification. All titles use the [BE] tag.' : '',
     apiMode && !apiContractRelevant
       ? 'This backend ticket does NOT change the HTTP API contract. Do not create Postman/API cases or invent endpoints. Use manual_db cases for data/schema/DB work, or manual_other otherwise.'
       : '',

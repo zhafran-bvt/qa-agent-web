@@ -8,7 +8,7 @@ const acceptanceCriteria = [
 ];
 
 const validCase = {
-  title: '[Web][Spatial Analysis][ORB-3077] Save project with BVT polygon datasets',
+  title: '[FE][Spatial Analysis][ORB-3077] Save project with BVT polygon datasets',
   type: 'Happy Path',
   jiraReference: 'ORB-3077',
   coversAcceptanceCriteria: ['AC-1'],
@@ -34,7 +34,7 @@ test('validates a correct BDD test case', () => {
 
 test('rejects title/ref Jira mismatch', () => {
   const result = validateCase(
-    { ...validCase, title: '[Web][Spatial Analysis][ORB-3039] Save project with BVT polygon datasets' },
+    { ...validCase, title: '[FE][Spatial Analysis][ORB-3039] Save project with BVT polygon datasets' },
     { jiraKey: 'ORB-3077', epic: 'Spatial Analysis' }
   );
   assert.equal(result.valid, false);
@@ -61,7 +61,7 @@ test('does not reject FE-only scope when API appears only in title or feature la
   const result = validateCase(
     {
       ...validCase,
-      title: '[Web][Spatial Analysis][ORB-3118] Enable Add Dataset after Adm Area filter is selected',
+      title: '[FE][Spatial Analysis][ORB-3118] Enable Add Dataset after Adm Area filter is selected',
       jiraReference: 'ORB-3118',
       bddScenario: `Feature: Integrate API - Filter Line Dataset by Admin Area
 Scenario: Add Dataset becomes enabled after a valid Adm Area selection
@@ -128,7 +128,7 @@ test('builds coverage and flags uncovered criteria', () => {
       {
         ...validCase,
         id: 'TC-02',
-        title: '[Web][Spatial Analysis][ORB-3077] Global filter sync updates Adm Area',
+        title: '[FE][Spatial Analysis][ORB-3077] Global filter sync updates Adm Area',
         coversAcceptanceCriteria: ['AC-2'],
       },
     ],
@@ -148,7 +148,7 @@ test('validates a Postman API case with payload and expected response', () => {
   const result = validateCase(
     {
       ...validCase,
-      title: '[API][Spatial Analysis][ORB-3227] Create custom catchment config',
+      title: '[BE][Spatial Analysis][ORB-3227] Create custom catchment config',
       jiraReference: 'ORB-3227',
       executionType: 'postman',
       apiSpec: {
@@ -178,7 +178,7 @@ test('rejects API write case without payload or expected response', () => {
   const result = validateCase(
     {
       ...validCase,
-      title: '[API][Spatial Analysis][ORB-3227] Create custom catchment config',
+      title: '[BE][Spatial Analysis][ORB-3227] Create custom catchment config',
       jiraReference: 'ORB-3227',
       executionType: 'postman',
       apiSpec: { method: 'POST', path: '/v1/analysis-configs' },
@@ -200,7 +200,7 @@ test('validates manual DB verification cases in API scope', () => {
   const result = validateCase(
     {
       ...validCase,
-      title: '[DB][Spatial Analysis][ORB-3016] Verify old dataset schema inference',
+      title: '[BE][Spatial Analysis][ORB-3016] Verify old dataset schema inference',
       jiraReference: 'ORB-3016',
       executionType: 'manual_db',
       manualVerification: {

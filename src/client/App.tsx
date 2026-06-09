@@ -156,7 +156,7 @@ export default function App() {
     loadConfig()
       .then(async (response) => {
         setConfig(response);
-        setSectionId(response.defaults.testrailSectionId || '');
+        setSectionId(response.defaults.testrailSectionId || '69');
         if (response.authenticated) {
           setLoadingSuggestions(true);
           try {
@@ -181,6 +181,14 @@ export default function App() {
       })
       .finally(() => setLoadingConfig(false));
   }, []);
+
+  useEffect(() => {
+    // Section is chosen automatically by ticket scope (not user-editable): backend/API tickets
+    // go to the API section, everything else to the web section.
+    if (!config) return;
+    const isApiScope = context?.constraints?.scopeType === 'api';
+    setSectionId(isApiScope ? config.defaults.testrailApiSectionId : config.defaults.testrailSectionId);
+  }, [config, context]);
 
   useEffect(() => {
     // Revalidate edited/generated cases after a short debounce; initial generation already returns server validation.
@@ -255,9 +263,8 @@ export default function App() {
     if (!casesValid) return t.approval.blockerCasesInvalid;
     if (!coverageComplete) return t.approval.blockerCoverage;
     if (!approved) return t.approval.blockerApproval;
-    if (!sectionId.trim()) return t.approval.blockerSection;
     return '';
-  }, [approved, casesValid, coverageComplete, pushing, sectionId, t.approval, testCases.length]);
+  }, [approved, casesValid, coverageComplete, pushing, t.approval, testCases.length]);
 
   function removeToast(id: number) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -892,7 +899,6 @@ export default function App() {
                 results={pushResults}
                 pushBlocker={pushBlocker}
                 onApprovedChange={setApproved}
-                onSectionIdChange={setSectionId}
                 onPush={handlePush}
               />
               {pushedCases ? (

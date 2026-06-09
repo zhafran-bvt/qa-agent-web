@@ -169,6 +169,8 @@ export const uiText = {
       suggestionsUnavailable: 'Assigned ticket suggestions are unavailable right now.',
       noSuggestedTickets: 'No active sprint tickets assigned to you.',
       noSummary: 'No summary available.',
+      suggestionsPrev: 'Previous suggestions',
+      suggestionsNext: 'More suggestions',
       analyzing: 'Analyzing...',
       action: 'Analyze Jira + Confluence',
       connectTitle: 'Connect Atlassian to start',
@@ -200,6 +202,7 @@ export const uiText = {
       blockerSection: 'Enter a TestRail section ID before pushing.',
       blockerPushing: 'Pushing to TestRail now.',
       sectionHint: 'Find it in the TestRail section URL (…/sections/69).',
+      sectionAuto: 'Chosen automatically from the ticket scope (backend → API section, otherwise web section).',
       pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
         `Pushed ${pushed}/${total}${failed ? ` · ${failed} failed` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
       pushFailures: 'Failed cases',
@@ -823,6 +826,8 @@ export const uiText = {
       suggestionsUnavailable: 'Saran tiket lagi belum bisa dimuat.',
       noSuggestedTickets: 'Belum ada tiket sprint aktif yang di-assign ke kamu.',
       noSummary: 'Belum ada ringkasan tiket.',
+      suggestionsPrev: 'Saran sebelumnya',
+      suggestionsNext: 'Saran berikutnya',
       analyzing: 'Lagi analisis...',
       action: 'Analisis Jira + Confluence',
       connectTitle: 'Hubungkan Atlassian dulu',
@@ -854,6 +859,7 @@ export const uiText = {
       blockerSection: 'Isi section ID TestRail sebelum push.',
       blockerPushing: 'Lagi push ke TestRail.',
       sectionHint: 'Cari di URL section TestRail (…/sections/69).',
+      sectionAuto: 'Dipilih otomatis dari scope tiket (backend → section API, selain itu section web).',
       pushSummary: (pushed: number, failed: number, total: number, caseRefs: string) =>
         `Berhasil push ${pushed}/${total}${failed ? ` · ${failed} gagal` : ''}${caseRefs ? ` · ${caseRefs}` : ''}`,
       pushFailures: 'Case yang gagal',

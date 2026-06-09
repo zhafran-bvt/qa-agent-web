@@ -1,6 +1,66 @@
+import { useEffect, useRef, useState } from 'react';
 import type { AnalyzeRequest, SuggestedTicket } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
+
+function SuggestionsSlider({
+  suggestions,
+  onSelect,
+  t,
+}: {
+  suggestions: SuggestedTicket[];
+  onSelect: (ticketKey: string) => void;
+  t: (typeof uiText)['en']['analyze'];
+}) {
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const [canPrev, setCanPrev] = useState(false);
+  const [canNext, setCanNext] = useState(false);
+
+  function updateArrows() {
+    const el = scrollerRef.current;
+    if (!el) return;
+    setCanPrev(el.scrollLeft > 4);
+    setCanNext(el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+  }
+
+  useEffect(() => {
+    updateArrows();
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.addEventListener('scroll', updateArrows, { passive: true });
+    window.addEventListener('resize', updateArrows);
+    return () => {
+      el.removeEventListener('scroll', updateArrows);
+      window.removeEventListener('resize', updateArrows);
+    };
+  }, [suggestions.length]);
+
+  function slide(direction: number) {
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollBy({ left: direction * Math.max(280, el.clientWidth * 0.8), behavior: 'smooth' });
+  }
+
+  return (
+    <div className="suggestions-slider">
+      <button type="button" className="suggestions-arrow" aria-label={t.suggestionsPrev} disabled={!canPrev} onClick={() => slide(-1)}>
+        ‹
+      </button>
+      <div className="suggestions-list" ref={scrollerRef}>
+        {suggestions.map((ticket) => (
+          <button key={ticket.key} className="suggestion-item" type="button" onClick={() => onSelect(ticket.key)}>
+            <span className="suggestion-key">{ticket.key}</span>
+            <span className="suggestion-summary">{ticket.summary || t.noSummary}</span>
+            <span className="suggestion-meta">{[ticket.issueType, ticket.status].filter(Boolean).join(' - ')}</span>
+          </button>
+        ))}
+      </div>
+      <button type="button" className="suggestions-arrow" aria-label={t.suggestionsNext} disabled={!canNext} onClick={() => slide(1)}>
+        ›
+      </button>
+    </div>
+  );
+}
 
 interface AnalyzePanelProps {
   form: AnalyzeRequest;
@@ -96,17 +156,7 @@ export function AnalyzePanel({
         ) : suggestionsError ? (
           <div className="muted">{suggestionsError}</div>
         ) : suggestions.length ? (
-          <div className="suggestions-list">
-            {suggestions.map((ticket) => (
-              <button key={ticket.key} className="suggestion-item" type="button" onClick={() => onSuggestionSelect(ticket.key)}>
-                <span className="suggestion-key">{ticket.key}</span>
-                <span className="suggestion-summary">{ticket.summary || t.noSummary}</span>
-                <span className="suggestion-meta">
-                  {[ticket.issueType, ticket.status].filter(Boolean).join(' - ')}
-                </span>
-              </button>
-            ))}
-          </div>
+          <SuggestionsSlider suggestions={suggestions} onSelect={onSuggestionSelect} t={t} />
         ) : (
           <div className="muted">{t.noSuggestedTickets}</div>
         )}

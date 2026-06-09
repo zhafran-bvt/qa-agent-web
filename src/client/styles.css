@@ -680,6 +680,19 @@ a {
   resize: vertical;
 }
 
+.field-readonly {
+  display: inline-block;
+  width: fit-content;
+  min-width: 64px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-alt);
+  color: var(--text);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
 .review-textarea {
   line-height: 1.6;
 }
@@ -797,6 +810,10 @@ a {
   font-size: 14px;
   font-weight: 600;
   line-height: 1.45;
+  /* Break long unbroken tokens (e.g. VITE_FEATURE_FLAG_…) so they don't overflow the card. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
 }
 
 .suggestion-meta {
@@ -2103,17 +2120,65 @@ details[open] .source-caret { transform: rotate(90deg); }
   gap: 12px;
 }
 
+/* Suggested tickets are a horizontal slider: one row, swipe/scroll or use the arrows. */
+.suggestions-slider {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.suggestions-arrow {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.suggestions-arrow:hover:not(:disabled) {
+  border-color: rgba(37, 99, 235, 0.3);
+  color: var(--primary);
+}
+.suggestions-arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
 .analysis-suggestions .suggestions-list {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 10px;
   max-height: none;
-  overflow: visible;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  padding: 2px 2px 8px;
 }
 
 .analysis-suggestions .suggestion-item {
-  min-width: 140px;
-  gap: 3px;
+  flex: 0 0 clamp(240px, 80%, 290px);
+  gap: 4px;
   padding: 10px 12px;
+  min-width: 0;
+  overflow: hidden;
+  scroll-snap-align: start;
+}
+
+/* Push the meta line to the bottom so cards of different title lengths align. */
+.analysis-suggestions .suggestion-item .suggestion-meta {
+  margin-top: auto;
 }
 
 .compact-empty {
