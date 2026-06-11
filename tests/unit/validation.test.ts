@@ -5,6 +5,7 @@ import {
   endpointIsDocumented,
   normalizeAcceptanceCriteriaId,
   normalizeEndpointPath,
+  trulyUncoveredCriteria,
   validateCase,
 } from '../../src/server/services/validation';
 
@@ -303,6 +304,17 @@ Then values match`,
   );
 
   assert.match(result.warnings.join('\n'), /executionType is manual_db but apiSpec defines an HTTP endpoint/);
+});
+
+test('trulyUncoveredCriteria separates genuine gaps from weak-only-claimed ACs (so weak claims stay overrideable)', () => {
+  // AC-1 nothing claims (true gap); AC-2 is uncovered only because its sole claim was flagged weak.
+  const coverage = { uncoveredCriteria: ['AC-1', 'AC-2'], unsubstantiatedClaims: [{ caseId: 'TC-02', criterionId: 'AC-2' }] };
+  assert.deepEqual(trulyUncoveredCriteria(coverage), ['AC-1']); // AC-2 excluded → overrideable, not a hard block
+  assert.deepEqual(trulyUncoveredCriteria({ uncoveredCriteria: [], unsubstantiatedClaims: [] }), []);
+  assert.deepEqual(
+    trulyUncoveredCriteria({ uncoveredCriteria: ['AC-9'], unsubstantiatedClaims: [] }),
+    ['AC-9']
+  );
 });
 
 test('builds coverage that flags unsubstantiated claims without dropping them silently', () => {

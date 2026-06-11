@@ -293,6 +293,20 @@ export function validateCases(testCases: GeneratedLikeCase[], options: Validatio
   }));
 }
 
+/**
+ * Criteria that NOTHING substantiates AND nothing even weak-claims — i.e. genuinely uncovered. An AC
+ * that is uncovered only because its sole claim was flagged weak is excluded here: that case is
+ * overrideable via the weak-coverage acknowledgement, not a hard block. Push/preflight gate on this
+ * (true gap → block) rather than raw uncoveredCriteria (which conflates the two).
+ */
+export function trulyUncoveredCriteria(coverage: {
+  uncoveredCriteria: string[];
+  unsubstantiatedClaims: Array<{ criterionId: string }>;
+}): string[] {
+  const weakClaimed = new Set((coverage.unsubstantiatedClaims || []).map((claim) => claim.criterionId));
+  return (coverage.uncoveredCriteria || []).filter((id) => !weakClaimed.has(id));
+}
+
 export function buildCoverage(
   testCases: GeneratedLikeCase[],
   acceptanceCriteria: Array<{ id: string; text: string; source?: string }>,

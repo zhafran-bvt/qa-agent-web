@@ -22,7 +22,7 @@ import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUs
 import { assessEncryptionKeyStrength, decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
 import { buildApiContract, assessApiContractRelevance } from './services/api-docs';
 import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
-import { buildCoverage, validateCases } from './services/validation';
+import { buildCoverage, trulyUncoveredCriteria, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
 import { createPersistence, type SessionRecord } from './services/persistence';
@@ -1224,7 +1224,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const coverage = buildCoverage(testCases, body.acceptanceCriteria, {
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
     });
-    if (invalid.length || (coverage.enforced && coverage.uncoveredCriteria.length)) {
+    // Only a genuine gap (an AC nothing even claims) hard-blocks. An AC whose sole claim was flagged
+    // weak is overrideable via the weak-coverage acknowledgement below, not blocked here.
+    if (invalid.length || (coverage.enforced && trulyUncoveredCriteria(coverage).length)) {
       sendJson(res, 400, {
         error: invalid.length ? 'Validation failed.' : 'Acceptance criteria coverage is incomplete.',
         validation,
@@ -1325,7 +1327,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const coverage = buildCoverage(body.testCases || [], body.acceptanceCriteria, {
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
     });
-    if (invalid.length || (coverage.enforced && coverage.uncoveredCriteria.length)) {
+    // Genuine gaps hard-block; weak-only-claimed ACs fall through to the acknowledgement gate below.
+    if (invalid.length || (coverage.enforced && trulyUncoveredCriteria(coverage).length)) {
       sendJson(res, 400, {
         error: invalid.length ? 'Validation failed.' : 'Acceptance criteria coverage is incomplete.',
         validation,

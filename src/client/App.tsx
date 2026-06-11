@@ -227,10 +227,14 @@ export default function App() {
   const t = uiText[lang];
   const toastText = uiText[lang].toast;
   const casesValid = useMemo(() => testCases.length > 0 && validation.every((item) => item.valid), [testCases.length, validation]);
-  const coverageComplete = useMemo(
-    () => !coverageEnforced || !coverage || coverage.uncoveredCriteria.length === 0,
-    [coverage, coverageEnforced]
-  );
+  const coverageComplete = useMemo(() => {
+    if (!coverageEnforced || !coverage) return true;
+    // An AC that is uncovered only because its sole claim was flagged weak is overrideable via the
+    // preflight weak-coverage confirm — don't block the push for it. Only criteria that NOTHING claims
+    // (truly uncovered) block here. Matches the server gate.
+    const weakClaimed = new Set((coverage.unsubstantiatedClaims || []).map((claim) => claim.criterionId));
+    return coverage.uncoveredCriteria.every((id) => weakClaimed.has(id));
+  }, [coverage, coverageEnforced]);
   const stepperSteps = useMemo<Array<{ key: WorkflowStepKey; state: WorkflowStepState }>>(() => {
     const analyzeDone = Boolean(context);
     const scopeDone = testCases.length > 0;
