@@ -662,12 +662,11 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
   return result;
 }
 
-// BUG-03 step 3 (spike): a linked technical-spec page is fetched into context (buildQaContext pulls
-// Confluence links out of linked-issue descriptions) but is otherwise only background — its concrete
-// rules never become trackable criteria, so coverage reads green against PRD paraphrases. We surface
-// spec-like pages to the synthesizer here. NOTE: this spike does NOT add a distinct 'spec' authority
-// kind, so any excerpt that survives into a criterion is still labeled jira/prd downstream — the
-// provenance half of BUG-03 stays open until the full authority kind lands (step 2).
+// BUG-03: a linked technical-spec page is fetched into context (buildQaContext pulls Confluence links
+// out of linked-issue descriptions) but would otherwise only be background — its concrete rules never
+// becoming trackable criteria, so coverage reads green against PRD paraphrases. We surface spec-like
+// pages to the synthesizer here; attachSourceExcerpts (step 2) then labels spec-derived criteria with
+// the distinct 'spec' kind so their provenance is accurate, not mislabeled jira/prd.
 const SPEC_EXCERPT_TOTAL_CAP = 9000;
 const SPEC_EXCERPT_PER_PAGE_CAP = 6000;
 
