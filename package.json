@@ -7,7 +7,7 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
-    "prepare": "node scripts/install-hooks.mjs",
+    "prepare": "node -e \"const fs=require('node:fs');const cp=require('node:child_process');const p='scripts/install-hooks.mjs';if(fs.existsSync(p))cp.execFileSync(process.execPath,[p],{stdio:'inherit'});\"",
     "dev": "QA_AGENT_PORT=5180 QA_AGENT_BASE_URL=http://localhost:5180 ATLASSIAN_REDIRECT_URI=http://localhost:5180/auth/atlassian/callback concurrently \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "node --env-file=.env ./node_modules/.bin/tsx watch src/server/index.ts",
     "dev:client": "vite",
