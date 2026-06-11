@@ -4,3 +4,6 @@ dist/
 client-dist/
 audit-log.jsonl
 .DS_Store
+
+# clean-archive output (npm run pack:clean)
+qa-agent-web.zip

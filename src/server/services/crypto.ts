@@ -13,6 +13,26 @@ export function encryptionAvailable(): boolean {
   return rawKey().length > 0;
 }
 
+/**
+ * The AES key is SHA-256(ENCRYPTION_KEY) with no salt/work factor, which is only safe when the key is
+ * high-entropy random material (≥32 random bytes). Surface a warning when the configured value looks
+ * like a short/low-entropy human passphrase. Returns the problem string, or null when the key looks
+ * adequate. (We don't switch to scrypt/pbkdf2 here because that would invalidate already-encrypted
+ * secrets at rest; this is a guardrail, not a re-keying.)
+ */
+export function assessEncryptionKeyStrength(): string | null {
+  const key = rawKey();
+  if (!key) return null; // not configured → encryptionAvailable() handles that path
+  if (key.length < 32) {
+    return `ENCRYPTION_KEY is only ${key.length} characters; use ≥32 random bytes (e.g. \`openssl rand -base64 48\`).`;
+  }
+  const distinct = new Set(key).size;
+  if (distinct < 12) {
+    return `ENCRYPTION_KEY has low character diversity (${distinct} distinct chars); it looks like a weak passphrase rather than random bytes.`;
+  }
+  return null;
+}
+
 function derivedKey(): Buffer {
   return crypto.createHash('sha256').update(rawKey(), 'utf8').digest();
 }

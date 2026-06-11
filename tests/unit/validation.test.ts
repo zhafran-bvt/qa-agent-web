@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCoverage, normalizeAcceptanceCriteriaId, validateCase } from '../../src/server/services/validation';
+import {
+  buildCoverage,
+  endpointIsDocumented,
+  normalizeAcceptanceCriteriaId,
+  normalizeEndpointPath,
+  trulyUncoveredCriteria,
+  validateCase,
+} from '../../src/server/services/validation';
 
 const acceptanceCriteria = [
   { id: 'AC-1', text: 'Adm Area filter is required before Add Dataset button enabled' },
@@ -194,6 +201,139 @@ Then it succeeds`,
   assert.equal(result.valid, false);
   assert.match(result.errors.join('\n'), /sample payload/);
   assert.match(result.errors.join('\n'), /expected response/);
+});
+
+test('normalizeEndpointPath collapses concrete ids and trailing slashes to the documented template', () => {
+  assert.equal(normalizeEndpointPath('/v1/datasets/42/'), normalizeEndpointPath('/v1/datasets/{id}'));
+  assert.equal(normalizeEndpointPath('/v1/Datasets/42?expand=schema'), normalizeEndpointPath('/v1/datasets/:datasetId'));
+  assert.equal(
+    normalizeEndpointPath('/v1/datasets/3f2504e0-4f89-41d3-9a0c-0305e82c3301'),
+    normalizeEndpointPath('/v1/datasets/{uuid}')
+  );
+  assert.notEqual(normalizeEndpointPath('/v1/datasets'), normalizeEndpointPath('/v1/analysis'));
+});
+
+test('endpointIsDocumented matches structurally and respects method, no-op on empty contract', () => {
+  const matched = [{ method: 'GET', path: '/v1/datasets/{id}' }];
+  assert.equal(endpointIsDocumented('GET', '/v1/datasets/42', matched), true);
+  assert.equal(endpointIsDocumented('GET', '/v1/datasets/42', []), true); // nothing to compare against
+  assert.equal(endpointIsDocumented('DELETE', '/v1/datasets/42', matched), false); // method mismatch
+  assert.equal(endpointIsDocumented('GET', '/v1/partners', matched), false); // path not in contract
+});
+
+test('warns when a postman case targets an endpoint absent from the matched contract', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-3227] Reset partner credentials',
+      jiraReference: 'ORB-3227',
+      executionType: 'postman',
+      apiSpec: {
+        method: 'POST',
+        path: '/v1/partners/reset',
+        samplePayload: '{"partner_id":"<id>"}',
+        expectedResponse: '{"status":"ok"}',
+        assertions: ['response status is 200'],
+      },
+      bddScenario: `Feature: Partner API
+Scenario: Reset partner credentials
+Given the user is authenticated
+When the user sends POST /v1/partners/reset with payload
+Then the response status should be 200`,
+    },
+    {
+      jiraKey: 'ORB-3227',
+      epic: 'Spatial Analysis',
+      scopeType: 'api',
+      acceptanceCriteria,
+      matchedEndpoints: [{ method: 'GET', path: '/v1/datasets/{id}' }],
+    }
+  );
+
+  assert.equal(result.valid, true); // provenance is a warning, not a hard failure
+  assert.match(result.warnings.join('\n'), /not in the matched API contract/);
+});
+
+test('does not warn on endpoint provenance when no contract was matched', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-3227] Create config',
+      jiraReference: 'ORB-3227',
+      executionType: 'postman',
+      apiSpec: {
+        method: 'POST',
+        path: '/v1/analysis-configs',
+        samplePayload: '{"x":1}',
+        expectedResponse: '{"id":"<id>"}',
+        assertions: ['response status is 201'],
+      },
+      bddScenario: `Feature: Config API
+Scenario: Create config
+Given the user is authenticated
+When the user sends POST /v1/analysis-configs with payload
+Then the response status should be 201`,
+    },
+    { jiraKey: 'ORB-3227', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria }
+  );
+
+  assert.equal(result.valid, true);
+  assert.doesNotMatch(result.warnings.join('\n'), /not in the matched API contract/);
+});
+
+test('warns when executionType contradicts a populated apiSpec', () => {
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-3016] Inspect schema',
+      jiraReference: 'ORB-3016',
+      executionType: 'manual_db',
+      apiSpec: { method: 'GET', path: '/v1/datasets/{id}/schema' },
+      manualVerification: {
+        target: 'dataset_schema',
+        steps: ['Run SELECT * FROM dataset_schema'],
+        expectedResult: 'rows match',
+      },
+      bddScenario: `Feature: Schema
+Scenario: Inspect schema
+Given the migration has run
+When QA checks dataset_schema using SQL
+Then values match`,
+    },
+    { jiraKey: 'ORB-3016', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria }
+  );
+
+  assert.match(result.warnings.join('\n'), /executionType is manual_db but apiSpec defines an HTTP endpoint/);
+});
+
+test('trulyUncoveredCriteria separates genuine gaps from weak-only-claimed ACs (so weak claims stay overrideable)', () => {
+  // AC-1 nothing claims (true gap); AC-2 is uncovered only because its sole claim was flagged weak.
+  const coverage = { uncoveredCriteria: ['AC-1', 'AC-2'], unsubstantiatedClaims: [{ caseId: 'TC-02', criterionId: 'AC-2' }] };
+  assert.deepEqual(trulyUncoveredCriteria(coverage), ['AC-1']); // AC-2 excluded → overrideable, not a hard block
+  assert.deepEqual(trulyUncoveredCriteria({ uncoveredCriteria: [], unsubstantiatedClaims: [] }), []);
+  assert.deepEqual(
+    trulyUncoveredCriteria({ uncoveredCriteria: ['AC-9'], unsubstantiatedClaims: [] }),
+    ['AC-9']
+  );
+});
+
+test('builds coverage that flags unsubstantiated claims without dropping them silently', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        ...validCase,
+        coversAcceptanceCriteria: ['AC-1', 'AC-2'],
+      },
+    ],
+    [
+      { id: 'AC-1', text: 'BVT polygon datasets can be saved to a project' },
+      { id: 'AC-2', text: 'Email routing CTA link contains the partner microsite URL' },
+    ]
+  );
+
+  // AC-2 (email routing / partner microsite) is claimed but the case never mentions email or microsite.
+  assert.ok(coverage.unsubstantiatedClaims.some((claim) => claim.criterionId === 'AC-2'));
+  assert.ok(coverage.uncoveredCriteria.includes('AC-2'));
 });
 
 test('validates manual DB verification cases in API scope', () => {

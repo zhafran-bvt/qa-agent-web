@@ -100,7 +100,11 @@ export async function requestHttpsJson<T>({
       req.setTimeout(timeoutMs, () => {
         if (settled) return;
         settled = true;
-        req.destroy(new UpstreamTimeoutError(upstream, timeoutMs));
+        // Reject directly: destroying the socket fires 'error', but that handler is guarded by the
+        // now-true `settled` flag, so relying on it would leave the promise pending forever (a hung
+        // request). Tear the socket down for cleanup and settle the promise here.
+        req.destroy();
+        reject(new UpstreamTimeoutError(upstream, timeoutMs));
       });
     }
     if (payload) req.write(payload);
@@ -154,7 +158,11 @@ export async function requestText({
       req.setTimeout(timeoutMs, () => {
         if (settled) return;
         settled = true;
-        req.destroy(new UpstreamTimeoutError(upstream, timeoutMs));
+        // Reject directly: destroying the socket fires 'error', but that handler is guarded by the
+        // now-true `settled` flag, so relying on it would leave the promise pending forever (a hung
+        // request). Tear the socket down for cleanup and settle the promise here.
+        req.destroy();
+        reject(new UpstreamTimeoutError(upstream, timeoutMs));
       });
     }
     req.end();
@@ -204,7 +212,11 @@ export async function requestHttpsStream({
       req.setTimeout(timeoutMs, () => {
         if (settled) return;
         settled = true;
-        req.destroy(new UpstreamTimeoutError(upstream, timeoutMs));
+        // Reject directly: destroying the socket fires 'error', but that handler is guarded by the
+        // now-true `settled` flag, so relying on it would leave the promise pending forever (a hung
+        // request). Tear the socket down for cleanup and settle the promise here.
+        req.destroy();
+        reject(new UpstreamTimeoutError(upstream, timeoutMs));
       });
     }
     req.end();

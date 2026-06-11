@@ -176,9 +176,11 @@ function requestJson<T>(url: string, headers: Record<string, string>, body: unkn
     if (response.statusCode >= 200 && response.statusCode < 300) return response.body;
     const parsedBody = response.body as any;
     const message = parsedBody?.error?.message || `HTTP ${response.statusCode}`;
-    const error = new Error(message) as Error & { statusCode?: number; response?: unknown };
+    // Carry only the status (used by isFallbackError) and a clean message. The raw provider body is
+    // deliberately not attached to the error: it's never read, and keeping it off the error object
+    // avoids leaking provider response details if an upstream handler ever serializes the error.
+    const error = new Error(message) as Error & { statusCode?: number };
     error.statusCode = response.statusCode;
-    error.response = parsedBody;
     throw error;
   });
 }
@@ -200,6 +202,18 @@ function extractJson(text: string): unknown {
     }
     throw error;
   }
+}
+
+export function providerContent(response: any, label: string): string {
+  // Truncation guard (BUG-09): when the model hits the token cap mid-response, finish_reason is
+  // 'length' and the JSON is incomplete. extractJson's array-slice fallback would happily parse the
+  // truncated remainder into a partial-but-valid array, silently dropping cases/criteria. Treat
+  // truncation as a provider error so the fallback/retry path handles it instead.
+  const choice = response?.choices?.[0];
+  if (choice?.finish_reason === 'length') {
+    throw new Error(`LLM ${label} response was truncated (finish_reason=length); reduce scope or raise the response token limit.`);
+  }
+  return choice?.message?.content ?? '';
 }
 
 export function findCaseArray(value: unknown): unknown[] | null {
@@ -430,13 +444,13 @@ function normalizeScopedItems(
       text: string;
       location?: string;
       url?: string;
-      kind?: 'jira' | 'prd';
+      kind?: 'jira' | 'prd' | 'spec';
       confidence?: 'verbatim' | 'closest' | 'weak';
     }>;
     sourceExcerpt?: string;
     sourceExcerptLocation?: string;
     sourceExcerptUrl?: string;
-    sourceExcerptKind?: 'jira' | 'prd';
+    sourceExcerptKind?: 'jira' | 'prd' | 'spec';
     sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
   }>
 ): Array<{
@@ -446,13 +460,13 @@ function normalizeScopedItems(
     text: string;
     location?: string;
     url?: string;
-    kind?: 'jira' | 'prd';
+    kind?: 'jira' | 'prd' | 'spec';
     confidence?: 'verbatim' | 'closest' | 'weak';
   }>;
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
-  sourceExcerptKind?: 'jira' | 'prd';
+  sourceExcerptKind?: 'jira' | 'prd' | 'spec';
 }> {
   // Localized scope snapshots must preserve ids and source excerpts from the original English context.
   if (!Array.isArray(value)) return fallback;
@@ -713,6 +727,18 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       : 'Parent Story and PRD are supporting context only and must not expand scope beyond the main ticket.',
     'Prefer testable behavior and owned payload or data contracts for the resolved ticket scope.',
     'Ignore background, non-goals, unrelated dependency notes, code scaffolding, partial flow-control lines, and duplicate rendered/plain fragments.',
+    input.technicalSpecExcerpts
+      ? 'A linked Technical Specification is provided in input.technicalSpecExcerpts. Treat it as the authoritative implementation detail for the behaviors already in this ticket\'s scope — it is more precise than the PRD, which only paraphrases intent.'
+      : '',
+    input.technicalSpecExcerpts
+      ? 'Ground each criterion in the spec\'s concrete rules and capture spec-level behavior the PRD merely implies: point-in-time vs per-call access checks, per-endpoint or per-RPC enforcement (each endpoint/RPC that takes an id must be validated individually), exact filter semantics, and backward-compatibility or null-value edges. Derive a distinct criterion for each such rule.'
+      : '',
+    input.technicalSpecExcerpts
+      ? 'Use the spec only to SHARPEN and COMPLETE criteria for behavior already in the ticket scope — do not add features outside the ticket. If the spec marks something deferred, not-done, or out of scope, do not turn it into an active criterion (note it as out of scope instead).'
+      : '',
+    input.technicalSpecExcerpts && input.scopeBoundary
+      ? `The ticket's in-scope operations are exactly: ${input.scopeBoundary}. Derive criteria ONLY for these operations and the behaviors the ticket description lists. The spec describes a broader feature than this one ticket — do NOT promote a spec capability into an active criterion when it has no matching in-scope operation (for example, login / authentication URL isolation when no login or auth-login endpoint is in scope; that belongs to a different ticket). Treat such capabilities as background context only.`
+      : '',
     'If the raw acceptance criteria are already strong, preserve them semantically while normalizing wording and deduplicating.',
     targetInstruction,
     input.granularityHint || '',
@@ -740,7 +766,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     { Authorization: `Bearer ${provider.apiKey}` },
     {
       model: provider.model,
-      temperature: 0.1,
+      temperature: 0, // deterministic AC synthesis: same ticket → stable criteria set run-to-run
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
@@ -759,7 +785,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'synthesis');
   const parsed = extractJson(content);
   const criteria = findAcceptanceCriteriaArray(parsed);
   if (!Array.isArray(criteria)) {
@@ -769,15 +795,22 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
   let normalizedCriteria = normalizeSynthesisCriteria(criteria);
 
   if (needsGranularityRepair(input, normalizedCriteria)) {
+    const specGrounded = Boolean(input.technicalSpecExcerpts);
     const repairPrompt = [
-      'You are repairing an over-merged FE acceptance-criteria set.',
+      specGrounded
+        ? 'You are repairing an over-merged acceptance-criteria set for a spec-grounded backend ticket.'
+        : 'You are repairing an over-merged FE acceptance-criteria set.',
       'Keep scope identical to the main ticket. Do not invent new behavior.',
-      'Split only criteria that bundle multiple distinct FE behaviors or payload contracts together.',
+      specGrounded
+        ? 'Split only criteria that bundle multiple distinct spec rules together (e.g. point-in-time vs per-call access, multiple endpoints/RPCs, separate filter or null-value edges).'
+        : 'Split only criteria that bundle multiple distinct FE behaviors or payload contracts together.',
       input.targetMinCriteria && input.targetMaxCriteria
         ? `Return ${input.targetMinCriteria}-${input.targetMaxCriteria} criteria if the ticket supports that many distinct behaviors.`
         : 'Return a medium-granularity canonical set.',
       input.granularityHint || '',
-      'Keep these concerns separate when present: selection and visibility, geometry preservation, Run Analysis payload, Save Config payload with dataset_id linkage, datasets[] versus legacy dataset behavior, and preview or map label behavior.',
+      specGrounded
+        ? 'Keep these concerns separate when present: per-endpoint/per-RPC access enforcement, point-in-time vs per-call validation, exact filter semantics (e.g. plan vs partner assignment), backward-compatibility or null-value edges, and transactional email/URL routing.'
+        : 'Keep these concerns separate when present: selection and visibility, geometry preservation, Run Analysis payload, Save Config payload with dataset_id linkage, datasets[] versus legacy dataset behavior, and preview or map label behavior.',
       'Return strict JSON only in the shape {"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}.',
     ]
       .filter(Boolean)
@@ -788,7 +821,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       { Authorization: `Bearer ${provider.apiKey}` },
       {
         model: provider.model,
-        temperature: 0.1,
+        temperature: 0, // deterministic granularity repair, consistent with the synthesis pass above
         response_format: { type: 'json_object' },
         messages: [
           { role: 'system', content: repairPrompt },
@@ -808,7 +841,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       }
     );
 
-    const repairContent = repairResponse.choices?.[0]?.message?.content;
+    const repairContent = providerContent(repairResponse, 'synthesis repair');
     const repairParsed = extractJson(repairContent);
     const repairedCriteria = findAcceptanceCriteriaArray(repairParsed);
     if (Array.isArray(repairedCriteria)) {
@@ -875,7 +908,7 @@ async function translateScopeSnapshotWithProvider(
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'duplicate review');
   const parsed = extractJson(content) as Record<string, unknown>;
 
   return {
@@ -947,7 +980,7 @@ async function recommendDuplicateCasesWithProvider(
     }
   );
 
-  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  const parsed = extractJson(providerContent(response, 'duplicate recommendations'));
   const recommendations = findDuplicateRecommendationArray(parsed);
   if (!recommendations) throw new Error('LLM duplicate review did not return recommendations.');
 
@@ -1051,6 +1084,45 @@ export function isFallbackError(error: Error & { statusCode?: number }): boolean
   );
 }
 
+// Per-case shape, title, traceability, and endpoint-provenance directives shared by the initial
+// generation prompt AND the coverage-repair prompt. Centralized so the two prompts can't drift —
+// previously repair silently lacked the apiSpec/traceability/provenance rules, so repaired cases were
+// lower quality and could fabricate endpoints. Generation-only expansion rules (per-endpoint happy/
+// negative, blocker-as-background) stay inline in generateWithProvider; repair must remain minimal.
+function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boolean }): string[] {
+  const { apiMode, apiContractRelevant } = opts;
+  return [
+    apiMode
+      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
+      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'caseIntent must be exactly one of: positive, negative, edge.',
+    'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
+    'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
+    apiMode
+      ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases and "manual_db" for database/migration/ETL verification cases. Do not put API, DB, or Web in the title — only [BE].'
+      : 'Titles must follow [FE][{Epic}][{Ticket ID}] Title.',
+    'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
+    apiMode
+      ? 'For every postman case, include apiSpec with method, path, samplePayload when the endpoint accepts a body, expectedResponse, and assertions. The bddScenario must also include the sample payload and expected response/assertions in triple-quoted blocks so it is executable from Postman guidance.'
+      : '',
+    apiMode
+      ? 'For migration, backfill, dataset_schema, SQL, or DB verification scope, include manual_db cases with manualVerification target, steps, and expectedResult. Make the BDD clear that the case is not Postman-testable.'
+      : '',
+    apiMode
+      ? 'Use only endpoint paths present in context.apiContract.matchedEndpoints. If a case needs an endpoint not in that matched set, do not fabricate a confident path — note in preconditions that the path is assumed and must be verified against the API docs.'
+      : '',
+    apiMode && apiContractRelevant
+      ? 'Precise traceability: set coversAcceptanceCriteria to ONLY the acceptance criteria a case actually verifies through its When/Then steps. Never staple an unrelated AC onto a case (e.g. a dataset-list or dataset-data test must NOT claim an email-routing or login-restriction AC it does not exercise).'
+      : '',
+    apiMode && apiContractRelevant
+      ? 'Write executable scenarios with concrete, reusable fixtures in the Given steps — name the actors and resources (e.g. a specific partner/org and an assigned vs a non-assigned resource) and reuse them consistently across scenarios — so every case has unambiguous preconditions rather than abstract phrasing.'
+      : '',
+    apiMode && !apiContractRelevant
+      ? 'This backend ticket does NOT change the HTTP API contract (no endpoint references). Do not create Postman/API cases and do not invent endpoints. Produce manual_db cases (manualVerification with target, steps, expectedResult) for data/schema/DB work, or manual_other when DB is not involved.'
+      : '',
+  ];
+}
+
 async function generateWithProvider(provider: ProviderConfig, context: GenerateContext) {
   const enforceCoverage = Boolean(context.coverageEnforced);
   const scopeType = context.constraints?.scopeType || 'web';
@@ -1076,27 +1148,18 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       : 'The main Jira ticket description is empty or too thin. Treat the main Jira ticket acceptance criteria as the primary coverage authority. Parent Story and PRD are supporting context only.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
-    apiMode
-      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
-      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
-    'caseIntent must be exactly one of: positive, negative, edge.',
-    'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
-    'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
-    apiMode
-      ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases and "manual_db" for database/migration/ETL verification cases. Do not put API, DB, or Web in the title — only [BE].'
-      : 'Titles must follow [FE][{Epic}][{Ticket ID}] Title.',
-    'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
-    apiMode
-      ? 'For every postman case, include apiSpec with method, path, samplePayload when the endpoint accepts a body, expectedResponse, and assertions. The bddScenario must also include the sample payload and expected response/assertions in triple-quoted blocks so it is executable from Postman guidance.'
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    apiMode && apiContractRelevant
+      ? 'Give each distinct behavioral rule its own dedicated case that truly verifies it: for an email-routing AC, the Then step must assert the email CTA/body link contains the partner URL (not merely call an endpoint); for an AC that restricts a specific action (e.g. login) to the partner URL, include a case performing that literal action via the general LI URL and asserting the error. Do not consider such an AC covered by tangential endpoint calls.'
       : '',
-    apiMode
-      ? 'For migration, backfill, dataset_schema, SQL, or DB verification scope, include manual_db cases with manualVerification target, steps, and expectedResult. Make the BDD clear that the case is not Postman-testable.'
+    apiMode && apiContractRelevant
+      ? 'Scope intersection: treat the ticket\'s in-scope endpoints (context.apiContract.matchedEndpoints / the ticket API list) as the operations under test, and apply each behavioral access/validation rule from context.acceptanceCriteria and the scoped PRD context to EACH in-scope endpoint. Produce a happy-path case and a negative case per endpoint, plus edge cases for cross-cutting rules (e.g. multi-partner/shared resources, visibility flags, cross-tenant access). Do NOT generate cases for PRD behavior that falls outside the ticket\'s endpoint scope.'
       : '',
-    apiMode
-      ? 'Use context.apiContract.matchedEndpoints as the endpoint contract when present. Do not invent endpoints outside Jira, Confluence, or apiContract.'
+    apiMode && apiContractRelevant
+      ? 'Be proportionate, not combinatorial: cover the happy path and the most important negative per in-scope endpoint, plus edge cases for genuinely distinct cross-cutting rules. When the same rule applies identically across several endpoints, write one representative case rather than near-duplicate variants per endpoint. Prefer the smallest set that fully covers every acceptance criterion.'
       : '',
-    apiMode && !apiContractRelevant
-      ? 'This backend ticket does NOT change the HTTP API contract (no endpoint references). Do not create Postman/API cases and do not invent endpoints. Produce manual_db cases (manualVerification with target, steps, expectedResult) for data/schema/DB work, or manual_other when DB is not involved.'
+    apiMode && apiContractRelevant
+      ? 'Use context.linkedIssues marked as a blocking dependency as background: they often implement the data model or access controls this ticket validates (e.g. a "create access-control tables" blocker the endpoints enforce). Let them inform the rules under test, but do NOT expand scope beyond this ticket\'s endpoints.'
       : '',
     enforceCoverage
       ? 'Use only acceptance criterion ids that exist in context.acceptanceCriteria, such as AC-1.'
@@ -1142,7 +1205,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'generation');
   const parsed = extractJson(content);
   const cases = findCaseArray(parsed);
   if (!Array.isArray(cases)) {
@@ -1182,15 +1245,9 @@ async function repairMissingCoverageWithProvider(
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
     'Generate repair cases from the same selected scope authority and final acceptance criteria only.',
-    apiMode
-      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
-      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
-    'caseIntent must be exactly one of: positive, negative, edge.',
-    'jiraReference must be exactly the main Jira ticket key from context.ticketKey, not an AC id or combined ref string.',
-    'The evidence object must include coverageNote only.',
-    apiMode && apiContractRelevant ? 'Use postman cases (executionType "postman") for endpoint coverage and manual_db cases (executionType "manual_db") for database-only migration/backfill verification. All titles use the [BE] tag.' : '',
-    apiMode && !apiContractRelevant
-      ? 'This backend ticket does NOT change the HTTP API contract. Do not create Postman/API cases or invent endpoints. Use manual_db cases for data/schema/DB work, or manual_other otherwise.'
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    apiMode && apiContractRelevant
+      ? 'Reuse the same named actors/resources (assigned vs non-assigned) already established by the existing cases as executable preconditions, so repair cases read consistently with the set.'
       : '',
     'Each returned case must map to at least one missing acceptance criterion id.',
     'Keep the set minimal but sufficient.',
@@ -1228,7 +1285,7 @@ async function repairMissingCoverageWithProvider(
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'coverage repair');
   const parsed = extractJson(content);
   const cases = findCaseArray(parsed);
   if (!Array.isArray(cases)) {
@@ -1372,7 +1429,7 @@ async function selectApiEndpointsWithProvider(
     }
   );
 
-  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  const parsed = extractJson(providerContent(response, 'endpoint selection'));
   return normalizeSelectedEndpoints(parsed, input.documentedEndpoints);
 }
 

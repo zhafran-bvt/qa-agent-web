@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p tsconfig.app.json",
     "start": "npm run build && node dist/src/server/index.js",
     "setup:hooks": "node scripts/install-hooks.mjs",
+    "pack:clean": "git archive --format=zip -o qa-agent-web.zip HEAD",
     "review:qa": "node scripts/review-qa.mjs",
     "test": "npm run test:server && npm run test:client",
     "test:server": "tsx --test tests/unit/*.test.ts",

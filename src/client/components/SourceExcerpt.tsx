@@ -8,7 +8,7 @@ interface SourceExcerptProps {
   excerpt?: string;
   location?: string;
   url?: string;
-  kind?: 'jira' | 'prd';
+  kind?: 'jira' | 'prd' | 'spec';
   confidence?: 'verbatim' | 'closest' | 'weak';
   lang: UiLanguage;
 }

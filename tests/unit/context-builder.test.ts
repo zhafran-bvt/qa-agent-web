@@ -1237,3 +1237,100 @@ test('frontend ticket does NOT treat an endpoint-list bullet as criteria (contro
   // Endpoint-name bullets are not FE-testable criteria, so none are extracted from the ticket.
   assert.equal(context.acceptanceCriteria.length, 0);
 });
+
+test('narrows a multi-subsection PRD to the ticket-relevant subsection for a (non-thin) BE ticket', async () => {
+  const issues = {
+    'ORB-9100': {
+      key: 'ORB-9100',
+      summary: '[BE] Partner Dataset Access Validation',
+      // Has a real scope (non-thin) — so this is NOT the thin-ticket path; narrowing fires because it is api scope.
+      description: 'Scope\n* Get dataset list\n* Submit analysis',
+      renderedDescription: '',
+      labels: ['Backend'],
+      linkedIssues: [{ key: 'ORB-9101', relation: 'is child of', summary: 'Partner Whitelabel', issueType: 'Story' }],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Whitelabel', issueType: 'Epic' },
+    },
+    'ORB-9101': {
+      key: 'ORB-9101',
+      summary: 'Partner Whitelabel',
+      description: 'PRD: https://bvarta-project.atlassian.net/wiki/pages/viewpage.action?pageId=950075500#Partner-Whitelabel',
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Story',
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({
+      id: '950075500',
+      title: 'Whitelabel PRD',
+      body: `
+1. Partner Whitelabel
+Overview paragraph.
+
+Logo & Branding
+Acceptance Criteria
+1. The partner logo is displayed on the application header.
+2. The login page shows partner branding instead of the default.
+
+Partner Dataset Access
+Acceptance Criteria
+1. Partner users only access datasets assigned to their partner.
+2. Datasets not assigned to the partner are hidden from the list.
+`,
+    }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-9100', { includeComments: true });
+
+  assert.equal(context.constraints.scopeType, 'api');
+  // The matched PRD section is narrowed to the dataset-access subsection (not the whole page / logo section).
+  assert.equal(context.scopeConfluenceSection?.matchedHeading, 'Partner Dataset Access');
+  assert.match(String(context.scopeConfluenceSection?.body), /datasets assigned to their partner/i);
+  assert.doesNotMatch(String(context.scopeConfluenceSection?.body), /partner logo is displayed/i);
+});
+
+test('BUG-06: expands immediate children of a spec page into context as spec-descendants', async () => {
+  const issues = {
+    'ORB-9000': {
+      key: 'ORB-9000',
+      summary: '[BE] Spec-linked ticket',
+      description: 'Tech Spec https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/700000/Partner+Technical+Specification',
+      renderedDescription: '',
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      issueType: 'Task',
+    },
+  };
+  const childCalls: string[] = [];
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async (pageId: string) => ({
+      id: pageId,
+      title: pageId === '700000' ? 'Partner Technical Specification' : 'Nested Detail Sub-page',
+      body: pageId === '700000' ? 'Spec overview body.' : 'Nested rule: each query RPC must validate access.',
+    }),
+    getConfluencePageChildren: async (pageId: string) => {
+      childCalls.push(pageId);
+      return pageId === '700000' ? [{ id: '700001', title: 'Nested Detail Sub-page' }] : [];
+    },
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-9000', { includeComments: false });
+
+  assert.ok(childCalls.includes('700000'), 'should request children of the spec page');
+  const child = context.confluencePages.find((page) => page.id === '700001');
+  assert.ok(child, 'spec child page should be added to context');
+  assert.equal(child?.sourceRefs?.some((ref) => ref.relationship === 'spec-descendant'), true);
+  assert.match(String(child?.body), /each query RPC must validate access/);
+});

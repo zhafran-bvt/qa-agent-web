@@ -1,6 +1,7 @@
-import type { QaContext, ScopedItem } from '../../shared/contracts';
+import type { ConfluencePageSummary, QaContext, ScopedItem } from '../../shared/contracts';
 import type { Logger } from './logger';
 import { canonicalize } from './context-builder';
+import { SPEC_PAGE_TITLE_RE } from './keywords';
 
 export interface ParsedIssueSection {
   heading: string;
@@ -23,6 +24,14 @@ export interface AcceptanceCriteriaSynthesisInput {
   targetMinCriteria?: number;
   targetMaxCriteria?: number;
   granularityHint?: string;
+  // BUG-03 step 3 (spike): concrete rules from a linked technical-specification page, surfaced so the
+  // synthesizer can ground criteria in implementation detail (point-in-time semantics, per-endpoint
+  // enforcement, backward-compat edges) instead of PRD paraphrases. Empty when no spec page is linked.
+  technicalSpecExcerpts?: string;
+  // The ticket's concrete in-scope operations (matched API endpoints). Used as a hard boundary so spec
+  // grounding sharpens criteria for these operations without promoting unrelated spec capabilities
+  // (e.g. login isolation when no login endpoint is in scope) into active criteria. Empty when unknown.
+  scopeBoundary?: string;
 }
 
 export interface AcceptanceCriteriaSynthesisResult {
@@ -370,7 +379,7 @@ function withAnchor(url?: string, anchor?: string): string | undefined {
   return `${base.replace(/#.*$/, '')}#${fragment}`;
 }
 
-function resolveAuthorityExcerptSource(context: QaContext): { body: string; location: string; url?: string; kind: 'jira' | 'prd' } | null {
+function resolveAuthorityExcerptSource(context: QaContext): { body: string; location: string; url?: string; kind: 'jira' | 'prd' | 'spec' } | null {
   switch (context.scopeAuthority.type) {
     case 'main_jira_description':
       return {
@@ -496,7 +505,7 @@ function selectSourceExcerptMatches(
   return selected;
 }
 
-type ExcerptSourceMeta = { location: string; url?: string; kind: 'jira' | 'prd' };
+type ExcerptSourceMeta = { location: string; url?: string; kind: 'jira' | 'prd' | 'spec' };
 
 function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
   // Attach small source excerpts for traceability without letting generic boilerplate become evidence.
@@ -516,6 +525,22 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
   // ticket — so include the PRD section as a second corpus. Authority candidates take priority on ties.
   const sources: Array<{ body: string } & ExcerptSourceMeta> = [authority];
   const section = context.scopeConfluenceSection;
+
+  // BUG-03 step 2: a linked technical-specification page is a more precise source than the PRD
+  // paraphrase, so add its body as an excerpt corpus ranked ABOVE the PRD section (earlier sources win
+  // ties in candidate dedup). This labels spec-derived criteria with kind 'spec' and a "Spec: <title>"
+  // location instead of the prd/jira mislabel the step-3 spike left behind.
+  for (const page of context.confluencePages || []) {
+    if (!isTechnicalSpecPage(page, section?.pageId)) continue;
+    if (!normalizeInlineText(page.body || '')) continue;
+    sources.push({
+      body: page.body || '',
+      location: page.title ? `Spec: ${page.title}` : 'Technical Specification',
+      url: page.webUrl || undefined,
+      kind: 'spec',
+    });
+  }
+
   if (section?.body && normalizeInlineText(section.body) && canonicalize(section.body) !== canonicalize(authority.body)) {
     const sectionTitle = section.matchedHeading || section.title || '';
     sources.push({
@@ -637,6 +662,83 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
   return result;
 }
 
+// BUG-03: a linked technical-spec page is fetched into context (buildQaContext pulls Confluence links
+// out of linked-issue descriptions) but would otherwise only be background — its concrete rules never
+// becoming trackable criteria, so coverage reads green against PRD paraphrases. We surface spec-like
+// pages to the synthesizer here; attachSourceExcerpts (step 2) then labels spec-derived criteria with
+// the distinct 'spec' kind so their provenance is accurate, not mislabeled jira/prd.
+const SPEC_EXCERPT_TOTAL_CAP = 9000;
+const SPEC_EXCERPT_PER_PAGE_CAP = 6000;
+
+function isTechnicalSpecPage(page: ConfluencePageSummary, scopePageId?: string): boolean {
+  if (page.fetchError || !page.body) return false;
+  if (scopePageId && page.id === scopePageId) return false; // already used as the PRD scope authority
+  if (SPEC_PAGE_TITLE_RE.test(page.title || '')) return true;
+  // A page fetched as an immediate child of a spec page (BUG-06 descendant expansion) inherits spec
+  // treatment even when its own title doesn't say "specification".
+  return (page.sourceRefs || []).some((ref) => ref.relationship === 'spec-descendant');
+}
+
+function collectTechnicalSpecExcerpts(context: QaContext): { text: string; pages: string[] } {
+  const scopePageId = context.scopeConfluenceSection?.pageId;
+  const specPages = (context.confluencePages || []).filter((page) => isTechnicalSpecPage(page, scopePageId));
+  if (!specPages.length) return { text: '', pages: [] };
+  const used: string[] = [];
+  const blocks: string[] = [];
+  let remaining = SPEC_EXCERPT_TOTAL_CAP;
+  for (const page of specPages) {
+    if (remaining <= 0) break;
+    const body = normalizeMultilineText(page.body || '').slice(0, Math.min(SPEC_EXCERPT_PER_PAGE_CAP, remaining));
+    if (!body) continue;
+    blocks.push(`# ${page.title || 'Technical Specification'}\n${body}`);
+    used.push(page.title || page.id);
+    remaining -= body.length;
+  }
+  return { text: blocks.join('\n\n'), pages: used };
+}
+
+// Even with the scope-boundary directive, the spec's prominent "Login Isolation" capability leaks into
+// synthesis as an active criterion run-to-run (temp 0 isn't fully deterministic). Deterministically drop
+// login / authentication-session criteria when NO login/session endpoint is actually in the ticket's
+// matched endpoints — that capability belongs to a different ticket. This is the "verify, don't trust the
+// model" guard. It deliberately does NOT touch password-reset / activation / email-routing criteria:
+// the detector requires an explicit login/authenticate verb AND partner-URL-isolation framing, which the
+// password/email criteria don't carry.
+const LOGIN_VERB_RE = /\b(log[\s-]?in|login|sign[\s-]?in|authenticat\w*)\b/i;
+const LOGIN_URL_ISOLATION_RE = /(partner url|partner subdomain|general li url|only through (their )?partner|log[\s-]?in only|authenticate (only )?via|url guard|url isolation)/i;
+
+function scopeHasLoginEndpoint(matchedEndpoints: Array<{ path?: string }>): boolean {
+  return matchedEndpoints.some((endpoint) =>
+    /(\blogin\b|sign[-_]?in|issue[-_]?token|auth\/(login|token|session)|\/sessions?\b)/i.test(String(endpoint.path || ''))
+  );
+}
+
+function isLoginSessionIsolationCriterion(text: string): boolean {
+  const value = normalizeInlineText(text);
+  if (!LOGIN_VERB_RE.test(value)) return false;
+  return LOGIN_URL_ISOLATION_RE.test(value);
+}
+
+function dropOutOfScopeLoginCriteria(
+  criteria: ScopedItem[],
+  matchedEndpoints: Array<{ path?: string }>,
+  logger: Logger | undefined,
+  ticketKey: string
+): ScopedItem[] {
+  if (scopeHasLoginEndpoint(matchedEndpoints)) return criteria; // login genuinely in scope — keep
+  const kept = criteria.filter((criterion) => !isLoginSessionIsolationCriterion(criterion.text));
+  const droppedCount = criteria.length - kept.length;
+  if (droppedCount) {
+    logger?.info('context.ac_out_of_scope_dropped', {
+      jiraKey: ticketKey,
+      reason: 'login_session_isolation_no_endpoint_in_scope',
+      droppedCount,
+      dropped: criteria.filter((criterion) => isLoginSessionIsolationCriterion(criterion.text)).map((c) => c.text).slice(0, 5),
+    });
+  }
+  return kept.length ? kept : criteria; // never drop the entire set
+}
+
 export async function finalizeAcceptanceCriteria(
   context: QaContext,
   options: AcceptanceCriteriaFinalizationOptions = {}
@@ -645,7 +747,28 @@ export async function finalizeAcceptanceCriteria(
   const quality = assessAcceptanceCriteriaQuality(context.acceptanceCriteria || []);
   const mainIssueBody = context.mainIssue.description || context.mainIssue.renderedDescription || '';
   const parsedSections = parseMainIssueSections(mainIssueBody);
-  const granularityTarget = determineContextGranularityTarget(context, parsedSections, mainIssueBody);
+  const specExcerpts = collectTechnicalSpecExcerpts(context);
+  if (specExcerpts.pages.length) {
+    options.logger?.info('context.ac_spec_grounding', {
+      jiraKey: context.ticketKey,
+      specPages: specExcerpts.pages,
+      excerptChars: specExcerpts.text.length,
+    });
+  }
+
+  // When a technical spec grounds the criteria, an API / main_jira ticket otherwise has NO granularity
+  // target (the deterministic targets only fire for FE design headings or thin-PRD fallback), so
+  // synthesis defaults to "concise" and collapses the spec's distinct rules back into a few clauses.
+  // Push toward one criterion per concrete spec rule instead.
+  let granularityTarget = determineContextGranularityTarget(context, parsedSections, mainIssueBody);
+  if (!granularityTarget && specExcerpts.pages.length) {
+    granularityTarget = {
+      min: 5,
+      max: 9,
+      hint:
+        'A technical specification grounds these criteria. Produce one distinct criterion per concrete spec rule for the in-scope endpoints/behaviors — keep point-in-time vs per-call access checks, per-endpoint or per-RPC enforcement, exact filter semantics, backward-compatibility or null-value edges, and transactional email/URL routing as separate criteria. Do not merge distinct rules into one broad clause.',
+    };
+  }
 
   let finalCriteria = dedupeCriteria(quality.kept.map((criterion) => ({ text: criterion.text, source: criterion.source })));
   let synthesisUsed = false;
@@ -677,6 +800,11 @@ export async function finalizeAcceptanceCriteria(
         targetMinCriteria: granularityTarget?.min,
         targetMaxCriteria: granularityTarget?.max,
         granularityHint: granularityTarget?.hint,
+        technicalSpecExcerpts: specExcerpts.text,
+        scopeBoundary: (context.apiContract?.matchedEndpoints || [])
+          .map((endpoint) => `${String(endpoint.method || '').toUpperCase()} ${endpoint.path || ''}`.trim())
+          .filter(Boolean)
+          .join(', '),
       });
       const synthesized = dedupeCriteria(
         (synthesis.acceptanceCriteria || []).map((criterion) => ({
@@ -701,6 +829,16 @@ export async function finalizeAcceptanceCriteria(
   }
 
   finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);
+  // Spec-grounded tickets can pull the spec's broader capabilities (e.g. login isolation) into the
+  // criteria even when out of this ticket's endpoint scope — drop those deterministically.
+  if (specExcerpts.pages.length) {
+    finalCriteria = dropOutOfScopeLoginCriteria(
+      finalCriteria,
+      context.apiContract?.matchedEndpoints || [],
+      options.logger,
+      context.ticketKey
+    );
+  }
   finalCriteria = attachSourceExcerpts(finalCriteria, context, options.logger);
 
   return {

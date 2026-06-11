@@ -70,13 +70,18 @@ export function hasExactJiraRef(refs: string, jiraKey: string): boolean {
   return normalizeRefTokens(refs).includes(normalizedJiraKey);
 }
 
-export function buildGetCasesUrl(config: TestRailConfig, projectId: string, sectionId: string, jiraKey: string): string {
-  const baseUrl = config.baseUrl.replace(/\/$/, '');
+/** The api/v2-relative path for a refs-filtered case lookup. Single source of truth so the full URL
+ *  (buildGetCasesUrl) and the rate-limited trFetch path can't drift apart. */
+export function buildGetCasesPath(projectId: string, sectionId: string, jiraKey: string): string {
   const params = new URLSearchParams({
     section_id: sectionId,
     refs: jiraKey,
   });
-  return `${baseUrl}/index.php?/api/v2/get_cases/${encodeURIComponent(projectId)}&${params.toString()}`;
+  return `get_cases/${encodeURIComponent(projectId)}&${params.toString()}`;
+}
+
+export function buildGetCasesUrl(config: TestRailConfig, projectId: string, sectionId: string, jiraKey: string): string {
+  return trUrl(config, buildGetCasesPath(projectId, sectionId, jiraKey));
 }
 
 function extractBddScenario(raw: unknown): string {
@@ -124,15 +129,9 @@ export async function findExistingCasesByJiraRef(
   const projectId = String(config.projectId || '').trim();
   if (!projectId) throw new Error('TestRail project ID is required for duplicate lookup.');
 
-  const response = await requestHttpsJson<unknown>({
-    url: buildGetCasesUrl(config, projectId, sectionId, jiraKey),
-    method: 'GET',
-    headers: {
-      Authorization: authHeader(config),
-    },
-    upstream: 'TestRail',
-    timeoutMs: Number(process.env.TESTRAIL_HTTP_TIMEOUT_MS || process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
-  });
+  // Route through trFetch so this preflight lookup shares the rolling-window rate limiter and 429
+  // retry like every other read — a direct request here would bypass both and risk tripping the cap.
+  const response = await trFetch(config, { method: 'GET', path: buildGetCasesPath(projectId, sectionId, jiraKey) });
 
   if (response.statusCode < 200 || response.statusCode >= 300) {
     const parsed = response.body as Record<string, unknown>;

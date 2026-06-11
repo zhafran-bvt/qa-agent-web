@@ -221,6 +221,113 @@ test('traces a synthesized AC to the parent PRD section when the Jira ticket has
   assert.match(String(ac.sourceExcerpt), /only access datasets assigned to their partner/);
 });
 
+test('BUG-03 step 2: attributes spec-derived criteria to the technical spec (kind "spec"), above the PRD paraphrase', async () => {
+  const specLine =
+    'Export relies on point-in-time access validated at analysis submission via FindDataset; no additional per-dataset partner re-check occurs at export time.';
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3198',
+    mainIssue: {
+      key: 'ORB-3198',
+      summary: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      description: 'Scope\n* User dataset export\n* Submit analysis',
+    },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      body: 'Scope\n* User dataset export\n* Submit analysis',
+      reason: 'Main Jira requirements from endpoint scope list.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3198',
+    },
+    scopeConfluenceSection: {
+      pageId: '599588937',
+      title: 'Settings & Auth',
+      url: 'https://example.test/prd',
+      anchor: '13.-As-a-Partner',
+      matchedHeading: 'As a Partner',
+      matched: true,
+      reason: '',
+      sourceIssueKey: 'ORB-675',
+      body: 'Partner access rules: users on a partner URL only access datasets assigned to their partner.',
+    },
+    confluencePages: [
+      {
+        id: '1760198658',
+        title: 'Partner URL & White-Label Access Control — Technical Specification',
+        webUrl: 'https://example.test/wiki/spec',
+        body: `6.5.3 Export\n${specLine}`,
+        sourceRefs: [{ issueKey: 'ORB-3198', sourceType: 'confluence', relationship: 'blocks' }],
+      },
+    ],
+    acceptanceCriteria: [{ id: 'AC-1', text: specLine, source: 'ORB-3198 synthesized' }],
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context);
+  const ac = finalized.acceptanceCriteria[0];
+  assert.equal(ac.sourceExcerptKind, 'spec');
+  assert.match(String(ac.sourceExcerptLocation), /^Spec:/);
+  assert.match(String(ac.sourceExcerpt), /point-in-time access/);
+});
+
+test('BUG-03 scope guard: drops spec login-isolation criteria when no login endpoint is in scope, keeps dataset/email', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3198',
+    mainIssue: {
+      key: 'ORB-3198',
+      summary: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      description: 'Scope\n* Get dataset list\n* User dataset export\n* Reset password',
+    },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: '[BE] Partner Whitelabel - Partner Dataset Access Validation',
+      body: 'Scope\n* Get dataset list\n* User dataset export\n* Reset password',
+      reason: 'Main Jira requirements from endpoint scope list.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3198',
+    },
+    confluencePages: [
+      {
+        id: '1760198658',
+        title: 'Partner URL & White-Label Access Control — Technical Specification',
+        webUrl: 'https://example.test/wiki/spec',
+        body: 'Login Isolation — organizations assigned to a partner may only authenticate via their partner subdomain URL.\nDataset Access Control — partner users see only assigned datasets.',
+        sourceRefs: [{ issueKey: 'ORB-3198', sourceType: 'confluence', relationship: 'blocks' }],
+      },
+    ],
+    // Scope has dataset + password endpoints but NO login/session endpoint.
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'GET', path: '/v1/datasets', source: 'api_docs' },
+        { method: 'POST', path: '/v1/auth/reset-password', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'Partner-assigned organizations may only authenticate via their partner subdomain URL; login through the general LI URL is blocked.', source: 'ORB-3198 synthesized' },
+      { id: 'AC-2', text: 'Partner users only receive datasets explicitly assigned to their partner; unassigned datasets are hidden.', source: 'ORB-3198 synthesized' },
+      { id: 'AC-3', text: 'Reset-password emails replace the general LI base URL with the partner subdomain URL for partner-assigned organizations.', source: 'ORB-3198 synthesized' },
+    ],
+  });
+
+  const synthCriteria = [
+    'Partner-assigned organizations may only authenticate via their partner subdomain URL; login through the general LI URL is blocked.',
+    'Partner users only receive datasets explicitly assigned to their partner; unassigned datasets are hidden.',
+    'Reset-password emails replace the general LI base URL with the partner subdomain URL for partner-assigned organizations.',
+  ];
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async () => ({
+      acceptanceCriteria: synthCriteria.map((text, index) => ({ id: `AC-${index + 1}`, text })),
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+    }),
+  });
+  const texts = finalized.acceptanceCriteria.map((criterion) => criterion.text).join('\n');
+  assert.doesNotMatch(texts, /authenticate via their partner subdomain|login through the general LI URL is blocked/);
+  assert.match(texts, /datasets explicitly assigned/);
+  assert.match(texts, /Reset-password emails replace/); // email-routing criterion preserved (no login verb)
+});
+
 test('repairs over-merged thin-ticket PRD synthesis into medium-granularity criteria', async () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3157',

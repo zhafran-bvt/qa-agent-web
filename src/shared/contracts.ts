@@ -126,7 +126,7 @@ export interface ScopedItem {
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
-  sourceExcerptKind?: 'jira' | 'prd';
+  sourceExcerptKind?: 'jira' | 'prd' | 'spec';
   sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
 }
 
@@ -134,7 +134,7 @@ export interface SourceExcerptMatch {
   text: string;
   location?: string;
   url?: string;
-  kind?: 'jira' | 'prd';
+  kind?: 'jira' | 'prd' | 'spec';
   confidence?: 'verbatim' | 'closest' | 'weak';
 }
 
@@ -321,7 +321,7 @@ export interface TestCaseEvidenceAcceptanceCriterion {
   sourceExcerpt?: string;
   sourceExcerptLocation?: string;
   sourceExcerptUrl?: string;
-  sourceExcerptKind?: 'jira' | 'prd';
+  sourceExcerptKind?: 'jira' | 'prd' | 'spec';
   sourceExcerptConfidence?: 'verbatim' | 'closest' | 'weak';
 }
 
@@ -357,6 +357,9 @@ export interface CoverageSummary {
   uncoveredCriteria: string[];
   byCriterion: CoverageCriterion[];
   unmappedCases: string[];
+  // Claimed (case, AC) pairs whose case content doesn't substantiate the AC. Surfaced as a
+  // non-blocking warning so reviewers can see weak/inflated coverage that still "counts" as mapped.
+  unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }>;
 }
 
 export interface GenerateRequest {
@@ -387,6 +390,9 @@ export interface ValidateRequest {
   acceptanceCriteria: ScopedItem[];
   enforceAcceptanceCriteria: boolean;
   context?: QaContext;
+  // Lean copy of the matched API endpoints so the push/preflight gates can flag invented apiSpec
+  // paths without shipping the whole context. Sourced from context.apiContract.matchedEndpoints.
+  matchedEndpoints?: ApiContractEndpoint[];
 }
 
 export interface ValidateResponse {
@@ -399,6 +405,9 @@ export interface PushRequest extends ValidateRequest {
   approved: boolean;
   sectionId: string;
   generatedRunId?: string;
+  // Acknowledge-to-override: weak (claimed-but-unsubstantiated) coverage does not hard-block the push,
+  // but the push only proceeds when the reviewer has explicitly acknowledged it.
+  weakCoverageAcknowledged?: boolean;
 }
 
 export type DuplicateCaseDecision = 'include' | 'exclude' | 'review';
@@ -436,6 +445,15 @@ export interface PushPreflightResponse {
     sectionId: string;
     existingCount: number;
     generatedCount: number;
+  };
+  // Surfaced so the reviewer sees non-blocking warnings (apiSpec provenance, weak coverage) before the
+  // push, instead of them being silently dropped on the preflight success path.
+  validation?: ValidationEntry[];
+  coverage?: CoverageSummary;
+  // Present (with the claim pairs) when coverage is claimed but unsubstantiated; the client must obtain
+  // an explicit acknowledgement before pushing (the push endpoint enforces the same gate).
+  weakCoverage?: {
+    claims: Array<{ caseId: string; criterionId: string }>;
   };
 }
 
