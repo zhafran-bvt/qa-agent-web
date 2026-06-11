@@ -112,6 +112,80 @@ export async function requestHttpsJson<T>({
   });
 }
 
+/**
+ * Send a raw Buffer body (e.g. a multipart/form-data payload for a binary upload) and parse a JSON
+ * response. Shares the timeout/error handling of requestHttpsJson; the body isn't JSON so the caller
+ * supplies the Content-Type (including any multipart boundary).
+ */
+export async function requestHttpsRawJson<T>({
+  url,
+  method = 'POST',
+  headers = {},
+  body,
+  contentType,
+  upstream,
+  timeoutMs = Number(process.env.UPSTREAM_HTTP_TIMEOUT_MS || 20_000),
+}: {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body: Buffer;
+  contentType: string;
+  upstream: string;
+  timeoutMs?: number;
+}): Promise<{ body: T; headers: Record<string, string | string[] | undefined>; statusCode: number }> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    let settled = false;
+    const req = https.request(
+      {
+        hostname: parsed.hostname,
+        path: `${parsed.pathname}${parsed.search}`,
+        method,
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': contentType,
+          'Content-Length': body.length,
+          ...headers,
+        },
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => {
+          if (settled) return;
+          settled = true;
+          let parsedBody: unknown = {};
+          try {
+            parsedBody = data ? JSON.parse(data) : {};
+          } catch {
+            reject(new Error(`Invalid JSON from ${upstream}: ${data.slice(0, 500)}`));
+            return;
+          }
+          resolve({ body: parsedBody as T, headers: res.headers, statusCode: res.statusCode || 500 });
+        });
+      }
+    );
+    req.on('error', (error) => {
+      if (settled) return;
+      settled = true;
+      reject(describeNetworkError(error, upstream));
+    });
+    if (typeof (req as { setTimeout?: (ms: number, cb: () => void) => void }).setTimeout === 'function') {
+      req.setTimeout(timeoutMs, () => {
+        if (settled) return;
+        settled = true;
+        req.destroy();
+        reject(new UpstreamTimeoutError(upstream, timeoutMs));
+      });
+    }
+    req.write(body);
+    req.end();
+  });
+}
+
 export async function requestText({
   url,
   method = 'GET',

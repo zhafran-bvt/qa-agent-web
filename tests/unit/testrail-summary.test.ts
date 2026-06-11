@@ -81,12 +81,65 @@ test('plan review treats TestRail test_change attachments as result evidence', (
   assert.equal(run.evidencePresentCount, 1);
 });
 
-test('plan review marks passed tests with linked nonmatching attachments as missing', () => {
+test('plan review counts attachments on any passed result as present', () => {
+  const run = buildPlanReviewRun(
+    { baseUrl: 'https://example.testrail.io', user: 'u', apiKey: 'k' },
+    { id: 746, name: 'Evidence run', passed_count: 1 },
+    [{ id: 387658, case_id: 19826, title: 'Download evidence', status_id: 1 }],
+    new Map([
+      [
+        387658,
+        [
+          { id: 137673, status_id: 1, created_on: 1781146880 },
+          { id: 137672, status_id: 1, created_on: 1781146840 },
+        ],
+      ],
+    ]),
+    new Map([[387658, [{ id: 1000003624, name: 'screen.png', entity_type: 'test_change', entity_id: 137672 }]]])
+  );
+
+  assert.equal(run.tests[0].latestResultId, 137673);
+  assert.equal(run.tests[0].evidenceStatus, 'present');
+  assert.equal(run.tests[0].attachments.length, 1);
+  assert.equal(run.evidencePresentCount, 1);
+});
+
+test('plan review de-duplicates repeated attachment records by id', () => {
+  const run = buildPlanReviewRun(
+    { baseUrl: 'https://example.testrail.io', user: 'u', apiKey: 'k' },
+    { id: 746, name: 'Evidence run', passed_count: 1 },
+    [{ id: 387658, case_id: 19826, title: 'Download evidence', status_id: 1 }],
+    new Map([[387658, [{ id: 137672, status_id: 1, created_on: 1781146840 }]]]),
+    new Map([
+      [
+        387658,
+        [
+          { id: 1000003624, name: 'screen.png', entity_type: 'test_change', entity_id: 137672 },
+          { id: 1000003624, name: 'screen.png', entity_type: 'test_change', entity_id: 137672 },
+        ],
+      ],
+    ])
+  );
+
+  assert.equal(run.tests[0].evidenceStatus, 'present');
+  assert.equal(run.tests[0].attachments.length, 1);
+  assert.equal(run.evidencePresentCount, 1);
+});
+
+test('plan review marks passed tests with only non-passed result attachments as missing', () => {
   const run = buildPlanReviewRun(
     { baseUrl: 'https://example.testrail.io', user: 'u', apiKey: 'k' },
     { id: 10, name: 'Chrome', passed_count: 1 },
     [{ id: 101, case_id: 501, title: 'Evidence case', status_id: 1 }],
-    new Map([[101, [{ id: 9002, status_id: 1, created_on: 200 }]]]),
+    new Map([
+      [
+        101,
+        [
+          { id: 9002, status_id: 1, created_on: 200 },
+          { id: 9001, status_id: 5, created_on: 100 },
+        ],
+      ],
+    ]),
     new Map([[101, [{ id: 'att-1', name: 'old.png', result_id: 9001 }]]])
   );
 
@@ -104,6 +157,9 @@ test('plan review marks untested tests as not required', () => {
   );
 
   assert.equal(run.tests[0].evidenceStatus, 'not_required');
+  assert.equal(run.tests[0].runId, 10);
+  assert.equal(run.tests[0].caseId, 501);
+  assert.equal(run.tests[0].latestResultId, null);
   assert.equal(run.evidenceNotRequiredCount, 1);
 });
 

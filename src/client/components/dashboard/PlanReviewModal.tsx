@@ -1,12 +1,106 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import type { TrAttachmentSummary, TrEvidenceStatus, TrPlanReviewResponse, TrPlanReviewRun, TrPlanReviewTest, TrPlanSummary } from '../../../shared/contracts';
-import { testrailAttachmentUrl } from '../../api';
+import { passWithEvidence, testrailAttachmentUrl, uploadResultEvidence } from '../../api';
 import type { UiLanguage } from '../../i18n';
 import { uiText } from '../../i18n';
 import { STATUS_ORDER, statusTone } from './status';
 
 const VIDEO_RE = /\.(mov|mp4|m4v|webm|ogv)$/i;
 const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
+
+// Evidence upload constraints — mirror of the server gate (index.ts EVIDENCE_*).
+const EVIDENCE_MAX_MB = 25;
+const EVIDENCE_ACCEPT = 'image/png,image/jpeg,image/gif,image/webp,video/mp4,video/quicktime,video/webm,application/pdf,.png,.jpg,.jpeg,.gif,.webp,.mp4,.mov,.m4v,.webm,.pdf';
+const EVIDENCE_EXT_TYPE: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  mp4: 'video/mp4',
+  mov: 'video/quicktime',
+  m4v: 'video/mp4',
+  webm: 'video/webm',
+  pdf: 'application/pdf',
+};
+const EVIDENCE_ALLOWED_TYPES = new Set(Object.values(EVIDENCE_EXT_TYPE));
+
+// A file's reported type can be empty (e.g. some .mov), so fall back to the extension. Returns the
+// resolved MIME, or '' when the file isn't an accepted evidence type.
+function resolveEvidenceType(file: File): string {
+  if (file.type && EVIDENCE_ALLOWED_TYPES.has(file.type)) return file.type;
+  const ext = (file.name.split('.').pop() || '').toLowerCase();
+  return EVIDENCE_EXT_TYPE[ext] || '';
+}
+
+type EvidenceTarget =
+  | { kind: 'result'; id: string | number }
+  | { kind: 'pass'; runId: string | number; caseId: string | number };
+
+function EvidenceUpload({ target, onUploaded, t }: { target: EvidenceTarget; onUploaded: () => void; t: typeof uiText.en.dashboard }) {
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
+  const isPass = target.kind === 'pass';
+
+  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = ''; // let the same file be re-selected after an error
+    if (!file) return;
+    setError('');
+    setDone(false);
+    const contentType = resolveEvidenceType(file);
+    if (!contentType) {
+      setError(t.evidenceUploadBadType);
+      return;
+    }
+    if (file.size > EVIDENCE_MAX_MB * 1024 * 1024) {
+      setError(t.evidenceUploadTooLarge(EVIDENCE_MAX_MB));
+      return;
+    }
+    // Pass-with-evidence mutates TestRail (marks the test Passed), so confirm before doing it.
+    if (isPass && !window.confirm(t.evidencePassConfirm)) return;
+    setUploading(true);
+    try {
+      if (isPass) {
+        await passWithEvidence(target.runId, target.caseId, file, contentType);
+      } else {
+        await uploadResultEvidence(target.id, file, contentType);
+      }
+      // Confirm success explicitly, THEN refresh after a beat. Without the explicit ✓ the only signal was
+      // the badge flip — easy to miss (TestRail indexing lag), which led reviewers to re-upload and create
+      // duplicate attachments. The delay lets the ✓ register before the re-render.
+      setDone(true);
+      window.setTimeout(onUploaded, 1200);
+    } catch (err) {
+      setError((err as Error).message || t.evidenceUploadFailed);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  return (
+    <div className="tr-evidence-upload">
+      <label
+        className={`button button-secondary button-small ${uploading ? 'is-disabled' : ''}`}
+        title={isPass ? t.evidencePassHint : undefined}
+      >
+        {uploading ? t.evidenceUploading : isPass ? t.evidencePass : t.evidenceUpload}
+        <input type="file" accept={EVIDENCE_ACCEPT} hidden disabled={uploading} onChange={handleFile} />
+      </label>
+      {done ? (
+        <span className="tr-evidence-upload-done" role="status">
+          {isPass ? t.evidencePassDone : t.evidenceUploadDone}
+        </span>
+      ) : null}
+      {error ? (
+        <span className="tr-evidence-upload-error" role="alert">
+          {error}
+        </span>
+      ) : null}
+    </div>
+  );
+}
 
 function formatBytes(bytes?: number | null): string {
   if (!bytes || bytes <= 0) return '';
@@ -325,6 +419,15 @@ export function PlanReviewModal({ lang, plan, review, loading, error, onRetry, o
                               ) : (
                                 <span className={`tr-evidence-pill ${evidenceClass(test.evidenceStatus)}`}>
                                   {evidenceLabel(test.evidenceStatus, test.attachments.length, t)}
+                                </span>
+                              )}
+                              {test.latestResultId ? (
+                                <EvidenceUpload target={{ kind: 'result', id: test.latestResultId }} onUploaded={onRetry} t={t} />
+                              ) : test.runId && test.caseId ? (
+                                <EvidenceUpload target={{ kind: 'pass', runId: test.runId, caseId: test.caseId }} onUploaded={onRetry} t={t} />
+                              ) : (
+                                <span className="tr-evidence-upload-disabled" title={t.evidenceUploadNoResult}>
+                                  {t.evidenceUpload}
                                 </span>
                               )}
                             </div>

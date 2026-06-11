@@ -1,6 +1,7 @@
+import crypto from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { ExistingTestRailCase, GeneratedTestCase, PushCaseResult } from '../../shared/contracts';
-import { requestHttpsJson, requestHttpsStream } from './http';
+import { requestHttpsJson, requestHttpsRawJson, requestHttpsStream } from './http';
 
 export interface TestRailConfig {
   baseUrl: string;
@@ -324,6 +325,89 @@ export async function fetchAttachment(
     upstream: 'TestRail',
     timeoutMs: trTimeout(),
   });
+}
+
+// Strip CR/LF and quotes so a filename can't break out of the Content-Disposition header.
+export function sanitizeAttachmentName(name: string): string {
+  return String(name || 'evidence')
+    .replace(/[\r\n"]/g, '')
+    .replace(/[\\/]/g, '_')
+    .slice(0, 250)
+    .trim() || 'evidence';
+}
+
+export function buildAttachmentMultipart(file: { buffer: Buffer; filename: string; contentType: string }): {
+  body: Buffer;
+  contentType: string;
+} {
+  const boundary = `----qaAgentEvidence${crypto.randomBytes(16).toString('hex')}`;
+  const head = Buffer.from(
+    `--${boundary}\r\n` +
+      `Content-Disposition: form-data; name="attachment"; filename="${sanitizeAttachmentName(file.filename)}"\r\n` +
+      `Content-Type: ${file.contentType || 'application/octet-stream'}\r\n\r\n`,
+    'utf8'
+  );
+  const tail = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+  return { body: Buffer.concat([head, file.buffer, tail]), contentType: `multipart/form-data; boundary=${boundary}` };
+}
+
+async function postAttachment(
+  config: TestRailConfig,
+  endpoint: string,
+  file: { buffer: Buffer; filename: string; contentType: string }
+): Promise<{ attachmentId: string }> {
+  await acquireRateSlot();
+  const { body, contentType } = buildAttachmentMultipart(file);
+  const response = await requestHttpsRawJson<Record<string, unknown>>({
+    url: trUrl(config, endpoint),
+    method: 'POST',
+    headers: { Authorization: authHeader(config) },
+    body,
+    contentType,
+    upstream: 'TestRail',
+    timeoutMs: trTimeout(),
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const parsed = (response.body || {}) as Record<string, unknown>;
+    throw new Error(String(parsed.error || `HTTP ${response.statusCode}`));
+  }
+  const attachmentId = (response.body?.attachment_id ?? response.body?.id ?? '') as number | string;
+  return { attachmentId: String(attachmentId) };
+}
+
+/** Upload an evidence file as an attachment on a TestRail result (TestRail 5.7+). The result id is
+ *  the one shown per passed test in Plan Review; attaching here flips its evidence status to present. */
+export function addAttachmentToResult(
+  config: TestRailConfig,
+  resultId: number | string,
+  file: { buffer: Buffer; filename: string; contentType: string }
+): Promise<{ attachmentId: string }> {
+  return postAttachment(config, `add_attachment_to_result/${encodeURIComponent(String(resultId))}`, file);
+}
+
+/** Record a result for a case in a run (status_id 1=Passed) and return the new result id. Used to
+ *  "pass with evidence" for an Untested test: create the result here, then attach the file to it so the
+ *  test moves to Passed AND gets real per-run evidence. Routed through trFetch (rate-limit + 429 retry). */
+export async function addResultForCase(
+  config: TestRailConfig,
+  runId: number | string,
+  caseId: number | string,
+  statusId: number,
+  comment?: string
+): Promise<{ resultId: string }> {
+  const response = await trFetch(config, {
+    method: 'POST',
+    path: `add_result_for_case/${encodeURIComponent(String(runId))}/${encodeURIComponent(String(caseId))}`,
+    body: comment ? { status_id: statusId, comment } : { status_id: statusId },
+  });
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    const parsed = (response.body || {}) as Record<string, unknown>;
+    throw new Error(String(parsed.error || `HTTP ${response.statusCode}`));
+  }
+  const result = (response.body || {}) as Record<string, unknown>;
+  const id = result.id ?? result.result_id ?? '';
+  if (!String(id)) throw new Error('TestRail did not return a result id for the recorded result.');
+  return { resultId: String(id) };
 }
 
 export function getStatuses(config: TestRailConfig): Promise<Record<string, unknown>[]> {

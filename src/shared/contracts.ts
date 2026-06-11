@@ -625,6 +625,7 @@ export interface TrAttachmentSummary {
 
 export interface TrPlanReviewTest {
   testId: number;
+  runId: number;
   caseId: number;
   title: string;
   statusId: number | null;

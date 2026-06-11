@@ -18,10 +18,10 @@ import { generateTestCases, recommendDuplicateCases, selectScopedApiEndpoints, s
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/suggestions';
 import { summarizeSprintBurndown } from './services/sprint-burndown';
-import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
+import { addAttachmentToResult, addResultForCase, buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
 import { assessEncryptionKeyStrength, decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
 import { buildApiContract, assessApiContractRelevance } from './services/api-docs';
-import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
+import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, invalidateEvidenceCaches, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, trulyUncoveredCriteria, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -231,6 +231,65 @@ async function readBody<T>(req: IncomingMessage): Promise<T> {
     }
   }
   return (body ? JSON.parse(body) : {}) as T;
+}
+
+// Read a raw binary request body (e.g. an evidence upload) into a Buffer, capped so a large upload
+// can't exhaust memory. Returns null when the cap is exceeded so the caller can answer 413.
+async function readRawBody(req: IncomingMessage, maxBytes: number): Promise<Buffer | null> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) return null;
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks);
+}
+
+// Evidence uploads: accepted content types + size cap (see PlanReviewModal client-side mirror).
+const EVIDENCE_MAX_BYTES = Number(process.env.EVIDENCE_MAX_UPLOAD_BYTES || 25 * 1024 * 1024);
+const EVIDENCE_ALLOWED_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'video/mp4',
+  'video/quicktime',
+  'video/webm',
+  'application/pdf',
+]);
+
+// Validate + read an evidence upload (shared by the result and case routes). Pure: returns a
+// discriminated result so the caller maps failures to sendError without scope coupling.
+async function parseEvidenceUpload(
+  req: IncomingMessage,
+  fallbackName: string
+): Promise<
+  | { ok: true; buffer: Buffer; filename: string; contentType: string }
+  | { ok: false; status: number; message: string }
+> {
+  const contentType = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+  if (!EVIDENCE_ALLOWED_TYPES.has(contentType)) {
+    return { ok: false, status: 415, message: 'Unsupported evidence type. Allowed: PNG, JPEG, GIF, WebP, MP4, MOV, WebM, PDF.' };
+  }
+  let filename = fallbackName;
+  const rawName = String(req.headers['x-filename'] || '').trim();
+  if (rawName) {
+    try {
+      filename = decodeURIComponent(rawName); // client encodes so the header stays ASCII-safe
+    } catch {
+      filename = rawName;
+    }
+  }
+  const buffer = await readRawBody(req, EVIDENCE_MAX_BYTES);
+  if (!buffer) {
+    return { ok: false, status: 413, message: `Evidence file exceeds the ${Math.round(EVIDENCE_MAX_BYTES / (1024 * 1024))}MB limit.` };
+  }
+  if (!buffer.length) {
+    return { ok: false, status: 400, message: 'Evidence file is empty.' };
+  }
+  return { ok: true, buffer, filename, contentType };
 }
 
 function contentTypeFor(filePath: string): string {
@@ -874,6 +933,87 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       stream.pipe(res);
     } catch (error) {
       sendError(res, 502, (error as Error).message || 'Failed to load attachment.');
+    }
+    return;
+  }
+
+  // Upload an evidence file as an attachment on a TestRail result (Plan Review "upload evidence").
+  if (req.method === 'POST' && /^\/api\/testrail\/results\/[^/]+\/attachments$/.test(url.pathname)) {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const resultId = decodeURIComponent(url.pathname.replace(/^\/api\/testrail\/results\//, '').replace(/\/attachments$/, ''));
+    if (!resultId.trim()) {
+      sendError(res, 400, 'A result ID is required.');
+      return;
+    }
+    const upload = await parseEvidenceUpload(req, `evidence-${resultId}`);
+    if (!upload.ok) {
+      sendError(res, upload.status, upload.message);
+      return;
+    }
+    try {
+      const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
+      const { attachmentId } = await addAttachmentToResult(trConfig, resultId, upload);
+      invalidateEvidenceCaches(); // so the next plan-review/coverage fetch reflects the new evidence
+      log.info('api.testrail.evidence_uploaded', {
+        user: sessionEnvelope.session.user,
+        target: 'result',
+        resultId,
+        attachmentId,
+        bytes: upload.buffer.length,
+        contentType: upload.contentType,
+      });
+      sendJson(res, 200, { attachmentId, resultId });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to upload evidence.');
+    }
+    return;
+  }
+
+  // Pass-with-evidence: a test with no result yet (e.g. Untested) has nothing to attach result-evidence
+  // to, so record a Passed result for the case in the run, then attach the file to that new result.
+  // This MUTATES TestRail (sets the test to Passed); the client confirms before calling it.
+  if (req.method === 'POST' && /^\/api\/testrail\/runs\/[^/]+\/cases\/[^/]+\/pass-with-evidence$/.test(url.pathname)) {
+    const sessionEnvelope = await requireSession(req, res);
+    if (!sessionEnvelope) return;
+    if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {
+      sendError(res, 503, 'TestRail is not configured.');
+      return;
+    }
+    const match = url.pathname.match(/^\/api\/testrail\/runs\/([^/]+)\/cases\/([^/]+)\/pass-with-evidence$/);
+    const runId = decodeURIComponent(match?.[1] || '');
+    const caseId = decodeURIComponent(match?.[2] || '');
+    if (!runId.trim() || !caseId.trim()) {
+      sendError(res, 400, 'A run ID and case ID are required.');
+      return;
+    }
+    const upload = await parseEvidenceUpload(req, `evidence-${caseId}`);
+    if (!upload.ok) {
+      sendError(res, upload.status, upload.message);
+      return;
+    }
+    try {
+      const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
+      const { resultId } = await addResultForCase(trConfig, runId, caseId, 1); // status_id 1 = Passed
+      const { attachmentId } = await addAttachmentToResult(trConfig, resultId, upload);
+      invalidateEvidenceCaches(); // status + evidence both changed
+      log.info('api.testrail.evidence_uploaded', {
+        user: sessionEnvelope.session.user,
+        target: 'pass',
+        runId,
+        caseId,
+        resultId,
+        attachmentId,
+        bytes: upload.buffer.length,
+        contentType: upload.contentType,
+      });
+      sendJson(res, 200, { resultId, attachmentId, status: 'Passed' });
+    } catch (error) {
+      sendError(res, 502, (error as Error).message || 'Failed to record result and upload evidence.');
     }
     return;
   }

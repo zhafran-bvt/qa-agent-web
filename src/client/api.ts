@@ -66,6 +66,44 @@ export function loadTestRailPlanReview(planId: string | number): Promise<TrPlanR
   return requestJson<TrPlanReviewResponse>(`/api/testrail/plans/${encodeURIComponent(String(planId))}/review`);
 }
 
+// Upload raw file bytes (not JSON) to an evidence endpoint, with the filename URL-encoded in a header
+// so it stays ASCII-safe; the server forwards it to TestRail.
+async function postEvidence(path: string, file: File, contentType?: string): Promise<{ attachmentId: string }> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': contentType || file.type || 'application/octet-stream',
+      'X-Filename': encodeURIComponent(file.name || 'evidence'),
+    },
+    body: file,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error((body as { error?: string }).error || `Upload failed (${response.status})`);
+  }
+  return body as { attachmentId: string };
+}
+
+/** Attach evidence to a TestRail result (per-run; flips the evidence badge for passed tests). */
+export function uploadResultEvidence(resultId: string | number, file: File, contentType?: string): Promise<{ attachmentId: string }> {
+  return postEvidence(`/api/testrail/results/${encodeURIComponent(String(resultId))}/attachments`, file, contentType);
+}
+
+/** For a test with no result yet (e.g. Untested): record a Passed result for the case in the run, then
+ *  attach the evidence to it. Mutates TestRail (sets the test Passed) — the caller confirms first. */
+export function passWithEvidence(
+  runId: string | number,
+  caseId: string | number,
+  file: File,
+  contentType?: string
+): Promise<{ resultId: string; attachmentId: string; status: string }> {
+  return postEvidence(
+    `/api/testrail/runs/${encodeURIComponent(String(runId))}/cases/${encodeURIComponent(String(caseId))}/pass-with-evidence`,
+    file,
+    contentType
+  ) as Promise<{ resultId: string; attachmentId: string; status: string }>;
+}
+
 /** URL for the attachment proxy — used as a <video>/<img> src or an Open/Download href. */
 export function testrailAttachmentUrl(id: string | number, name?: string, download = false): string {
   const params = new URLSearchParams();

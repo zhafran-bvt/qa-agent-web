@@ -266,19 +266,27 @@ function attachmentLinkedResultId(value: Record<string, unknown>): number | stri
   return null;
 }
 
-function idsEqual(left: number | string | null, right: number | string | null): boolean {
-  if (left === null || right === null) return false;
-  return String(left) === String(right);
-}
-
-function latestPassedResult(results: Record<string, unknown>[]): Record<string, unknown> | null {
+function passedResultsSorted(results: Record<string, unknown>[]): Record<string, unknown>[] {
   const passed = results.filter((result) => num(result.status_id, 0) === 1);
-  if (!passed.length) return null;
   return passed.sort((left, right) => {
     const createdDelta = num(right.created_on, 0) - num(left.created_on, 0);
     if (createdDelta) return createdDelta;
     return num(right.id ?? right.result_id, 0) - num(left.id ?? left.result_id, 0);
-  })[0];
+  });
+}
+
+// The latest result id of any status (used so non-passed tests that have run still expose a result to
+// attach evidence to — evidence isn't required for them, but the reviewer may still upload).
+function latestResultId(results: Record<string, unknown>[]): number | string | null {
+  if (!results.length) return null;
+  const sorted = [...results].sort((left, right) => {
+    const createdDelta = num(right.created_on, 0) - num(left.created_on, 0);
+    if (createdDelta) return createdDelta;
+    return num(right.id ?? right.result_id, 0) - num(left.id ?? left.result_id, 0);
+  });
+  const top = sorted[0];
+  const id = top.id ?? top.result_id;
+  return id === undefined || id === null ? null : (id as number | string);
 }
 
 function attachmentSummary(raw: Record<string, unknown>): TrAttachmentSummary {
@@ -291,21 +299,44 @@ function attachmentSummary(raw: Record<string, unknown>): TrAttachmentSummary {
   };
 }
 
+function uniqueAttachmentSummaries(attachments: Record<string, unknown>[]): TrAttachmentSummary[] {
+  const seen = new Set<string>();
+  const summaries: TrAttachmentSummary[] = [];
+  for (const attachment of attachments) {
+    const summary = attachmentSummary(attachment);
+    const key = summary.id || `${summary.name}:${summary.size || ''}:${summary.createdOn || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    summaries.push(summary);
+  }
+  return summaries;
+}
+
 function evidenceForPassedTest(
-  latestResult: Record<string, unknown> | null,
+  passedResults: Record<string, unknown>[],
   attachments: Record<string, unknown>[]
 ): { evidenceStatus: TrEvidenceStatus; latestResultId: number | string | null; matchedAttachments: TrAttachmentSummary[] } {
-  const latestResultId = resultId(latestResult);
-  if (!latestResult || latestResultId === null) {
+  const latestResultId = resultId(passedResults[0]);
+  const passedResultIds = new Set(
+    passedResults
+      .map(resultId)
+      .filter((id): id is number | string => id !== null)
+      .map(String)
+  );
+
+  if (!passedResultIds.size || latestResultId === null) {
     return { evidenceStatus: 'unknown', latestResultId, matchedAttachments: [] };
   }
   if (!attachments.length) {
     return { evidenceStatus: 'missing', latestResultId, matchedAttachments: [] };
   }
 
-  const linked = attachments.filter((attachment) => idsEqual(attachmentLinkedResultId(attachment), latestResultId));
+  const linked = attachments.filter((attachment) => {
+    const linkedResultId = attachmentLinkedResultId(attachment);
+    return linkedResultId !== null && passedResultIds.has(String(linkedResultId));
+  });
   if (linked.length) {
-    return { evidenceStatus: 'present', latestResultId, matchedAttachments: linked.map(attachmentSummary) };
+    return { evidenceStatus: 'present', latestResultId, matchedAttachments: uniqueAttachmentSummaries(linked) };
   }
 
   const hasReliableResultLink = attachments.some((attachment) => attachmentLinkedResultId(attachment) !== null);
@@ -336,6 +367,7 @@ export function buildPlanReviewRun(
     if (status !== 'Passed') {
       return {
         testId,
+        runId,
         caseId,
         title: String(test.title || `Test ${testId}`),
         statusId,
@@ -345,19 +377,22 @@ export function buildPlanReviewRun(
         refs: String(test.refs || ''),
         elapsed: String(test.elapsed || ''),
         defects: String(test.defects || ''),
-        latestResultId: null,
+        // Evidence isn't required for non-passed tests, but expose the latest result id so the reviewer
+        // can still upload an attachment from Plan Review (untested tests have no result → null).
+        latestResultId: latestResultId(resultsByTestId.get(testId) || []),
         evidenceStatus: 'not_required',
         attachments: [],
       };
     }
 
     const evidence = evidenceForPassedTest(
-      latestPassedResult(resultsByTestId.get(testId) || []),
+      passedResultsSorted(resultsByTestId.get(testId) || []),
       attachmentsByTestId.get(testId) || []
     );
 
     return {
       testId,
+      runId,
       caseId,
       title: String(test.title || `Test ${testId}`),
       statusId,
@@ -476,4 +511,11 @@ export function clearDashboardCaches(): void {
   planReviewCache.clear();
   statusesCache.clear();
   userNameCache.clear();
+}
+
+/** Invalidate only the caches whose data changes when evidence is uploaded — the plan-review evidence
+ *  status and the coverage rollup (passed-with-evidence). Leaves plans/users/statuses caches intact. */
+export function invalidateEvidenceCaches(): void {
+  planReviewCache.clear();
+  coverageCache.clear();
 }

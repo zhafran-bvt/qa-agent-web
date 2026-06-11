@@ -3486,6 +3486,12 @@ details[open] .source-caret { transform: rotate(90deg); }
 .tr-review-case-main > span { color: var(--subtle); font-size: 12px; }
 .tr-review-case-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; color: var(--subtle); font-size: 12px; }
 .tr-review-case-side { display: grid; gap: 8px; justify-items: end; }
+.tr-evidence-upload { display: grid; gap: 4px; justify-items: end; }
+.tr-evidence-upload label { cursor: pointer; margin: 0; }
+.tr-evidence-upload label.is-disabled { opacity: 0.6; pointer-events: none; }
+.tr-evidence-upload-error { color: var(--danger, #c0392b); font-size: 11px; max-width: 220px; text-align: right; }
+.tr-evidence-upload-done { color: var(--success, #2e7d32); font-size: 11px; }
+.tr-evidence-upload-disabled { color: var(--subtle); font-size: 11px; opacity: 0.6; }
 .tr-review-note {
   border: 1px solid var(--line);
   border-radius: 8px;
