@@ -12,7 +12,21 @@ import {
   normalizeJiraReference,
   normalizeScopeSnapshotTranslation,
   normalizeTextList,
+  providerContent,
 } from '../../src/server/services/llm';
+
+test('providerContent throws on truncated responses (finish_reason=length) but returns normal content', () => {
+  // BUG-09: a truncated case array must not be silently sliced into a partial-but-valid array.
+  assert.throws(
+    () => providerContent({ choices: [{ finish_reason: 'length', message: { content: '{"testCases":[{"id":"TC-01"' } }] }, 'generation'),
+    /truncated \(finish_reason=length\)/
+  );
+  assert.equal(
+    providerContent({ choices: [{ finish_reason: 'stop', message: { content: '{"testCases":[]}' } }] }, 'generation'),
+    '{"testCases":[]}'
+  );
+  assert.equal(providerContent({ choices: [{ message: {} }] }, 'generation'), '');
+});
 
 test('finds generated cases from common LLM JSON wrappers', () => {
   const testCases = [{ title: 'Case', bddScenario: 'Feature: Example' }];

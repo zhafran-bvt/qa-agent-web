@@ -19,7 +19,7 @@ import { startPrivacyReportingLoop } from './services/privacy';
 import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/suggestions';
 import { summarizeSprintBurndown } from './services/sprint-burndown';
 import { buildManageCaseBody, fetchAttachment, findExistingCasesByJiraRef, getUserByEmail, guessAttachmentMime, pushCases, trWrite, type TestRailConfig } from './services/testrail';
-import { decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
+import { assessEncryptionKeyStrength, decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
 import { buildApiContract, assessApiContractRelevance } from './services/api-docs';
 import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, listPlans } from './services/testrail-dashboard';
 import { buildCoverage, validateCases } from './services/validation';
@@ -1596,6 +1596,10 @@ function validateStartupConfig(): void {
   }
   if (hosted && !encryptionAvailable()) {
     logger.warn('startup.config.encryption_key_missing');
+  }
+  const weakKeyReason = assessEncryptionKeyStrength();
+  if (weakKeyReason) {
+    logger.warn('startup.config.encryption_key_weak', { reason: weakKeyReason });
   }
 }
 

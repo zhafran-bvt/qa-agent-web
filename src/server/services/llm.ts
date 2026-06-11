@@ -204,6 +204,18 @@ function extractJson(text: string): unknown {
   }
 }
 
+export function providerContent(response: any, label: string): string {
+  // Truncation guard (BUG-09): when the model hits the token cap mid-response, finish_reason is
+  // 'length' and the JSON is incomplete. extractJson's array-slice fallback would happily parse the
+  // truncated remainder into a partial-but-valid array, silently dropping cases/criteria. Treat
+  // truncation as a provider error so the fallback/retry path handles it instead.
+  const choice = response?.choices?.[0];
+  if (choice?.finish_reason === 'length') {
+    throw new Error(`LLM ${label} response was truncated (finish_reason=length); reduce scope or raise the response token limit.`);
+  }
+  return choice?.message?.content ?? '';
+}
+
 export function findCaseArray(value: unknown): unknown[] | null {
   // Be tolerant of provider-specific response keys while requiring an array that looks like test cases.
   if (Array.isArray(value)) return value;
@@ -773,7 +785,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'synthesis');
   const parsed = extractJson(content);
   const criteria = findAcceptanceCriteriaArray(parsed);
   if (!Array.isArray(criteria)) {
@@ -829,7 +841,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       }
     );
 
-    const repairContent = repairResponse.choices?.[0]?.message?.content;
+    const repairContent = providerContent(repairResponse, 'synthesis repair');
     const repairParsed = extractJson(repairContent);
     const repairedCriteria = findAcceptanceCriteriaArray(repairParsed);
     if (Array.isArray(repairedCriteria)) {
@@ -896,7 +908,7 @@ async function translateScopeSnapshotWithProvider(
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'duplicate review');
   const parsed = extractJson(content) as Record<string, unknown>;
 
   return {
@@ -968,7 +980,7 @@ async function recommendDuplicateCasesWithProvider(
     }
   );
 
-  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  const parsed = extractJson(providerContent(response, 'duplicate recommendations'));
   const recommendations = findDuplicateRecommendationArray(parsed);
   if (!recommendations) throw new Error('LLM duplicate review did not return recommendations.');
 
@@ -1193,7 +1205,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'generation');
   const parsed = extractJson(content);
   const cases = findCaseArray(parsed);
   if (!Array.isArray(cases)) {
@@ -1273,7 +1285,7 @@ async function repairMissingCoverageWithProvider(
     }
   );
 
-  const content = response.choices?.[0]?.message?.content;
+  const content = providerContent(response, 'coverage repair');
   const parsed = extractJson(content);
   const cases = findCaseArray(parsed);
   if (!Array.isArray(cases)) {
@@ -1417,7 +1429,7 @@ async function selectApiEndpointsWithProvider(
     }
   );
 
-  const parsed = extractJson(response.choices?.[0]?.message?.content);
+  const parsed = extractJson(providerContent(response, 'endpoint selection'));
   return normalizeSelectedEndpoints(parsed, input.documentedEndpoints);
 }
 
