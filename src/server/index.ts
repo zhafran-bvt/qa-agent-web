@@ -1105,6 +1105,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       scopeType: body.context.constraints?.scopeType,
       acceptanceCriteria: body.context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
+      matchedEndpoints: body.context.apiContract?.matchedEndpoints,
     });
     const coverage = buildCoverage(testCases, body.context.acceptanceCriteria, {
       enforceAcceptanceCriteria: coverageEnforced,
@@ -1171,6 +1172,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+      matchedEndpoints: body.context?.apiContract?.matchedEndpoints,
     });
     sendJson(res, 200, {
       testCases,
@@ -1216,6 +1218,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+      matchedEndpoints: body.matchedEndpoints || body.context?.apiContract?.matchedEndpoints,
     });
     const invalid = validation.filter((item) => !item.valid);
     const coverage = buildCoverage(testCases, body.acceptanceCriteria, {
@@ -1229,6 +1232,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       });
       return;
     }
+    // Weak coverage (claimed but unsubstantiated) is non-blocking at preflight — surfaced so the client
+    // can obtain an explicit acknowledgement. The /api/push gate enforces it.
+    const weakCoverage = coverage.unsubstantiatedClaims.length ? { claims: coverage.unsubstantiatedClaims } : undefined;
 
     if (!config.testrail.projectId) {
       log.warn('api.push.preflight.skipped', {
@@ -1250,6 +1256,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
           existingCount: 0,
           generatedCount: testCases.length,
         },
+        validation,
+        coverage,
+        weakCoverage,
       });
       return;
     }
@@ -1264,6 +1273,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sectionId,
       existingCases: existingCases.length,
       generatedCases: testCases.length,
+      unsubstantiatedClaims: coverage.unsubstantiatedClaims.length,
     });
     sendJson(res, 200, {
       duplicatesFound: existingCases.length > 0,
@@ -1275,6 +1285,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         existingCount: existingCases.length,
         generatedCount: testCases.length,
       },
+      validation,
+      coverage,
+      weakCoverage,
     });
     return;
   }
@@ -1306,6 +1319,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+      matchedEndpoints: body.matchedEndpoints || body.context?.apiContract?.matchedEndpoints,
     });
     const invalid = validation.filter((item) => !item.valid);
     const coverage = buildCoverage(body.testCases || [], body.acceptanceCriteria, {
@@ -1314,6 +1328,22 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     if (invalid.length || (coverage.enforced && coverage.uncoveredCriteria.length)) {
       sendJson(res, 400, {
         error: invalid.length ? 'Validation failed.' : 'Acceptance criteria coverage is incomplete.',
+        validation,
+        coverage,
+      });
+      return;
+    }
+    // Acknowledge-to-override: a case claiming an AC its steps don't substantiate must not silently
+    // ship as green. Block unless the reviewer explicitly acknowledged the weak coverage.
+    if (coverage.enforced && coverage.unsubstantiatedClaims.length && !body.weakCoverageAcknowledged) {
+      log.warn('api.push.weak_coverage_blocked', {
+        jiraKey: body.jiraKey,
+        user: session.user,
+        unsubstantiatedClaims: coverage.unsubstantiatedClaims.length,
+      });
+      sendJson(res, 400, {
+        error: 'Some acceptance criteria are claimed but not substantiated by the case steps. Acknowledge weak coverage to proceed.',
+        requiresWeakCoverageAck: true,
         validation,
         coverage,
       });

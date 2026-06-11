@@ -131,6 +131,9 @@ function coverageSummaryText(
       `${criterion.id}: ${criterion.text} -> ${criterion.coveredBy.length ? t.coveredBy(criterion.coveredBy.join(', ')) : coverageEnforced ? t.notCovered : t.notEnforced}`
     ),
     ...(coverage.unmappedCases.length && coverageEnforced ? [t.unmappedCases(coverage.unmappedCases.join(', '))] : []),
+    ...(coverage.unsubstantiatedClaims?.length
+      ? [t.weakCoverage(coverage.unsubstantiatedClaims.map((claim) => `${claim.caseId}→${claim.criterionId}`).join(', '))]
+      : []),
   ];
 }
 

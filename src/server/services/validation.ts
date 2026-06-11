@@ -6,6 +6,9 @@ interface ValidationOptions {
   allowNonMainRefs?: boolean;
   acceptanceCriteria?: Array<{ id: string; text: string }>;
   enforceAcceptanceCriteria?: boolean;
+  // Endpoints the API contract actually matched. When provided, postman cases are checked so an
+  // apiSpec path that isn't in the contract is flagged as possibly invented (warning, not error).
+  matchedEndpoints?: Array<{ method?: string; path?: string }>;
 }
 
 interface GeneratedLikeCase {
@@ -61,6 +64,84 @@ export function normalizeList(value: unknown): string[] {
     .filter(Boolean);
 }
 
+// Coverage substantiation: a case should only count as covering an AC if its concrete steps/
+// assertions share distinctive vocabulary with the AC — otherwise the claim is inflation (e.g. an
+// email-routing AC stapled onto a dataset test that never mentions email). Ubiquitous feature words
+// are excluded so only meaningful overlap counts.
+const SUBSTANTIATION_STOPWORDS = new Set([
+  'the','a','an','and','or','of','to','in','on','for','with','via','only','not','be','is','are','was','were','that','their','this','these','those','each','all','any','when','then','given','should','must','shall','will','can','cannot','its','from','into','per','also','may',
+  'system','request','requests','response','responses','api','apis','endpoint','endpoints','partner','partners','url','urls','dataset','datasets','data','access','user','users','org','organization','organizations','general','platform','return','returns','returned','include','includes','included','using','use','used','through','based','assigned','assign','validation','validate','test','case','scenario',
+]);
+
+function substantiationTokens(value: string): Set<string> {
+  return new Set(
+    String(value || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 2 && !SUBSTANTIATION_STOPWORDS.has(token))
+  );
+}
+
+function caseEvidenceText(testCase: GeneratedLikeCase): string {
+  const parts: Array<string | undefined> = [testCase.title, testCase.bddScenario, testCase.preconditions || testCase.custom_preconds];
+  const api = testCase.apiSpec;
+  if (api) parts.push(api.method, api.path, api.samplePayload, api.expectedResponse, ...(Array.isArray(api.assertions) ? api.assertions : []));
+  const mv = testCase.manualVerification;
+  if (mv) parts.push(mv.target, mv.expectedResult, ...(Array.isArray(mv.steps) ? mv.steps : []));
+  return parts.filter(Boolean).join(' ');
+}
+
+// Endpoint provenance: a postman case should reference an endpoint that exists in the matched API
+// contract. Paths are compared structurally so concrete ids (/datasets/42) match their documented
+// template (/datasets/{id}) and trailing slashes / casing don't cause false misses.
+export function normalizeEndpointPath(value: string): string {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[?#].*$/, '')
+    .replace(/\/+$/, '')
+    .split('/')
+    .map((segment) => {
+      if (!segment) return segment;
+      if (/^\{.*\}$/.test(segment) || segment.startsWith(':')) return '{param}';
+      if (/^\d+$/.test(segment)) return '{param}';
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(segment)) return '{param}';
+      return segment;
+    })
+    .join('/');
+}
+
+export function endpointIsDocumented(
+  method: string,
+  path: string,
+  matched: Array<{ method?: string; path?: string }>
+): boolean {
+  if (!matched.length) return true; // nothing to compare against → don't penalize
+  const targetPath = normalizeEndpointPath(path);
+  if (!targetPath) return true;
+  const targetMethod = String(method || '').toUpperCase();
+  return matched.some((endpoint) => {
+    if (normalizeEndpointPath(endpoint.path || '') !== targetPath) return false;
+    const candidateMethod = String(endpoint.method || '').toUpperCase();
+    return !candidateMethod || !targetMethod || candidateMethod === targetMethod;
+  });
+}
+
+/**
+ * True when a case's concrete content plausibly exercises an acceptance criterion — i.e. they share
+ * at least one distinctive (non-ubiquitous) token. Criteria with no distinctive tokens cannot be
+ * judged, so they are treated as substantiated (no false penalty).
+ */
+export function isAcceptanceCriterionSubstantiated(criterionText: string, caseText: string): boolean {
+  const criterionTokens = substantiationTokens(criterionText);
+  if (criterionTokens.size === 0) return true;
+  const caseTokens = substantiationTokens(caseText);
+  for (const token of criterionTokens) {
+    if (caseTokens.has(token)) return true;
+  }
+  return false;
+}
+
 export function validateCase(testCase: GeneratedLikeCase, options: ValidationOptions = {}) {
   // Server-side validation mirrors the UI gates and protects direct API callers before TestRail writes.
   const errors: string[] = [];
@@ -83,6 +164,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const sourceScope = normalizeList(testCase.sourceScope);
   const coverageNote = normalizeText(testCase.evidence?.coverageNote);
   const executionType = testCase.executionType || (scopeType === 'api' ? 'postman' : undefined);
+  const matchedEndpoints = Array.isArray(options.matchedEndpoints) ? options.matchedEndpoints : [];
 
   if (!title) errors.push('Title is required.');
   if (!refs) errors.push('Jira reference is required.');
@@ -126,9 +208,16 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   }
 
   if (enforceAcceptanceCriteria && hasDetectedAcceptanceCriteria) {
+    const criterionTextById = new Map(acceptanceCriteria.map((item) => [normalizeAcceptanceCriteriaId(item.id), normalizeText(item.text)]));
+    const evidenceText = caseEvidenceText(testCase);
     for (const criterionId of coversAcceptanceCriteria) {
       if (!validAcceptanceCriteriaIds.has(criterionId)) {
         errors.push(`Unknown acceptance criterion ${criterionId}.`);
+        continue;
+      }
+      const criterionText = criterionTextById.get(criterionId);
+      if (criterionText && !isAcceptanceCriterionSubstantiated(criterionText, evidenceText)) {
+        warnings.push(`Acceptance criterion ${criterionId} is claimed but not substantiated by the case steps/assertions.`);
       }
     }
   }
@@ -145,6 +234,11 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     }
     if (method && path && !bddLower.includes(method.toLowerCase()) && !bdd.includes(path)) {
       warnings.push('BDD scenario should mention the API method or path from apiSpec.');
+    }
+    if (method && path && !endpointIsDocumented(method, path, matchedEndpoints)) {
+      warnings.push(
+        `apiSpec endpoint ${method} ${path} is not in the matched API contract; verify it against the API docs or note it as assumed in preconditions.`
+      );
     }
     if (/^(POST|PUT|PATCH)$/.test(method)) {
       const payload = normalizeText(testCase.apiSpec?.samplePayload);
@@ -167,6 +261,13 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
       errors.push('Manual DB case must include DB verification steps.');
     }
     if (!expectedResult) errors.push('Manual DB case must include manualVerification.expectedResult.');
+  }
+
+  // Cross-field integrity: the structured payload should agree with the claimed executionType, so a
+  // case that defines an HTTP endpoint isn't filed as a manual case (or vice versa).
+  const apiSpecPopulated = Boolean(normalizeText(testCase.apiSpec?.method) && normalizeText(testCase.apiSpec?.path));
+  if (apiSpecPopulated && executionType && executionType !== 'postman') {
+    warnings.push(`executionType is ${executionType} but apiSpec defines an HTTP endpoint; set executionType to postman or drop apiSpec.`);
   }
 
   if (!coverageNote) {
@@ -209,6 +310,9 @@ export function buildCoverage(
   }));
   const entryById = new Map(entries.map((entry) => [entry.id, entry]));
   const unmappedCases: string[] = [];
+  // Claimed (case, AC) pairs whose case content doesn't substantiate the AC — surfaced so coverage
+  // isn't silently inflated (e.g. an email-routing AC "covered" by dataset tests that never assert email).
+  const unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }> = [];
 
   for (let index = 0; index < caseList.length; index += 1) {
     const testCase = caseList[index];
@@ -218,9 +322,14 @@ export function buildCoverage(
       unmappedCases.push(caseId);
       continue;
     }
+    const evidenceText = caseEvidenceText(testCase);
     for (const criterionId of mappedCriteria) {
       const entry = entryById.get(criterionId);
       if (!entry) continue;
+      if (entry.text && !isAcceptanceCriterionSubstantiated(entry.text, evidenceText)) {
+        unsubstantiatedClaims.push({ caseId, criterionId });
+        continue;
+      }
       entry.coveredBy.push(caseId);
     }
   }
@@ -233,5 +342,6 @@ export function buildCoverage(
     uncoveredCriteria: uncovered.map((entry) => entry.id),
     byCriterion: entries,
     unmappedCases,
+    unsubstantiatedClaims,
   };
 }

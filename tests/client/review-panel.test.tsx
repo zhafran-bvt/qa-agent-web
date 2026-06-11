@@ -169,6 +169,7 @@ const coverage: CoverageSummary = {
     },
   ],
   unmappedCases: [],
+  unsubstantiatedClaims: [],
 };
 
 describe('ReviewPanel', () => {

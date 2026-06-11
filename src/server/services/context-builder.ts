@@ -1,5 +1,6 @@
 import { extractPageId, extractText, type SimplifiedIssue } from './atlassian';
 import { resolveScopeType } from './api-docs';
+import { AC_HEADING_BLOCK_RE, AC_HEADING_INLINE_RE, AC_HEADING_LINE_RE, API_SCOPE_VERB_RE, SPEC_PAGE_TITLE_RE } from './keywords';
 import type { Logger } from './logger';
 import type { AcceptanceCriteriaDiagnostics, ConfluencePageSummary, LinkedIssueSummary, QaContext, QaScopeType, ScopeAuthority, ScopedItem, ScopeConfluenceSection } from '../../shared/contracts';
 
@@ -73,6 +74,9 @@ interface QaClient {
   getRemoteLinks(issueKey: string): Promise<Array<Record<string, any>>>;
   getConfluencePage(pageId: string): Promise<{ id: string; title?: string; status?: string; webUrl?: string | null; body: string; adf?: unknown }>;
   getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>>;
+  // Optional: immediate child pages (BUG-06 descendant expansion). Optional so existing mocks/tests
+  // that don't implement it still satisfy the interface.
+  getConfluencePageChildren?(pageId: string, limit?: number): Promise<Array<{ id: string; title?: string }>>;
 }
 
 async function mapWithConcurrency<T, R>(items: T[], limit: number, iteratee: (item: T, index: number) => Promise<R>): Promise<R[]> {
@@ -228,9 +232,7 @@ function isCriterionText(text: string, apiScope = false): boolean {
   // "Submit analysis", "Reset password") rather than should/must sentences. Capturing these so the
   // ticket's own scope wins over the parent PRD; the synthesizer refines them downstream.
   if (apiScope) {
-    return /(get|post|put|patch|delete|retrieve|fetch|list|submit|send|create|read|update|upsert|remove|validate|validation|verify|verification|authenticate|authorize|authorization|login|logout|reset|forgot|activation|register|endpoint|\bapi\b|request|response|schema|dataset|export|import|stream|migration|backfill|database|access|permission|password|token)/i.test(
-      text
-    );
+    return API_SCOPE_VERB_RE.test(text);
   }
   return false;
 }
@@ -244,9 +246,7 @@ function shouldEndCriteriaSection(line: string): boolean {
 }
 
 function isExplicitRequirementHeading(line: string): boolean {
-  return /^(acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)[:]?$/i.test(
-    normalizeInlineText(line)
-  );
+  return AC_HEADING_LINE_RE.test(normalizeInlineText(line));
 }
 
 function extractListBlockCriteria(lines: string[], source: string, apiScope = false): Array<{ text: string; source: string }> {
@@ -288,7 +288,7 @@ function expandInlineRequirementLines(lines: string[]): string[] {
     let line = String(rawLine || '').trim();
     if (!line) continue;
 
-    const explicitHeadingMatch = line.match(/^((?:acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)[:]?)(\s+.+)$/i);
+    const explicitHeadingMatch = line.match(AC_HEADING_INLINE_RE);
     if (explicitHeadingMatch && /(?:^|\s)\d+[\.)]\s+/.test(explicitHeadingMatch[2])) {
       expanded.push(normalizeInlineText(explicitHeadingMatch[1]));
       line = explicitHeadingMatch[2].trim();
@@ -1034,9 +1034,7 @@ export function isolateStorySection(body: string, anchor: string, storySummary: 
 }
 
 function hasExplicitRequirementSection(text: string): boolean {
-  return /(?:^|\n)\s*(acceptance criteria|acceptance|ac|requirements|requirement|expected result|expected behavior|behaviour|behavior|rules)\s*:?\s*(?:\n|$)/i.test(
-    String(text || '')
-  );
+  return AC_HEADING_BLOCK_RE.test(String(text || ''));
 }
 
 function selectAcceptanceCriteria(
@@ -1314,8 +1312,29 @@ function isContextOnlyConfluencePage(page: ConfluencePageSummary): boolean {
   return false;
 }
 
-function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIssueSummary[], confluencePages: ConfluencePageSummary[]): AcceptanceCriteriaDiagnostics {
+// These are review/diagnostic surfaces, not generation inputs. A huge multi-story PRD page can
+// otherwise dump hundreds of candidate criteria (noise + payload bloat), so cap them.
+const DIAGNOSTIC_CRITERIA_CAP = 50;
+
+function buildContextSummary(
+  mainIssue: SimplifiedIssue,
+  linkedIssues: LinkedIssueSummary[],
+  confluencePages: ConfluencePageSummary[],
+  scopeConfluenceSection?: ScopeConfluenceSection | null
+): AcceptanceCriteriaDiagnostics {
   const issueSources = [mainIssue, ...linkedIssues.filter((issue) => !issue.fetchError)] as Array<SimplifiedIssue | LinkedIssueSummary>;
+  // Prefer the matched PRD subsection for confluence criteria — extracting from every page's full
+  // body dumps hundreds of candidates from a multi-story page. Fall back to all (non-context) pages
+  // only when no section matched.
+  const scopedSectionBody = scopeConfluenceSection?.matched ? String(scopeConfluenceSection.body || '').trim() : '';
+  const confluenceCriteriaItems = scopedSectionBody
+    ? extractAcceptanceCriteriaFromText(
+        scopeConfluenceSection!.body || '',
+        `${scopeConfluenceSection!.pageId} ${scopeConfluenceSection!.title || 'PRD section'}`
+      )
+    : confluencePages
+        .filter((page) => !page.fetchError && !isContextOnlyConfluencePage(page))
+        .flatMap((page) => extractAcceptanceCriteriaFromText(page.body || '', `${page.id} ${page.title || 'Confluence page'}`));
   return {
     allIssueUserStories: dedupeScopedItems(
       issueSources.flatMap((issue) => [
@@ -1323,20 +1342,15 @@ function buildContextSummary(mainIssue: SimplifiedIssue, linkedIssues: LinkedIss
         ...extractUserStoriesFromText((issue as SimplifiedIssue).description || '', `${issue.key} description`),
       ]),
       'US'
-    ),
+    ).slice(0, DIAGNOSTIC_CRITERIA_CAP),
     allIssueCriteria: dedupeScopedItems(
       issueSources.flatMap((issue) => [
         ...extractAcceptanceCriteriaFromText((issue as SimplifiedIssue).description || '', `${issue.key} description`),
         ...extractAcceptanceCriteriaFromText((issue as SimplifiedIssue).renderedDescription || '', `${issue.key} rendered description`),
       ]),
       'AC'
-    ),
-    confluenceCriteria: dedupeScopedItems(
-      confluencePages
-        .filter((page) => !page.fetchError && !isContextOnlyConfluencePage(page))
-        .flatMap((page) => extractAcceptanceCriteriaFromText(page.body || '', `${page.id} ${page.title || 'Confluence page'}`)),
-      'AC'
-    ),
+    ).slice(0, DIAGNOSTIC_CRITERIA_CAP),
+    confluenceCriteria: dedupeScopedItems(confluenceCriteriaItems, 'AC').slice(0, DIAGNOSTIC_CRITERIA_CAP),
   };
 }
 
@@ -1424,6 +1438,55 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     }
   }
 
+  // BUG-06: spec/PRD detail often nests in immediate child pages, which were never fetched — only the
+  // parent contributed, so nested acceptance detail was silently missed. Pull a bounded set of children
+  // of spec-titled pages into context (depth 1, capped, concurrency-limited) so they reach synthesis and
+  // excerpt attribution. Marked 'spec-descendant' so the AC layer treats them as spec-grounding sources.
+  const maxDescendants = Number(process.env.QA_CONFLUENCE_MAX_DESCENDANTS || 6);
+  if (maxDescendants > 0 && typeof client.getConfluencePageChildren === 'function') {
+    const existingPageIds = new Set(confluencePages.map((page) => page.id));
+    const specParents = confluencePages.filter((page) => !page.fetchError && page.body && SPEC_PAGE_TITLE_RE.test(page.title || ''));
+    const childRefs: Array<{ parentId: string; id: string }> = [];
+    for (const parent of specParents) {
+      if (childRefs.length >= maxDescendants) break;
+      const children = await client.getConfluencePageChildren(parent.id, maxDescendants);
+      for (const child of children) {
+        if (childRefs.length >= maxDescendants) break;
+        if (!child.id || existingPageIds.has(child.id)) continue;
+        existingPageIds.add(child.id);
+        childRefs.push({ parentId: parent.id, id: child.id });
+      }
+    }
+    if (childRefs.length) {
+      const fetchedChildren = await mapWithConcurrency(childRefs, confluenceFetchConcurrency, async (childRef) => {
+        try {
+          return { childRef, page: await client.getConfluencePage(childRef.id), error: null as Error | null };
+        } catch (error) {
+          return { childRef, page: null, error: error as Error };
+        }
+      });
+      let childrenAdded = 0;
+      for (const entry of fetchedChildren) {
+        if (!entry.page || !entry.page.body) continue;
+        const { adf, ...pageRest } = entry.page as typeof entry.page & { adf?: unknown };
+        if (adf) pageAdfById.set(String(entry.page.id), adf);
+        confluencePages.push({
+          ...pageRest,
+          sourceRefs: [{ issueKey: entry.childRef.parentId, sourceType: 'confluence-descendant', relationship: 'spec-descendant', anchor: '' }],
+          sourceUrl: entry.page.webUrl || undefined,
+        });
+        childrenAdded += 1;
+      }
+      if (childrenAdded) {
+        log?.info('context.confluence_descendants_expanded', {
+          jiraKey: mainIssue.key,
+          specParents: specParents.map((page) => page.id),
+          childrenAdded,
+        });
+      }
+    }
+  }
+
   const classifiedLinkedIssues = linkedIssues.map((issue) => ({
     ...issue,
     classification: classifyLinkedIssue(issue),
@@ -1499,17 +1562,23 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
         const adfRankCandidates = adfBlocks
           ? parseSectionsFromBlocks(subsectionBase.regionBlocks || adfBlocks)
           : null;
-        const thinFallbackCandidate = mainIssueThin
+        // Narrow a large matched PRD page to the ticket-relevant subsection for thin tickets AND
+        // for backend (api) tickets — a BE ticket like "[BE] Partner ... Dataset Access" should scope
+        // to the matching PRD subsection (e.g. the partner-URL section), not the whole multi-story page.
+        // FE non-thin tickets are intentionally left unchanged.
+        const shouldNarrowSection = mainIssueThin || resolvedScopeType === 'api';
+        const narrowedSubsection = shouldNarrowSection
           ? rankPrdSubsection(subsectionBase, mainIssue, scopeParentIssue.summary || '', adfRankCandidates)
           : null;
-        // Fix 5: record that the thin-ticket ranking path actually executed,
-        // independent of which AC source ultimately won, so telemetry matches
-        // reality. Also surface the ranked candidates for QA review.
+        // Fix 5: record that the ranking path actually executed, independent of which AC source
+        // ultimately won, so telemetry matches reality. Also surface the ranked candidates for QA review.
         if (mainIssueThin) {
           thinFallbackUsed = true;
-          rankedScopeCandidates = thinFallbackCandidate?.candidates || [];
+          rankedScopeCandidates = narrowedSubsection?.candidates || [];
+        } else if (resolvedScopeType === 'api' && narrowedSubsection?.candidates?.length) {
+          rankedScopeCandidates = narrowedSubsection.candidates;
         }
-        const effectiveSection = thinFallbackCandidate || section;
+        const effectiveSection = narrowedSubsection || section;
         scopeConfluenceSection = {
           pageId: page.id,
           title: page.title || '',
@@ -1643,7 +1712,14 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   );
 
   const confidence = determineConfidence(mainIssueCriteria, scopedSectionCriteria, scopeParentIssue, scopeConfluenceSection, mainIssueThin);
-  const diagnostics = buildContextSummary(mainIssue, classifiedLinkedIssues, confluencePages);
+  const diagnostics = buildContextSummary(mainIssue, classifiedLinkedIssues, confluencePages, scopeConfluenceSection);
+  // Drop context-only page bodies (e.g. release plans) from the returned payload + LLM context —
+  // they were only fetched for link resolution and add noise/bloat. Scope resolution already ran above.
+  for (const page of confluencePages) {
+    if (!page.fetchError && isContextOnlyConfluencePage(page) && page.body) {
+      page.body = '';
+    }
+  }
   const scopeAuthority = buildScopeAuthority(mainIssue, selection, scopeConfluenceSection, scopeParentIssue);
   const epic = mainIssue.parent && mainIssue.parent.summary;
 

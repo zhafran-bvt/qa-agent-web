@@ -106,6 +106,7 @@ export default function App() {
   const [confidenceApproved, setConfidenceApproved] = useState(false);
   const [overrideReason, setOverrideReason] = useState('');
   const [approved, setApproved] = useState(false);
+  const [weakCoverageAck, setWeakCoverageAck] = useState(false);
   const [sectionId, setSectionId] = useState('');
   const [pushResults, setPushResults] = useState('');
   const [pushedCases, setPushedCases] = useState<{ ids: number[]; jiraKey: string } | null>(null);
@@ -290,7 +291,7 @@ export default function App() {
     }, 4200);
   }
 
-  function buildPushPayload(casesToPush: GeneratedTestCase[] = testCases): PushRequest | null {
+  function buildPushPayload(casesToPush: GeneratedTestCase[] = testCases, weakAckOverride?: boolean): PushRequest | null {
     // Push and preflight must receive identical payloads so the duplicate review reflects the final write.
     if (!context) return null;
     return {
@@ -304,11 +305,14 @@ export default function App() {
       acceptanceCriteria: context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
       testCases: casesToPush,
+      // Lean endpoint list lets the push gate flag invented apiSpec paths (BUG-05).
+      matchedEndpoints: context.apiContract?.matchedEndpoints,
+      weakCoverageAcknowledged: weakAckOverride ?? weakCoverageAck,
     };
   }
 
-  async function submitPush(casesToPush: GeneratedTestCase[]) {
-    const payload = buildPushPayload(casesToPush);
+  async function submitPush(casesToPush: GeneratedTestCase[], weakAckOverride?: boolean) {
+    const payload = buildPushPayload(casesToPush, weakAckOverride);
     if (!payload) return;
     const response = await pushCases(payload);
     setPushResults(formatPushResults(response, lang));
@@ -343,6 +347,7 @@ export default function App() {
       setConfidenceApproved(false);
       setOverrideReason('');
       setApproved(false);
+      setWeakCoverageAck(false);
       setPushResults('');
       setPushedCases(null);
       setGeneratedRunId('');
@@ -390,6 +395,7 @@ export default function App() {
     setCoverageEnforced(response.coverageEnforced !== false);
     setManualScopeOverride(Boolean(response.manualScopeOverride));
     setApproved(false);
+    setWeakCoverageAck(false);
     setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
     setDuplicateReview(null);
@@ -436,10 +442,23 @@ export default function App() {
       const payload = buildPushPayload();
       if (!payload) return;
       const preflight = await preflightPush(payload);
+      // Acknowledge-to-override: if coverage is claimed but unsubstantiated, require an explicit
+      // confirmation before the push proceeds (the server enforces the same gate).
+      let weakAck = weakCoverageAck;
+      if (preflight.weakCoverage?.claims?.length && !weakAck) {
+        const proceed = window.confirm(toastText.weakCoverageConfirm(preflight.weakCoverage.claims.length));
+        if (!proceed) {
+          setPushResults(toastText.weakCoverageCancelled);
+          pushToast('info', toastText.pushErrorTitle, toastText.weakCoverageCancelled);
+          return;
+        }
+        weakAck = true;
+        setWeakCoverageAck(true);
+      }
       if (preflight.duplicateLookupSkipped) {
         setPushResults(preflight.duplicateLookupSkipped.reason);
         pushToast('info', toastText.duplicateLookupSkippedTitle, preflight.duplicateLookupSkipped.reason);
-        await submitPush(testCases);
+        await submitPush(testCases, weakAck);
         return;
       }
       if (preflight.duplicatesFound) {
@@ -457,7 +476,7 @@ export default function App() {
         pushToast('info', toastText.duplicateReviewTitle, toastText.duplicateReviewMessage(preflight.summary.existingCount, preflight.summary.jiraKey));
         return;
       }
-      await submitPush(testCases);
+      await submitPush(testCases, weakAck);
     } catch (pushError) {
       const message = (pushError as Error).message;
       setPushResults(message);

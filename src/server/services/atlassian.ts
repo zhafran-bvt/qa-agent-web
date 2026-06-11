@@ -492,6 +492,24 @@ export class AtlassianClient {
     throw lastError || new Error('Unable to resolve a Confluence resource for the requested page.');
   }
 
+  async getConfluencePageChildren(pageId: string, limit = 25): Promise<Array<{ id: string; title?: string }>> {
+    // Immediate children only (depth 1). Used to pull nested spec detail that lives in sub-pages into
+    // context (BUG-06). Bounded by `limit`; failures degrade to no children rather than throwing.
+    try {
+      const result = await this.requestWithRefresh(() =>
+        requestJson<Record<string, any>>(this.confluenceUrl(`/pages/${pageId}/children?limit=${Math.max(1, Math.min(limit, 100))}`), {
+          headers: this.headers(),
+        })
+      );
+      return (result.results || [])
+        .map((child: Record<string, any>) => ({ id: String(child.id), title: child.title }))
+        .filter((child: { id: string }) => child.id);
+    } catch (error) {
+      this.logger?.warn('atlassian.confluence.children_failed', { pageId, errorMessage: (error as Error).message });
+      return [];
+    }
+  }
+
   async getConfluenceComments(pageId: string): Promise<Array<{ id: string; body: string }>> {
     try {
       const comments = await this.requestWithRefresh(() =>
