@@ -40,57 +40,77 @@ type EvidenceTarget =
 function EvidenceUpload({ target, onUploaded, t }: { target: EvidenceTarget; onUploaded: () => void; t: typeof uiText.en.dashboard }) {
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState('');
-  const [done, setDone] = useState(false);
+  const [doneCount, setDoneCount] = useState(0);
   const isPass = target.kind === 'pass';
 
-  async function handleFile(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    event.target.value = ''; // let the same file be re-selected after an error
-    if (!file) return;
+  async function handleFiles(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = ''; // let the same files be re-selected after an error
+    if (!files.length) return;
     setError('');
-    setDone(false);
-    const contentType = resolveEvidenceType(file);
-    if (!contentType) {
-      setError(t.evidenceUploadBadType);
-      return;
-    }
-    if (file.size > EVIDENCE_MAX_MB * 1024 * 1024) {
-      setError(t.evidenceUploadTooLarge(EVIDENCE_MAX_MB));
-      return;
+    setDoneCount(0);
+    // Validate every file up front so we never half-upload a batch and then fail.
+    const prepared: Array<{ file: File; contentType: string }> = [];
+    for (const file of files) {
+      const contentType = resolveEvidenceType(file);
+      if (!contentType) {
+        setError(`${file.name}: ${t.evidenceUploadBadType}`);
+        return;
+      }
+      if (file.size > EVIDENCE_MAX_MB * 1024 * 1024) {
+        setError(`${file.name}: ${t.evidenceUploadTooLarge(EVIDENCE_MAX_MB)}`);
+        return;
+      }
+      prepared.push({ file, contentType });
     }
     // Pass-with-evidence mutates TestRail (marks the test Passed), so confirm before doing it.
     if (isPass && !window.confirm(t.evidencePassConfirm)) return;
     setUploading(true);
+    let uploaded = 0;
     try {
       if (isPass) {
-        await passWithEvidence(target.runId, target.caseId, file, contentType);
+        // First file records the Passed result; the rest attach to that same result so a multi-file
+        // upload produces ONE result with N attachments (not N results).
+        const [first, ...rest] = prepared;
+        const { resultId } = await passWithEvidence(target.runId, target.caseId, first.file, first.contentType);
+        uploaded += 1;
+        for (const item of rest) {
+          await uploadResultEvidence(resultId, item.file, item.contentType);
+          uploaded += 1;
+        }
       } else {
-        await uploadResultEvidence(target.id, file, contentType);
+        for (const item of prepared) {
+          await uploadResultEvidence(target.id, item.file, item.contentType);
+          uploaded += 1;
+        }
       }
       // Confirm success explicitly, THEN refresh after a beat. Without the explicit ✓ the only signal was
-      // the badge flip — easy to miss (TestRail indexing lag), which led reviewers to re-upload and create
-      // duplicate attachments. The delay lets the ✓ register before the re-render.
-      setDone(true);
+      // the badge flip — easy to miss (TestRail indexing lag), which led reviewers to re-upload.
+      setDoneCount(uploaded);
       window.setTimeout(onUploaded, 1200);
     } catch (err) {
-      setError((err as Error).message || t.evidenceUploadFailed);
+      // Report partial progress so the reviewer knows how many of the batch landed before the failure.
+      const base = (err as Error).message || t.evidenceUploadFailed;
+      setError(uploaded > 0 ? `${base} (${uploaded}/${prepared.length} uploaded)` : base);
+      if (uploaded > 0) window.setTimeout(onUploaded, 1200);
     } finally {
       setUploading(false);
     }
   }
 
+  const doneLabel = (isPass ? t.evidencePassDone : t.evidenceUploadDone) + (doneCount > 1 ? ` (${doneCount})` : '');
   return (
     <div className="tr-evidence-upload">
       <label
         className={`button button-secondary button-small ${uploading ? 'is-disabled' : ''}`}
-        title={isPass ? t.evidencePassHint : undefined}
+        title={isPass ? t.evidencePassHint : t.evidenceUploadMultiHint}
       >
         {uploading ? t.evidenceUploading : isPass ? t.evidencePass : t.evidenceUpload}
-        <input type="file" accept={EVIDENCE_ACCEPT} hidden disabled={uploading} onChange={handleFile} />
+        <input type="file" accept={EVIDENCE_ACCEPT} multiple hidden disabled={uploading} onChange={handleFiles} />
       </label>
-      {done ? (
+      {doneCount > 0 ? (
         <span className="tr-evidence-upload-done" role="status">
-          {isPass ? t.evidencePassDone : t.evidenceUploadDone}
+          {doneLabel}
         </span>
       ) : null}
       {error ? (
