@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import http from 'node:http';
-import { UpstreamTimeoutError, describeNetworkError, requestText } from '../../src/server/services/http';
+import { UpstreamTimeoutError, describeNetworkError, requestText, withTimeout } from '../../src/server/services/http';
 
 test('describeNetworkError maps ETIMEDOUT to a readable, upstream-named message', () => {
   const err = Object.assign(new Error('read ETIMEDOUT'), { code: 'ETIMEDOUT' });
@@ -45,4 +45,31 @@ test('a never-responding upstream rejects with UpstreamTimeoutError instead of h
   } finally {
     server.close();
   }
+});
+
+test('withTimeout resolves with the value when the work finishes in time', async () => {
+  const value = await withTimeout(Promise.resolve(42), 1000, 'fast work');
+  assert.equal(value, 42);
+});
+
+test('withTimeout rejects with UpstreamTimeoutError when the work stalls past the budget', async () => {
+  // Bounds a multi-step operation (paginated fetch / dashboard fan-out) that can be starved under the
+  // shared rate limiter — without this, a stalled op hangs the whole request.
+  const neverSettles = new Promise<number>(() => {});
+  await assert.rejects(withTimeout(neverSettles, 50, 'stalled bulk fetch'), (error: unknown) => {
+    assert.ok(error instanceof UpstreamTimeoutError, 'expected UpstreamTimeoutError');
+    assert.match((error as Error).message, /stalled bulk fetch request timed out after 50ms/);
+    return true;
+  });
+});
+
+test('withTimeout propagates the underlying rejection (not a timeout) when the work fails fast', async () => {
+  await assert.rejects(
+    withTimeout(Promise.reject(new Error('upstream 500')), 1000, 'failing work'),
+    (error: unknown) => {
+      assert.ok(!(error instanceof UpstreamTimeoutError), 'should surface the real error, not a timeout');
+      assert.match((error as Error).message, /upstream 500/);
+      return true;
+    }
+  );
 });

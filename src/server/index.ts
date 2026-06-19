@@ -22,6 +22,7 @@ import { addAttachmentToResult, addResultForCase, buildManageCaseBody, fetchAtta
 import { assessEncryptionKeyStrength, decryptSecret, encryptionAvailable, encryptSecret } from './services/crypto';
 import { buildApiContract, assessApiContractRelevance } from './services/api-docs';
 import { clearDashboardCaches, findPlansForStory, getCoverageForKeys, getPlanReview, getPlanRunCounts, getSummary, invalidateEvidenceCaches, listPlans } from './services/testrail-dashboard';
+import { withTimeout } from './services/http';
 import { buildCoverage, trulyUncoveredCriteria, validateCases } from './services/validation';
 import { hydrateTestCasesWithEvidence } from './services/evidence';
 import { getRecentIssues, logger } from './services/logger';
@@ -52,6 +53,10 @@ const CLIENT_DIST_DIR = path.join(PROJECT_ROOT, 'client-dist');
 const AUDIT_FILE = path.join(PROJECT_ROOT, 'audit-log.jsonl');
 const MIGRATIONS_DIR = path.join(PROJECT_ROOT, 'src/server/migrations');
 const OAUTH_VERIFIER_COOKIE = 'qa_oauth';
+// Hard ceiling for the heavy TestRail dashboard reads (coverage / summary / plan review). Their fan-out
+// can stall under the shared rate limiter; bound the whole route so it fails fast instead of hanging the
+// request (which, in dev, also holds the process and blocks the watcher from restarting).
+const DASHBOARD_ROUTE_BUDGET_MS = Number(process.env.DASHBOARD_ROUTE_BUDGET_MS || 60_000);
 
 loadEnv(path.join(PROJECT_ROOT, '.env'));
 
@@ -881,9 +886,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     }
     try {
       const trConfig = await resolveTestrailConfig(sessionEnvelope.session);
-      sendJson(res, 200, await getPlanReview(trConfig, planId));
+      const review = await withTimeout(getPlanReview(trConfig, planId), DASHBOARD_ROUTE_BUDGET_MS, 'TestRail plan review');
+      sendJson(res, 200, review);
     } catch (error) {
-      sendError(res, 502, (error as Error).message || 'Failed to load plan review.');
+      const timedOut = (error as { name?: string }).name === 'UpstreamTimeoutError';
+      sendError(res, timedOut ? 504 : 502, (error as Error).message || 'Failed to load plan review.');
     }
     return;
   }
@@ -1034,9 +1041,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       return;
     }
     try {
-      sendJson(res, 200, { coverage: await getCoverageForKeys(config.testrail, keys) });
+      const coverage = await withTimeout(getCoverageForKeys(config.testrail, keys), DASHBOARD_ROUTE_BUDGET_MS, 'TestRail coverage');
+      sendJson(res, 200, { coverage });
     } catch (error) {
-      sendError(res, 502, (error as Error).message || 'Failed to compute coverage.');
+      const timedOut = (error as { name?: string }).name === 'UpstreamTimeoutError';
+      sendError(res, timedOut ? 504 : 502, (error as Error).message || 'Failed to compute coverage.');
     }
     return;
   }
@@ -1070,9 +1079,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     }
     try {
       const projectId = url.searchParams.get('project_id') || config.testrail.projectId || '';
-      sendJson(res, 200, await getSummary(config.testrail, projectId));
+      const summary = await withTimeout(getSummary(config.testrail, projectId), DASHBOARD_ROUTE_BUDGET_MS, 'TestRail summary');
+      sendJson(res, 200, summary);
     } catch (error) {
-      sendError(res, 502, (error as Error).message || 'Failed to load TestRail summary.');
+      const timedOut = (error as { name?: string }).name === 'UpstreamTimeoutError';
+      sendError(res, timedOut ? 504 : 502, (error as Error).message || 'Failed to load TestRail summary.');
     }
     return;
   }
