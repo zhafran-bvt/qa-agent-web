@@ -134,6 +134,14 @@ function coverageSummaryText(
     ...(coverage.unsubstantiatedClaims?.length
       ? [t.weakCoverage(coverage.unsubstantiatedClaims.map((claim) => `${claim.caseId}→${claim.criterionId}`).join(', '))]
       : []),
+    ...(coverage.singlePolarityCriteria?.length
+      ? [t.singlePolarityCoverage(coverage.singlePolarityCriteria.map((item) => `${item.criterionId} (missing ${item.missing.join('/')})`).join(', '))]
+      : []),
+    ...(context?.acceptanceCriteriaDiagnostics?.crossSourceConflicts?.length
+      ? context.acceptanceCriteriaDiagnostics.crossSourceConflicts.map((conflict) =>
+          t.crossSourceConflict(conflict.criterionId, conflict.conflictingSource.toUpperCase(), conflict.conflictingExcerpt)
+        )
+      : []),
   ];
 }
 

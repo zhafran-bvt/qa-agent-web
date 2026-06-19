@@ -336,6 +336,89 @@ test('builds coverage that flags unsubstantiated claims without dropping them si
   assert.ok(coverage.uncoveredCriteria.includes('AC-2'));
 });
 
+test('F2: flags a conditional AC covered by only one polarity (negative without positive)', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        id: 'TC-1',
+        coversAcceptanceCriteria: ['AC-1'],
+        caseIntent: 'negative',
+        title: 'Generate Results button stays disabled when radius is 0',
+        bddScenario: 'Given radius is 0 When the form is checked Then the Generate Results button is disabled',
+      },
+    ],
+    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' }]
+  );
+  // Covered (green) but only the disabled branch is tested — the enabled-with-valid-radius branch is absent.
+  assert.equal(coverage.coveredCriteria, 1);
+  assert.equal(coverage.singlePolarityCriteria.length, 1);
+  assert.equal(coverage.singlePolarityCriteria[0].criterionId, 'AC-1');
+  assert.deepEqual(coverage.singlePolarityCriteria[0].have, ['negative']);
+  assert.ok(coverage.singlePolarityCriteria[0].missing.includes('positive'));
+});
+
+test('F2: does not flag a conditional AC tested in both polarities', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        id: 'TC-1',
+        coversAcceptanceCriteria: ['AC-1'],
+        caseIntent: 'negative',
+        title: 'Generate Results disabled when radius is 0',
+        bddScenario: 'Given radius is 0 Then the Generate Results button is disabled',
+      },
+      {
+        id: 'TC-2',
+        coversAcceptanceCriteria: ['AC-1'],
+        caseIntent: 'positive',
+        title: 'Generate Results enabled when radius is valid',
+        bddScenario: 'Given a valid radius Then the Generate Results button is enabled',
+      },
+    ],
+    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' }]
+  );
+  assert.equal(coverage.singlePolarityCriteria.length, 0);
+});
+
+test('F2: never flags a non-conditional AC even when tested in one polarity', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        id: 'TC-1',
+        coversAcceptanceCriteria: ['AC-1'],
+        caseIntent: 'positive',
+        title: 'Coverage Type section shows the radius placeholder text',
+        bddScenario: 'Given the config panel Then the radius placeholder text reads Enter radius',
+      },
+    ],
+    [{ id: 'AC-1', text: 'The radius placeholder text reads Enter radius value' }]
+  );
+  assert.equal(coverage.singlePolarityCriteria.length, 0);
+});
+
+test('F2: an uncovered conditional AC is a gap, not a single-polarity warning', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        id: 'TC-1',
+        coversAcceptanceCriteria: ['AC-1'],
+        caseIntent: 'negative',
+        title: 'Generate Results disabled when radius is 0',
+        bddScenario: 'Given radius is 0 Then the Generate Results button is disabled',
+      },
+    ],
+    [
+      { id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' },
+      { id: 'AC-2', text: 'Save Project button is disabled when the address field is empty' },
+    ]
+  );
+  // AC-2 is conditional but nothing covers it → it's a true uncovered gap, not single-polarity.
+  assert.ok(coverage.uncoveredCriteria.includes('AC-2'));
+  assert.ok(!coverage.singlePolarityCriteria.some((item) => item.criterionId === 'AC-2'));
+  // AC-1 is covered by only a negative case → single-polarity.
+  assert.ok(coverage.singlePolarityCriteria.some((item) => item.criterionId === 'AC-1'));
+});
+
 test('validates manual DB verification cases in API scope', () => {
   const result = validateCase(
     {

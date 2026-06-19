@@ -207,6 +207,19 @@ export interface ScopeAuthority {
   pageId?: string;
 }
 
+// A deterministic opposite-polarity contradiction between a synthesized criterion and a source line
+// (F1). Surfaced for human adjudication — never auto-resolved, because a Jira AC may intentionally
+// supersede a stale PRD line.
+export interface CrossSourceConflict {
+  criterionId: string;
+  criterionText: string;
+  axis: string;
+  criterionSign: 'positive' | 'negative';
+  conflictingSource: 'jira' | 'prd' | 'spec';
+  conflictingExcerpt: string;
+  sharedSubjects: string[];
+}
+
 export interface AcceptanceCriteriaDiagnostics {
   allIssueUserStories: ScopedItem[];
   allIssueCriteria: ScopedItem[];
@@ -229,6 +242,8 @@ export interface AcceptanceCriteriaDiagnostics {
   rawAcceptanceCriteriaWeakSignals?: string[];
   discardedFragmentCount?: number;
   discardedFragmentExamples?: string[];
+  // Opposite-polarity contradictions between the synthesized criteria and their source corpora (F1).
+  crossSourceConflicts?: CrossSourceConflict[];
 }
 
 export interface QaContext {
@@ -360,6 +375,15 @@ export interface CoverageSummary {
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC. Surfaced as a
   // non-blocking warning so reviewers can see weak/inflated coverage that still "counts" as mapped.
   unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }>;
+  // Conditional ACs (when/if/disabled/enabled/…) that ARE covered, but only by cases of a single
+  // polarity — e.g. the "disabled when invalid" branch is tested while the "enabled when valid" branch
+  // is not. A green coverage number can hide this. Soft, overrideable signal (acknowledge-to-override),
+  // not a hard block, because some ACs are genuinely one-directional.
+  singlePolarityCriteria: Array<{
+    criterionId: string;
+    have: Array<'positive' | 'negative' | 'edge'>;
+    missing: Array<'positive' | 'negative'>;
+  }>;
 }
 
 export interface GenerateRequest {
@@ -408,6 +432,12 @@ export interface PushRequest extends ValidateRequest {
   // Acknowledge-to-override: weak (claimed-but-unsubstantiated) coverage does not hard-block the push,
   // but the push only proceeds when the reviewer has explicitly acknowledged it.
   weakCoverageAcknowledged?: boolean;
+  // Same acknowledge-to-override, for conditional ACs covered in only one polarity (see CoverageSummary).
+  singlePolarityAcknowledged?: boolean;
+  // Cross-source conflicts (F1) are computed at analyze time and carried on the context; the client
+  // echoes them here (with the ack) so the push gate can enforce acknowledgement, mirroring matchedEndpoints.
+  crossSourceConflicts?: CrossSourceConflict[];
+  crossSourceConflictsAcknowledged?: boolean;
 }
 
 export type DuplicateCaseDecision = 'include' | 'exclude' | 'review';
@@ -454,6 +484,14 @@ export interface PushPreflightResponse {
   // an explicit acknowledgement before pushing (the push endpoint enforces the same gate).
   weakCoverage?: {
     claims: Array<{ caseId: string; criterionId: string }>;
+  };
+  // Present when conditional ACs are covered by only one polarity of case; acknowledge-to-override like weakCoverage.
+  singlePolarity?: {
+    criteria: Array<{
+      criterionId: string;
+      have: Array<'positive' | 'negative' | 'edge'>;
+      missing: Array<'positive' | 'negative'>;
+    }>;
   };
 }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { finalizeAcceptanceCriteria } from '../../src/server/services/acceptance-criteria';
+import { detectCrossSourceConflicts, finalizeAcceptanceCriteria } from '../../src/server/services/acceptance-criteria';
 import type { QaContext } from '../../src/shared/contracts';
 
 function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
@@ -730,4 +730,52 @@ test('below-gate excerpt candidates are still shown as weak evidence', async () 
   assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'weak');
   assert.match(finalized.acceptanceCriteria[0].sourceExcerpt || '', /Save Config/i);
   assert.equal(finalized.acceptanceCriteria[0].sourceExcerpts?.[0].confidence, 'weak');
+});
+
+test('F1: flags an opposite-polarity contradiction between a criterion and a source line', () => {
+  // Mirrors ORB-3205: AC says the button is NOT disabled at radius 0 (permission +), PRD says zero is
+  // rejected (permission −). Negation flips "disabled" to positive; shared subject "radius".
+  const conflicts = detectCrossSourceConflicts(
+    [{ id: 'AC-7', text: 'Save Project button is not disabled when radius is 0', source: 'jira' }],
+    [{ source: 'prd', text: 'Zero or negative radius values are rejected by the form.' }],
+    undefined,
+    'ORB-3205'
+  );
+  assert.equal(conflicts.length, 1);
+  assert.equal(conflicts[0].criterionId, 'AC-7');
+  assert.equal(conflicts[0].axis, 'permission');
+  assert.equal(conflicts[0].criterionSign, 'positive');
+  assert.equal(conflicts[0].conflictingSource, 'prd');
+  assert.ok(conflicts[0].sharedSubjects.includes('radius'));
+});
+
+test('F1: does not flag a same-polarity restatement', () => {
+  const conflicts = detectCrossSourceConflicts(
+    [{ id: 'AC-4', text: 'Generate Results button is disabled when radius is 0', source: 'jira' }],
+    [{ source: 'prd', text: 'Zero radius values are rejected.' }],
+    undefined,
+    'ORB-3205'
+  );
+  assert.equal(conflicts.length, 0);
+});
+
+test('F1: does not flag opposite polarity when no subject is shared', () => {
+  const conflicts = detectCrossSourceConflicts(
+    [{ id: 'AC-1', text: 'Export button is disabled when the dataset is empty', source: 'jira' }],
+    [{ source: 'prd', text: 'The radius slider is enabled for premium accounts.' }],
+    undefined,
+    'ORB-3205'
+  );
+  assert.equal(conflicts.length, 0);
+});
+
+test('F1: does not flag a contradiction across different polarity axes', () => {
+  // visibility (hidden) vs permission (enabled) — same subject but different axes, not a real contradiction.
+  const conflicts = detectCrossSourceConflicts(
+    [{ id: 'AC-1', text: 'The coverage type section is hidden when the flag is off', source: 'jira' }],
+    [{ source: 'prd', text: 'The coverage type section is enabled for all accounts.' }],
+    undefined,
+    'ORB-3205'
+  );
+  assert.equal(conflicts.length, 0);
 });

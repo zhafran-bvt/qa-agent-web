@@ -16,6 +16,7 @@ interface GeneratedLikeCase {
   title?: string;
   type?: string;
   executionType?: 'postman' | 'manual_db' | 'manual_other';
+  caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference?: string;
   refs?: string;
   preconditions?: string;
@@ -307,6 +308,13 @@ export function trulyUncoveredCriteria(coverage: {
   return (coverage.uncoveredCriteria || []).filter((id) => !weakClaimed.has(id));
 }
 
+// A conditional AC describes behavior that flips on a condition — a control enables/disables, a value is
+// accepted/rejected. Such an AC needs BOTH branches exercised: the condition-holds case (typically a
+// negative: the blocked/disabled/rejected path) and the condition-fails case (typically a positive: the
+// happy/enabled/accepted path). Detected lexically. Bare "0"/"zero" is included because radius=0 style
+// boundary guards are common and are exactly where the missing happy-path branch tends to hide.
+const CONDITIONAL_AC_RE = /\b(?:when|if|unless|only|disabled|enabled|missing|empty|invalid|blank|rejected|allowed|zero|0)\b/i;
+
 export function buildCoverage(
   testCases: GeneratedLikeCase[],
   acceptanceCriteria: Array<{ id: string; text: string; source?: string }>,
@@ -327,6 +335,10 @@ export function buildCoverage(
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC — surfaced so coverage
   // isn't silently inflated (e.g. an email-routing AC "covered" by dataset tests that never assert email).
   const unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }> = [];
+  // Polarity (positive/negative/edge) of the cases that actually substantiate each AC — used below to
+  // detect conditional ACs tested in only one direction. Keyed by criterion id, separate from `entries`
+  // so the serialized byCriterion shape (CoverageCriterion) is unchanged.
+  const intentsByCriterion = new Map<string, Set<'positive' | 'negative' | 'edge'>>();
 
   for (let index = 0; index < caseList.length; index += 1) {
     const testCase = caseList[index];
@@ -337,6 +349,7 @@ export function buildCoverage(
       continue;
     }
     const evidenceText = caseEvidenceText(testCase);
+    const intent = testCase.caseIntent;
     for (const criterionId of mappedCriteria) {
       const entry = entryById.get(criterionId);
       if (!entry) continue;
@@ -345,7 +358,29 @@ export function buildCoverage(
         continue;
       }
       entry.coveredBy.push(caseId);
+      if (intent === 'positive' || intent === 'negative' || intent === 'edge') {
+        let set = intentsByCriterion.get(criterionId);
+        if (!set) {
+          set = new Set();
+          intentsByCriterion.set(criterionId, set);
+        }
+        set.add(intent);
+      }
     }
+  }
+
+  // A conditional AC that is covered but tested in only one polarity (missing positive or negative) is a
+  // hidden gap behind a green number. Uncovered ACs are handled by uncoveredCriteria above, not here.
+  const singlePolarityCriteria: Array<{
+    criterionId: string;
+    have: Array<'positive' | 'negative' | 'edge'>;
+    missing: Array<'positive' | 'negative'>;
+  }> = [];
+  for (const entry of entries) {
+    if (!entry.coveredBy.length || !CONDITIONAL_AC_RE.test(entry.text || '')) continue;
+    const have = Array.from(intentsByCriterion.get(entry.id) || []);
+    const missing = (['positive', 'negative'] as const).filter((polarity) => !have.includes(polarity));
+    if (missing.length) singlePolarityCriteria.push({ criterionId: entry.id, have, missing });
   }
 
   const uncovered = entries.filter((entry) => entry.coveredBy.length === 0);
@@ -357,5 +392,6 @@ export function buildCoverage(
     byCriterion: entries,
     unmappedCases,
     unsubstantiatedClaims,
+    singlePolarityCriteria,
   };
 }
