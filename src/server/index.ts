@@ -1116,6 +1116,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const finalizedContext = await finalizeAcceptanceCriteria(context, {
       synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
       logger: log,
+      // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
+      llm: config.llm,
     });
     if (finalizedContext.constraints.scopeType === 'api') {
       // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
