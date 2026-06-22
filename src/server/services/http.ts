@@ -37,6 +37,25 @@ export function describeNetworkError(error: unknown, upstream: string): Error {
   return decorated;
 }
 
+/** Reject a promise if it doesn't settle within `ms`. Bounds wall-clock for multi-step upstream work
+ *  (paginated fetches, fan-outs) so a stalled or starved operation fails fast instead of hanging the
+ *  request — and, in dev, holding the process so the watcher can't restart. */
+export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new UpstreamTimeoutError(label, ms)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function requestHttpsJson<T>({
   url,
   method = 'GET',
