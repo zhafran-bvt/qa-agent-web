@@ -149,6 +149,12 @@ export const uiText = {
       weakCoverageConfirm: (count: number) =>
         `${count} acceptance criterion claim(s) are not substantiated by the case steps/assertions. Push anyway and accept the weak coverage?`,
       weakCoverageCancelled: 'Push cancelled — weak coverage not acknowledged.',
+      singlePolarityConfirm: (count: number) =>
+        `${count} conditional acceptance criterion(s) are tested in only one direction (e.g. the disabled state but not the enabled state). Push anyway and accept the single-polarity coverage?`,
+      singlePolarityCancelled: 'Push cancelled — single-polarity coverage not acknowledged.',
+      crossSourceConflictConfirm: (count: number) =>
+        `${count} acceptance criterion(s) appear to contradict the source documents (Jira/PRD/spec). Push anyway and accept the cross-source conflicts?`,
+      crossSourceConflictCancelled: 'Push cancelled — cross-source conflicts not acknowledged.',
       duplicateReviewTitle: 'Duplicate review needed',
       duplicateReviewMessage: (count: number, ticketKey: string) => `${ticketKey} already has ${count} TestRail case(s). Review before pushing.`,
       duplicateReviewEmptySelection: 'Select at least one generated case to push.',
@@ -318,6 +324,10 @@ export const uiText = {
       notEnforced: 'not enforced',
       unmappedCases: (ids: string) => `Unmapped Cases: ${ids}`,
       weakCoverage: (pairs: string) => `Weak coverage (claimed but not substantiated by steps/assertions): ${pairs}`,
+      singlePolarityCoverage: (items: string) =>
+        `Single-polarity coverage (conditional AC tested in one direction only): ${items}`,
+      crossSourceConflict: (criterionId: string, source: string, excerpt: string) =>
+        `⚠ ${criterionId} may contradict ${source}: "${excerpt}" — confirm with dev which is correct.`,
       valid: 'Valid',
       needsFixesShort: 'Needs fixes',
       titleLabel: 'Title',
@@ -822,6 +832,12 @@ export const uiText = {
       weakCoverageConfirm: (count: number) =>
         `${count} klaim acceptance criteria nggak didukung step/assertion case-nya. Tetap push dan terima coverage lemah ini?`,
       weakCoverageCancelled: 'Push dibatalkan — coverage lemah belum di-acknowledge.',
+      singlePolarityConfirm: (count: number) =>
+        `${count} conditional acceptance criteria cuma dites satu arah (misal kondisi disabled tapi enabled-nya nggak). Tetap push dan terima coverage satu arah ini?`,
+      singlePolarityCancelled: 'Push dibatalkan — coverage satu arah belum di-acknowledge.',
+      crossSourceConflictConfirm: (count: number) =>
+        `${count} acceptance criteria kelihatannya bertentangan sama dokumen sumber (Jira/PRD/spec). Tetap push dan terima konflik antar-sumber ini?`,
+      crossSourceConflictCancelled: 'Push dibatalkan — konflik antar-sumber belum di-acknowledge.',
       duplicateReviewTitle: 'Perlu cek duplikat',
       duplicateReviewMessage: (count: number, ticketKey: string) => `${ticketKey} sudah punya ${count} case di TestRail. Review dulu sebelum push.`,
       duplicateReviewEmptySelection: 'Pilih minimal satu generated case untuk di-push.',
@@ -991,6 +1007,10 @@ export const uiText = {
       notEnforced: 'nggak diwajibkan',
       unmappedCases: (ids: string) => `Case tanpa mapping: ${ids}`,
       weakCoverage: (pairs: string) => `Coverage lemah (di-claim tapi nggak didukung step/assertion): ${pairs}`,
+      singlePolarityCoverage: (items: string) =>
+        `Coverage satu arah (conditional AC cuma dites satu arah): ${items}`,
+      crossSourceConflict: (criterionId: string, source: string, excerpt: string) =>
+        `⚠ ${criterionId} mungkin bertentangan sama ${source}: "${excerpt}" — konfirmasi ke dev mana yang bener.`,
       valid: 'Valid',
       needsFixesShort: 'Perlu fix',
       titleLabel: 'Title',
