@@ -779,3 +779,88 @@ test('F1: does not flag a contradiction across different polarity axes', () => {
   );
   assert.equal(conflicts.length, 0);
 });
+
+// F3 semantic evidence gate: a paraphrased criterion whose best PRD match clears the score gate on token
+// overlap but is not a verbatim containment match → 'closest' tier, which is exactly what the gate re-checks.
+function buildClosestExcerptContext(): QaContext {
+  return buildBaseContext({
+    ticketKey: 'ORB-3157',
+    mainIssue: {
+      key: 'ORB-3157',
+      summary: '[FE] Integrate API - AI Summary - executive summary for results with no scoring',
+      description: '',
+    },
+    acceptanceCriteriaSource: 'parent_story_confluence_section',
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'AI Summary NO SCORE',
+      body:
+        'AI Summary NO SCORE\nAcceptance Criteria\n1. The AI Summary tab is available in the Analysis Summary window and displays an executive summary for results with no score.\n2. The no-score AI Summary includes landmark context and environment risk indication.',
+      reason: 'Main Jira scope was insufficient, so the matched PRD subsection was used.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-1248',
+      pageId: '950075398',
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'The AI Summary tab is available for analysis results with no score.' }],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+      thinTicketFallbackUsed: true,
+      prdSubsectionMatchQuality: 'confident',
+    },
+  });
+}
+
+test('F3: the relevance gate keeps a closest excerpt the check accepts (and only that closest excerpt is checked)', async () => {
+  const checked: string[] = [];
+  const finalized = await finalizeAcceptanceCriteria(buildClosestExcerptContext(), {
+    excerptRelevanceCheck: async (input) => {
+      checked.push(input.excerpt);
+      return true;
+    },
+  });
+  // The closest excerpt was the only thing the gate looked at, and it was kept unchanged.
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'closest');
+  assert.match(finalized.acceptanceCriteria[0].sourceExcerpt || '', /Analysis Summary window/i);
+  assert.equal(checked.length, 1);
+});
+
+test('F3: the relevance gate drops a closest excerpt the check rejects (same-topic, different behavior)', async () => {
+  const finalized = await finalizeAcceptanceCriteria(buildClosestExcerptContext(), {
+    excerptRelevanceCheck: async () => false,
+  });
+  // Rejected → no near-miss shown rather than a misleading "closest" excerpt.
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerpt, undefined);
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerpts, undefined);
+});
+
+test('F3: the relevance gate never touches weak-tier excerpts', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3079',
+    mainIssue: { key: 'ORB-3079', summary: '[FE] Run Analysis with BVT Polygon Catchment Datasets', description: 'Save Config' },
+    acceptanceCriteriaSource: 'main_jira',
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'Main Jira description',
+      body: 'Save Config',
+      reason: 'Main Jira provided the clearest technical scope.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-3079',
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-5',
+        text: 'Save Config payload mapping must convert selected polygon dataset features into catchment.locations entries with preserved geometry, matching sequence numbers, and Location layer polygon naming across the saved dataset set.',
+      },
+    ],
+    acceptanceCriteriaDiagnostics: { allIssueUserStories: [], allIssueCriteria: [], confluenceCriteria: [] },
+  });
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    excerptRelevanceCheck: async () => {
+      throw new Error('gate must not run on weak-tier excerpts');
+    },
+  });
+  // The weak fallback excerpt is a separate, lower tier — left untouched, so the check is never called.
+  assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'weak');
+});

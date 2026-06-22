@@ -176,6 +176,9 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   }
 
   if (title) {
+    // M1 (canonical): test-case titles use [FE]/[BE][{Epic}][Ticket ID] — the format the agent emits and
+    // every existing TestRail case follows. This deliberately supersedes the older [Web][{Epic}][Ticket ID]
+    // wording in the external workflow spec doc (which loses the FE/BE distinction); the doc is the stale side.
     const platformPattern =
       scopeType === 'api'
         ? /^\[BE\]\[[^\]]+\]\[[A-Z]+-\d+\]\s.+/
