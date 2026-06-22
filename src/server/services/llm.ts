@@ -1386,12 +1386,22 @@ async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input
   // A single cheap yes/no: does the candidate source line state the SAME requirement as the criterion?
   // Topic overlap is explicitly not enough — that is exactly what the deterministic token-overlap scorer
   // already rewards, and what lets a same-topic / different-behavior line through.
+  // Calibrated against real ORB-3205 evidence (see commit msg): a bare "same requirement?" yes/no was too
+  // lenient on the live model — it accepted same-topic/different-phase lines (the reported misattribution).
+  // Naming the discriminating axes (feature / phase / condition) and allowing paraphrase makes it reject
+  // "config section" vs "story-detail display" while keeping genuine reworded matches.
   const systemPrompt = [
-    'You verify QA traceability evidence. You are given one acceptance criterion and one candidate source line.',
-    'Decide whether the source line states the SAME requirement or behavior as the acceptance criterion — not merely the same topic, feature area, or shared nouns.',
-    'Same topic but a different behavior, a different surface or location (e.g. shown in a config UI vs. shown on a story detail page), a different actor, or the opposite condition is NOT the same requirement.',
-    'Answer yes only when the source line genuinely substantiates the criterion.',
-    'Return strict JSON only. No markdown and no explanation. Use exactly this shape: {"sameRequirement": true} or {"sameRequirement": false}.',
+    "You verify QA traceability evidence: does the candidate source line describe the SAME product requirement as the acceptance criterion, so it can serve as that criterion's evidence?",
+    'Answer true when the source line specifies the same behavior the criterion requires — even if it uses different wording, names the same control or surface differently, or gives more detail. A paraphrase or a more-specific spec of the same behavior is still the same requirement.',
+    'Answer false when, despite shared words, topic, or feature area, they differ on ANY of these axes:',
+    '- FEATURE: they are about different settings, controls, or capabilities.',
+    '- PHASE: one configures / selects / inputs something during setup, while the other displays / reports / stores it after the action runs (or one is a UI behavior and the other an API or stored-data field).',
+    '- CONDITION: opposite polarity — enabled vs. disabled, included vs. excluded, allowed vs. rejected.',
+    'Examples:',
+    '- Criterion: "Save is disabled until the required field has a value." Source: "The submit CTA stays disabled until the user enters the mandatory value." => true (same behavior, different wording).',
+    '- Criterion: "Add a section to choose the analysis mode during setup." Source: "Show the chosen analysis mode on the result detail page." => false (configure-at-setup vs. display-after-run: different phase).',
+    '- Criterion: "Add a toggle for setting A." Source: "Add a toggle for setting B." => false (different feature).',
+    'Think briefly in "reason", then decide. Return strict JSON only, no markdown: {"reason":"<one short sentence>","sameRequirement":true} or {"reason":"...","sameRequirement":false}.',
   ].join('\n');
 
   const response = await requestJson<any>(
