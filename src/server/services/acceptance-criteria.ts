@@ -1,7 +1,10 @@
-import type { ConfluencePageSummary, QaContext, ScopedItem } from '../../shared/contracts';
+import type { ConfluencePageSummary, CrossSourceConflict, QaContext, ScopedItem } from '../../shared/contracts';
 import type { Logger } from './logger';
 import { canonicalize } from './context-builder';
-import { SPEC_PAGE_TITLE_RE } from './keywords';
+import { NEGATION_CUES, POLARITY_AXES, SPEC_PAGE_TITLE_RE } from './keywords';
+import { isExcerptRelevant } from './llm';
+import type { ExcerptRelevanceInput, LlmConfig } from './llm';
+import { mapWithConcurrency } from './ttl-cache';
 
 export interface ParsedIssueSection {
   heading: string;
@@ -40,9 +43,18 @@ export interface AcceptanceCriteriaSynthesisResult {
   model?: string;
 }
 
+// F3 semantic evidence gate: yes/no relevance check for a single (criterion, excerpt) pair.
+export type ExcerptRelevanceCheck = (input: ExcerptRelevanceInput) => Promise<boolean>;
+
 export interface AcceptanceCriteriaFinalizationOptions {
   synthesizer?: (input: AcceptanceCriteriaSynthesisInput) => Promise<AcceptanceCriteriaSynthesisResult>;
   logger?: Logger;
+  // F3: config for the LLM excerpt-relevance gate. The gate runs only when EXCERPT_RELEVANCE_LLM is
+  // enabled (so per-excerpt token cost/latency is strictly opt-in); off → the deterministic token-overlap
+  // scorer remains the sole selector. `excerptRelevanceCheck` overrides `llm` and runs regardless of the
+  // env flag — it is the seam tests use to stub the yes/no without HTTP.
+  llm?: LlmConfig;
+  excerptRelevanceCheck?: ExcerptRelevanceCheck;
 }
 
 interface GranularityTarget {
@@ -507,8 +519,13 @@ function selectSourceExcerptMatches(
 
 type ExcerptSourceMeta = { location: string; url?: string; kind: 'jira' | 'prd' | 'spec' };
 
-function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger?: Logger): ScopedItem[] {
+async function attachSourceExcerpts(
+  criteria: ScopedItem[],
+  context: QaContext,
+  options: { logger?: Logger; llm?: LlmConfig; relevanceCheck?: ExcerptRelevanceCheck } = {}
+): Promise<ScopedItem[]> {
   // Attach small source excerpts for traceability without letting generic boilerplate become evidence.
+  const logger = options.logger;
   const authority = resolveAuthorityExcerptSource(context);
   if (!authority || !normalizeInlineText(authority.body)) {
     logger?.info('context.ac_excerpt_selection', {
@@ -659,7 +676,98 @@ function attachSourceExcerpts(criteria: ScopedItem[], context: QaContext, logger
     items: trace,
   });
 
-  return result;
+  // F3: the deterministic pass above ranks by token overlap, which rewards topic overlap and lets a
+  // same-topic / different-behavior line clear EXCERPT_SCORE_GATE as a "closest" excerpt. An explicit
+  // check (tests) wins outright; otherwise the LLM gate runs only when opted in via EXCERPT_RELEVANCE_LLM.
+  const relevanceCheck =
+    options.relevanceCheck ||
+    (options.llm && excerptRelevanceLlmEnabled()
+      ? (input: ExcerptRelevanceInput) => isExcerptRelevant(options.llm as LlmConfig, input, logger)
+      : undefined);
+  if (!relevanceCheck) return result;
+
+  return applyExcerptRelevanceGate(result, relevanceCheck, logger, context.ticketKey);
+}
+
+// F3: the LLM excerpt-relevance gate is opt-in — it adds a per-excerpt model call to every generation,
+// so it only runs when EXCERPT_RELEVANCE_LLM is explicitly enabled. Off → the deterministic token-overlap
+// scorer is the sole selector and behavior is unchanged.
+function excerptRelevanceLlmEnabled(): boolean {
+  return /^(1|true|yes|on)$/i.test(String(process.env.EXCERPT_RELEVANCE_LLM || '').trim());
+}
+
+const EXCERPT_RELEVANCE_CONCURRENCY = Math.max(1, Number(process.env.EXCERPT_RELEVANCE_LLM_CONCURRENCY || 4));
+
+function withoutSourceExcerptFields(criterion: ScopedItem): ScopedItem {
+  const next: ScopedItem = { ...criterion };
+  delete next.sourceExcerpts;
+  delete next.sourceExcerpt;
+  delete next.sourceExcerptLocation;
+  delete next.sourceExcerptUrl;
+  delete next.sourceExcerptKind;
+  delete next.sourceExcerptConfidence;
+  return next;
+}
+
+/**
+ * F3 semantic evidence gate. Re-checks each "closest" excerpt — one that cleared EXCERPT_SCORE_GATE on
+ * token overlap but is NOT a verbatim containment match — through the relevance check, and drops the ones
+ * that share the criterion's topic without stating its requirement. Deliberately scoped to "closest":
+ * "verbatim" is already an exact textual match (nothing to second-guess) and the lower "weak" fallback
+ * tier is a separate concern left untouched. Calls are concurrency-limited; a criterion whose every
+ * excerpt fails the gate loses its excerpt entirely (no near-miss shown). Flag-free and additive — the
+ * gate can only remove a same-topic mismatch, never add or alter an excerpt.
+ */
+async function applyExcerptRelevanceGate(
+  result: ScopedItem[],
+  relevanceCheck: ExcerptRelevanceCheck,
+  logger: Logger | undefined,
+  ticketKey: string
+): Promise<ScopedItem[]> {
+  const pairs: Array<{ criterionIndex: number; excerptIndex: number }> = [];
+  result.forEach((criterion, criterionIndex) => {
+    (criterion.sourceExcerpts || []).forEach((excerpt, excerptIndex) => {
+      if (excerpt.confidence === 'closest') pairs.push({ criterionIndex, excerptIndex });
+    });
+  });
+  if (!pairs.length) return result;
+
+  const verdicts = await mapWithConcurrency(pairs, EXCERPT_RELEVANCE_CONCURRENCY, async (pair) => {
+    const criterion = result[pair.criterionIndex];
+    const excerpt = (criterion.sourceExcerpts || [])[pair.excerptIndex];
+    const relevant = await relevanceCheck({ criterion: criterion.text, excerpt: excerpt.text });
+    return { ...pair, relevant };
+  });
+
+  const dropped = new Set<string>();
+  for (const verdict of verdicts) {
+    if (!verdict.relevant) dropped.add(`${verdict.criterionIndex}:${verdict.excerptIndex}`);
+  }
+  logger?.info('context.ac_excerpt_relevance_gate', {
+    jiraKey: ticketKey,
+    checked: pairs.length,
+    dropped: dropped.size,
+  });
+  if (!dropped.size) return result;
+
+  return result.map((criterion, criterionIndex) => {
+    const excerpts = criterion.sourceExcerpts;
+    if (!excerpts || !excerpts.length) return criterion;
+    const kept = excerpts.filter((_, excerptIndex) => !dropped.has(`${criterionIndex}:${excerptIndex}`));
+    if (kept.length === excerpts.length) return criterion;
+    // Every excerpt failed the gate → show no evidence rather than a same-topic near-miss.
+    if (!kept.length) return withoutSourceExcerptFields(criterion);
+    const primary = kept[0];
+    return {
+      ...criterion,
+      sourceExcerpts: kept,
+      sourceExcerpt: primary.text,
+      sourceExcerptLocation: primary.location,
+      sourceExcerptUrl: primary.url,
+      sourceExcerptKind: primary.kind,
+      sourceExcerptConfidence: primary.confidence,
+    };
+  });
 }
 
 // BUG-03: a linked technical-spec page is fetched into context (buildQaContext pulls Confluence links
@@ -737,6 +845,114 @@ function dropOutOfScopeLoginCriteria(
     });
   }
   return kept.length ? kept : criteria; // never drop the entire set
+}
+
+// Ultra-common UI/spec nouns that would create spurious "shared subject" matches between unrelated
+// statements. The polarity terms themselves are excluded separately. Distinctive domain words
+// (radius, dataset, polygon, address, …) are deliberately NOT here — they are what makes a shared
+// subject meaningful.
+const CONFLICT_SUBJECT_STOPWORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with', 'via', 'only', 'not', 'be', 'is', 'are', 'was', 'were',
+  'that', 'this', 'these', 'those', 'when', 'then', 'if', 'given', 'should', 'must', 'shall', 'will', 'can', 'cannot', 'its',
+  'from', 'into', 'per', 'also', 'may', 'as', 'at', 'by', 'it', 'they', 'their', 'has', 'have', 'but',
+  'button', 'field', 'page', 'user', 'users', 'value', 'values', 'system', 'form', 'screen', 'section', 'input', 'option',
+  'options', 'state', 'feature', 'flag', 'data', 'default', 'text', 'label', 'click', 'clicks', 'select', 'selects',
+]);
+
+const POLARITY_TERM_AXIS = (() => {
+  const map = new Map<string, { axis: string; sign: 'positive' | 'negative' }>();
+  for (const { axis, positive, negative } of POLARITY_AXES) {
+    for (const term of positive) map.set(term, { axis, sign: 'positive' });
+    for (const term of negative) map.set(term, { axis, sign: 'negative' });
+  }
+  return map;
+})();
+
+/** First polarity term in a clause and its sign, flipping on a nearby (≤3 tokens back) negation cue. */
+function clausePolarity(text: string): { axis: string; sign: 'positive' | 'negative'; term: string } | null {
+  const tokens = String(text || '').toLowerCase().split(/[^a-z0-9']+/).filter(Boolean);
+  for (let i = 0; i < tokens.length; i += 1) {
+    const hit = POLARITY_TERM_AXIS.get(tokens[i]);
+    if (!hit) continue;
+    const negated = tokens.slice(Math.max(0, i - 3), i).some((token) => NEGATION_CUES.has(token));
+    const sign = negated ? (hit.sign === 'positive' ? 'negative' : 'positive') : hit.sign;
+    return { axis: hit.axis, sign, term: tokens[i] };
+  }
+  return null;
+}
+
+function conflictSubjectTokens(text: string, polarityTerm: string): Set<string> {
+  return new Set(
+    String(text || '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length >= 3 && token !== polarityTerm && !CONFLICT_SUBJECT_STOPWORDS.has(token))
+  );
+}
+
+function splitSourceSentences(text: string): string[] {
+  return String(text || '')
+    .split(/\n+|(?<=[.!?])\s+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Deterministic cross-source conflict scan (F1). Flags a synthesized criterion when a source line
+ * describes the same subject (≥1 shared distinctive token) but resolves to the OPPOSITE sign on the
+ * SAME polarity axis. Flag-only — never removes a criterion; opposite requirements are for a human to
+ * adjudicate (a Jira AC may intentionally supersede a stale PRD). One conflict per criterion is enough
+ * to surface for review, so we stop at the first match per criterion.
+ */
+export function detectCrossSourceConflicts(
+  criteria: ScopedItem[],
+  corpora: Array<{ source: 'jira' | 'prd' | 'spec'; text: string }>,
+  logger?: Logger,
+  ticketKey = ''
+): CrossSourceConflict[] {
+  const corpusLines = corpora.flatMap(({ source, text }) =>
+    splitSourceSentences(text)
+      .map((line) => ({ source, line, polarity: clausePolarity(line) }))
+      .filter((entry): entry is { source: 'jira' | 'prd' | 'spec'; line: string; polarity: NonNullable<ReturnType<typeof clausePolarity>> } =>
+        entry.line.length >= 12 && entry.polarity !== null
+      )
+  );
+  const conflicts: CrossSourceConflict[] = [];
+  for (const criterion of criteria) {
+    const criterionPolarity = clausePolarity(criterion.text);
+    if (!criterionPolarity) continue;
+    const criterionSubjects = conflictSubjectTokens(criterion.text, criterionPolarity.term);
+    if (!criterionSubjects.size) continue;
+    for (const entry of corpusLines) {
+      if (entry.polarity.axis !== criterionPolarity.axis || entry.polarity.sign === criterionPolarity.sign) continue;
+      const lineSubjects = conflictSubjectTokens(entry.line, entry.polarity.term);
+      const shared = [...criterionSubjects].filter((token) => lineSubjects.has(token));
+      if (!shared.length) continue;
+      conflicts.push({
+        criterionId: criterion.id,
+        criterionText: criterion.text,
+        axis: criterionPolarity.axis,
+        criterionSign: criterionPolarity.sign,
+        conflictingSource: entry.source,
+        conflictingExcerpt: trimExcerpt(entry.line, 200),
+        sharedSubjects: shared.slice(0, 5),
+      });
+      break;
+    }
+  }
+  if (conflicts.length) {
+    logger?.info('context.ac_cross_source_conflicts', {
+      jiraKey: ticketKey,
+      conflictCount: conflicts.length,
+      conflicts: conflicts.slice(0, 5).map((conflict) => ({
+        criterionId: conflict.criterionId,
+        axis: conflict.axis,
+        source: conflict.conflictingSource,
+        shared: conflict.sharedSubjects,
+      })),
+    });
+  }
+  return conflicts;
 }
 
 export async function finalizeAcceptanceCriteria(
@@ -839,7 +1055,28 @@ export async function finalizeAcceptanceCriteria(
       context.ticketKey
     );
   }
-  finalCriteria = attachSourceExcerpts(finalCriteria, context, options.logger);
+  finalCriteria = await attachSourceExcerpts(finalCriteria, context, {
+    logger: options.logger,
+    llm: options.llm,
+    relevanceCheck: options.excerptRelevanceCheck,
+  });
+
+  // Cross-source conflict scan (F1): compare the finalized criteria against the same Jira / PRD / spec
+  // corpora the synthesizer saw, and flag opposite-polarity contradictions for human adjudication.
+  const prdBody =
+    context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+      ? context.scopeAuthority.body
+      : context.scopeConfluenceSection?.body || '';
+  const crossSourceConflicts = detectCrossSourceConflicts(
+    finalCriteria,
+    [
+      { source: 'jira' as const, text: normalizeMultilineText(mainIssueBody) },
+      { source: 'prd' as const, text: normalizeMultilineText(prdBody) },
+      { source: 'spec' as const, text: specExcerpts.text },
+    ].filter((corpus) => corpus.text.trim().length > 0),
+    options.logger,
+    context.ticketKey
+  );
 
   return {
     ...context,
@@ -856,6 +1093,7 @@ export async function finalizeAcceptanceCriteria(
       rawAcceptanceCriteriaWeakSignals: quality.weakSignals,
       discardedFragmentCount: quality.discarded.length,
       discardedFragmentExamples: quality.discarded.slice(0, 5).map((criterion) => criterion.text),
+      crossSourceConflicts,
     },
   };
 }

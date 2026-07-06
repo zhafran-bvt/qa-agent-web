@@ -107,6 +107,8 @@ export default function App() {
   const [overrideReason, setOverrideReason] = useState('');
   const [approved, setApproved] = useState(false);
   const [weakCoverageAck, setWeakCoverageAck] = useState(false);
+  const [singlePolarityAck, setSinglePolarityAck] = useState(false);
+  const [crossSourceConflictAck, setCrossSourceConflictAck] = useState(false);
   const [sectionId, setSectionId] = useState('');
   const [pushResults, setPushResults] = useState('');
   const [pushedCases, setPushedCases] = useState<{ ids: number[]; jiraKey: string } | null>(null);
@@ -295,7 +297,12 @@ export default function App() {
     }, 4200);
   }
 
-  function buildPushPayload(casesToPush: GeneratedTestCase[] = testCases, weakAckOverride?: boolean): PushRequest | null {
+  function buildPushPayload(
+    casesToPush: GeneratedTestCase[] = testCases,
+    weakAckOverride?: boolean,
+    singlePolarityAckOverride?: boolean,
+    conflictAckOverride?: boolean
+  ): PushRequest | null {
     // Push and preflight must receive identical payloads so the duplicate review reflects the final write.
     if (!context) return null;
     return {
@@ -312,11 +319,20 @@ export default function App() {
       // Lean endpoint list lets the push gate flag invented apiSpec paths (BUG-05).
       matchedEndpoints: context.apiContract?.matchedEndpoints,
       weakCoverageAcknowledged: weakAckOverride ?? weakCoverageAck,
+      singlePolarityAcknowledged: singlePolarityAckOverride ?? singlePolarityAck,
+      // Conflicts are computed at analyze and live on the context; echo them so the push gate can enforce ack.
+      crossSourceConflicts: context.acceptanceCriteriaDiagnostics?.crossSourceConflicts,
+      crossSourceConflictsAcknowledged: conflictAckOverride ?? crossSourceConflictAck,
     };
   }
 
-  async function submitPush(casesToPush: GeneratedTestCase[], weakAckOverride?: boolean) {
-    const payload = buildPushPayload(casesToPush, weakAckOverride);
+  async function submitPush(
+    casesToPush: GeneratedTestCase[],
+    weakAckOverride?: boolean,
+    singlePolarityAckOverride?: boolean,
+    conflictAckOverride?: boolean
+  ) {
+    const payload = buildPushPayload(casesToPush, weakAckOverride, singlePolarityAckOverride, conflictAckOverride);
     if (!payload) return;
     const response = await pushCases(payload);
     setPushResults(formatPushResults(response, lang));
@@ -352,6 +368,8 @@ export default function App() {
       setOverrideReason('');
       setApproved(false);
       setWeakCoverageAck(false);
+      setSinglePolarityAck(false);
+      setCrossSourceConflictAck(false);
       setPushResults('');
       setPushedCases(null);
       setGeneratedRunId('');
@@ -400,6 +418,8 @@ export default function App() {
     setManualScopeOverride(Boolean(response.manualScopeOverride));
     setApproved(false);
     setWeakCoverageAck(false);
+    setSinglePolarityAck(false);
+    setCrossSourceConflictAck(false);
     setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
     setDuplicateReview(null);
@@ -459,10 +479,35 @@ export default function App() {
         weakAck = true;
         setWeakCoverageAck(true);
       }
+      // Same acknowledge-to-override for conditional ACs tested in only one direction.
+      let singleAck = singlePolarityAck;
+      if (preflight.singlePolarity?.criteria?.length && !singleAck) {
+        const proceed = window.confirm(toastText.singlePolarityConfirm(preflight.singlePolarity.criteria.length));
+        if (!proceed) {
+          setPushResults(toastText.singlePolarityCancelled);
+          pushToast('info', toastText.pushErrorTitle, toastText.singlePolarityCancelled);
+          return;
+        }
+        singleAck = true;
+        setSinglePolarityAck(true);
+      }
+      // Cross-source conflicts (F1) are known from the context (computed at analyze), so confirm them here too.
+      let conflictAck = crossSourceConflictAck;
+      const conflicts = context.acceptanceCriteriaDiagnostics?.crossSourceConflicts || [];
+      if (conflicts.length && !conflictAck) {
+        const proceed = window.confirm(toastText.crossSourceConflictConfirm(conflicts.length));
+        if (!proceed) {
+          setPushResults(toastText.crossSourceConflictCancelled);
+          pushToast('info', toastText.pushErrorTitle, toastText.crossSourceConflictCancelled);
+          return;
+        }
+        conflictAck = true;
+        setCrossSourceConflictAck(true);
+      }
       if (preflight.duplicateLookupSkipped) {
         setPushResults(preflight.duplicateLookupSkipped.reason);
         pushToast('info', toastText.duplicateLookupSkippedTitle, preflight.duplicateLookupSkipped.reason);
-        await submitPush(testCases, weakAck);
+        await submitPush(testCases, weakAck, singleAck, conflictAck);
         return;
       }
       if (preflight.duplicatesFound) {
@@ -480,7 +525,7 @@ export default function App() {
         pushToast('info', toastText.duplicateReviewTitle, toastText.duplicateReviewMessage(preflight.summary.existingCount, preflight.summary.jiraKey));
         return;
       }
-      await submitPush(testCases, weakAck);
+      await submitPush(testCases, weakAck, singleAck, conflictAck);
     } catch (pushError) {
       const message = (pushError as Error).message;
       setPushResults(message);

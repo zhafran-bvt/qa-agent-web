@@ -1127,6 +1127,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const finalizedContext = await finalizeAcceptanceCriteria(context, {
       synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
       logger: log,
+      // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
+      llm: config.llm,
     });
     if (finalizedContext.constraints.scopeType === 'api') {
       // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
@@ -1388,6 +1390,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     // Weak coverage (claimed but unsubstantiated) is non-blocking at preflight — surfaced so the client
     // can obtain an explicit acknowledgement. The /api/push gate enforces it.
     const weakCoverage = coverage.unsubstantiatedClaims.length ? { claims: coverage.unsubstantiatedClaims } : undefined;
+    // Single-polarity coverage (conditional AC tested in only one direction) — same acknowledge-to-override.
+    const singlePolarity = coverage.singlePolarityCriteria.length ? { criteria: coverage.singlePolarityCriteria } : undefined;
 
     if (!config.testrail.projectId) {
       log.warn('api.push.preflight.skipped', {
@@ -1412,6 +1416,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         validation,
         coverage,
         weakCoverage,
+        singlePolarity,
       });
       return;
     }
@@ -1427,6 +1432,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       existingCases: existingCases.length,
       generatedCases: testCases.length,
       unsubstantiatedClaims: coverage.unsubstantiatedClaims.length,
+      singlePolarityCriteria: coverage.singlePolarityCriteria.length,
     });
     sendJson(res, 200, {
       duplicatesFound: existingCases.length > 0,
@@ -1441,6 +1447,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       validation,
       coverage,
       weakCoverage,
+      singlePolarity,
     });
     return;
   }
@@ -1498,6 +1505,39 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sendJson(res, 400, {
         error: 'Some acceptance criteria are claimed but not substantiated by the case steps. Acknowledge weak coverage to proceed.',
         requiresWeakCoverageAck: true,
+        validation,
+        coverage,
+      });
+      return;
+    }
+    // Acknowledge-to-override: a conditional AC tested in only one direction (e.g. the disabled state but
+    // never the enabled state) reads as green while a real branch is untested. Block unless acknowledged.
+    if (coverage.enforced && coverage.singlePolarityCriteria.length && !body.singlePolarityAcknowledged) {
+      log.warn('api.push.single_polarity_blocked', {
+        jiraKey: body.jiraKey,
+        user: session.user,
+        singlePolarityCriteria: coverage.singlePolarityCriteria.length,
+      });
+      sendJson(res, 400, {
+        error: 'Some conditional acceptance criteria are tested in only one direction (e.g. the disabled state but not the enabled state). Acknowledge single-polarity coverage to proceed.',
+        requiresSinglePolarityAck: true,
+        validation,
+        coverage,
+      });
+      return;
+    }
+    // Acknowledge-to-override: a synthesized criterion that contradicts a source line (F1, detected at
+    // analyze and carried on the context) must not ship unflagged. Independent of coverage enforcement —
+    // a requirement contradiction is worth a human's eyes regardless.
+    if (body.crossSourceConflicts?.length && !body.crossSourceConflictsAcknowledged) {
+      log.warn('api.push.cross_source_conflicts_blocked', {
+        jiraKey: body.jiraKey,
+        user: session.user,
+        conflicts: body.crossSourceConflicts.length,
+      });
+      sendJson(res, 400, {
+        error: 'Some acceptance criteria contradict the source documents (Jira/PRD/spec). Acknowledge the cross-source conflicts to proceed.',
+        requiresCrossSourceConflictAck: true,
         validation,
         coverage,
       });

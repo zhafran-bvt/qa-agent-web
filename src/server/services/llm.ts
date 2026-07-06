@@ -10,6 +10,8 @@ import { buildCoverage } from './validation';
 import { normalizeSelectedEndpoints } from './api-docs';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 import { requestHttpsJson } from './http';
+import { TtlCache } from './ttl-cache';
+import type { Logger } from './logger';
 
 interface ProviderConfig {
   name: string;
@@ -1070,6 +1072,26 @@ function getMissingAcceptanceCriteria(context: GenerateContext, testCases: Gener
   return (context.acceptanceCriteria || []).filter((criterion) => uncovered.has(criterion.id));
 }
 
+// BUG-10: buildCoverage() already detects conditional criteria covered in only one polarity (e.g. a
+// positive case exists but no negative, or vice versa) via singlePolarityCriteria — but that was
+// surfaced as a report-only warning with nothing feeding it back into generation, unlike uncovered
+// criteria which self-heal via getMissingAcceptanceCriteria + repairMissingCoverageWithProvider. This
+// mirrors that pattern for the polarity case: a pure, directly-testable gap detector.
+export function getSinglePolarityGaps(
+  context: GenerateContext,
+  testCases: GeneratedTestCase[]
+): Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> {
+  const coverage = buildCoverage(testCases, context.acceptanceCriteria, { enforceAcceptanceCriteria: true });
+  const byId = new Map((context.acceptanceCriteria || []).map((criterion) => [criterion.id, criterion]));
+  const gaps: Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> = [];
+  for (const entry of coverage.singlePolarityCriteria || []) {
+    const criterion = byId.get(entry.criterionId);
+    if (!criterion) continue;
+    gaps.push({ id: criterion.id, text: criterion.text, missing: entry.missing });
+  }
+  return gaps;
+}
+
 export function isFallbackError(error: Error & { statusCode?: number }): boolean {
   const message = String(error && error.message ? error.message : '').toLowerCase();
   return (
@@ -1298,6 +1320,76 @@ async function repairMissingCoverageWithProvider(
   };
 }
 
+// BUG-10: repair pass that mirrors repairMissingCoverageWithProvider, but for one-sided coverage —
+// each listed criterion is already covered, but only in one polarity, leaving a conditional branch
+// unexercised. Asks the provider for just the missing-polarity cases.
+async function repairSinglePolarityWithProvider(
+  provider: ProviderConfig,
+  context: GenerateContext,
+  existingCases: GeneratedTestCase[],
+  polarityGaps: Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }>
+): Promise<ProviderGenerationResult> {
+  const scopePriority = buildScopePriorityContext(context);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api';
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const systemPrompt = [
+    'You are a senior QA engineer repairing one-sided acceptance-criteria coverage.',
+    'Each listed criterion already has at least one test case, but every existing case shares the same polarity, leaving a conditional branch of the criterion unexercised (e.g. only the accepted/enabled path is tested, never the rejected/disabled path, or vice versa).',
+    'Return strict JSON only. No markdown and no explanation.',
+    'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
+    'Return only the test cases needed to add the missing polarity listed for each criterion. Do not add cases for a polarity that is not listed as missing for that criterion.',
+    'Each returned case must set caseIntent to exactly one of the missing polarities requested for that criterion (positive or negative), and must include that criterion id in coversAcceptanceCriteria.',
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    'Reuse the same named actors/resources/fixtures already established by the existing cases so repair cases read consistently with the set, rather than introducing new unrelated fixtures.',
+    'Keep the set minimal but sufficient: one case per missing polarity per criterion is normally enough unless the criterion bundles multiple distinct branches for that polarity.',
+  ].filter(Boolean).join('\n');
+
+  const userPrompt = JSON.stringify(
+    {
+      instruction: 'Generate only the missing-polarity repair cases.',
+      scopePriority,
+      polarityGaps,
+      existingCases: existingCases.map((testCase) => ({
+        id: testCase.id,
+        title: testCase.title,
+        caseIntent: testCase.caseIntent,
+        coversAcceptanceCriteria: testCase.coversAcceptanceCriteria,
+        preconditions: testCase.preconditions,
+      })),
+      context: buildGenerationPromptContext(context),
+    },
+    null,
+    2
+  );
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }
+  );
+
+  const content = providerContent(response, 'polarity repair');
+  const parsed = extractJson(content);
+  const cases = findCaseArray(parsed);
+  if (!Array.isArray(cases)) {
+    throw new Error('LLM polarity repair response JSON must contain a testCases array.');
+  }
+  return {
+    provider: provider.name,
+    model: provider.model,
+    testCases: cases.map((testCase, index) => normalizeCase(testCase as Record<string, unknown>, index)),
+  };
+}
+
 export async function generateTestCases(config: LlmConfig, context: GenerateContext) {
   const providers = (config.providers || []).filter((provider) => provider.apiKey);
   if (!providers.length) {
@@ -1318,6 +1410,15 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       if (missingCriteria.length) {
         const repair = await repairMissingCoverageWithProvider(provider, context, mergedCases, missingCriteria);
         mergedCases = dedupeGeneratedCases([...mergedCases, ...repair.testCases]);
+      }
+
+      // BUG-10: after full-coverage repair, close single-polarity gaps the same way. Runs after the
+      // missing-coverage pass, so it only ever sees criteria that are already covered at all — a
+      // criterion still fully uncovered is handled above, not here. No-op when polarityGaps is empty.
+      const polarityGaps = getSinglePolarityGaps(context, mergedCases);
+      if (polarityGaps.length) {
+        const polarityRepair = await repairSinglePolarityWithProvider(provider, context, mergedCases, polarityGaps);
+        mergedCases = dedupeGeneratedCases([...mergedCases, ...polarityRepair.testCases]);
       }
 
       return {
@@ -1363,6 +1464,101 @@ export async function synthesizeAcceptanceCriteria(config: LlmConfig, input: Acc
   }
 
   throw lastError || new Error('LLM acceptance criteria synthesis failed.');
+}
+
+export interface ExcerptRelevanceInput {
+  criterion: string;
+  excerpt: string;
+}
+
+// F3: cache the per-(criterion, excerpt) verdict so repeated candidate lines and re-runs of the same
+// ticket never re-pay the token cost. Keyed by criterion + excerpt (NUL-joined so the two fields can't
+// collide). Short-lived: stable within a review session, but a prompt change shouldn't be shadowed by
+// stale verdicts indefinitely.
+const excerptRelevanceCache = new TtlCache<boolean>(Number(process.env.EXCERPT_RELEVANCE_CACHE_TTL_MS || 1_800_000), 512);
+
+function excerptRelevanceCacheKey(input: ExcerptRelevanceInput): string {
+  return `${input.criterion} ${input.excerpt}`;
+}
+
+async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input: ExcerptRelevanceInput): Promise<boolean> {
+  // A single cheap yes/no: does the candidate source line state the SAME requirement as the criterion?
+  // Topic overlap is explicitly not enough — that is exactly what the deterministic token-overlap scorer
+  // already rewards, and what lets a same-topic / different-behavior line through.
+  // Calibrated against real ORB-3205 evidence (see commit msg): a bare "same requirement?" yes/no was too
+  // lenient on the live model — it accepted same-topic/different-phase lines (the reported misattribution).
+  // Naming the discriminating axes (feature / phase / condition) and allowing paraphrase makes it reject
+  // "config section" vs "story-detail display" while keeping genuine reworded matches.
+  const systemPrompt = [
+    "You verify QA traceability evidence: does the candidate source line describe the SAME product requirement as the acceptance criterion, so it can serve as that criterion's evidence?",
+    'Answer true when the source line specifies the same behavior the criterion requires — even if it uses different wording, names the same control or surface differently, or gives more detail. A paraphrase or a more-specific spec of the same behavior is still the same requirement.',
+    'Answer false when, despite shared words, topic, or feature area, they differ on ANY of these axes:',
+    '- FEATURE: they are about different settings, controls, or capabilities.',
+    '- PHASE: one configures / selects / inputs something during setup, while the other displays / reports / stores it after the action runs (or one is a UI behavior and the other an API or stored-data field).',
+    '- CONDITION: opposite polarity — enabled vs. disabled, included vs. excluded, allowed vs. rejected.',
+    'Examples:',
+    '- Criterion: "Save is disabled until the required field has a value." Source: "The submit CTA stays disabled until the user enters the mandatory value." => true (same behavior, different wording).',
+    '- Criterion: "Add a section to choose the analysis mode during setup." Source: "Show the chosen analysis mode on the result detail page." => false (configure-at-setup vs. display-after-run: different phase).',
+    '- Criterion: "Add a toggle for setting A." Source: "Add a toggle for setting B." => false (different feature).',
+    'Think briefly in "reason", then decide. Return strict JSON only, no markdown: {"reason":"<one short sentence>","sameRequirement":true} or {"reason":"...","sameRequirement":false}.',
+  ].join('\n');
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0, // deterministic relevance verdict: same pair → stable yes/no run-to-run
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: JSON.stringify({ acceptanceCriterion: input.criterion, candidateSourceLine: input.excerpt }, null, 2),
+        },
+      ],
+    }
+  );
+
+  const content = providerContent(response, 'excerpt relevance');
+  const parsed = extractJson(content) as { sameRequirement?: unknown } | null;
+  return parsed?.sameRequirement === true;
+}
+
+/**
+ * F3 semantic evidence gate: ask the LLM whether a candidate source line states the SAME requirement as
+ * the acceptance criterion. Token-overlap scoring rewards topic overlap and cannot separate
+ * "displayed in the config UI" from "displays info on the story detail page"; this can. Fail-open: when
+ * no provider is configured, or every provider errors, return true so a transient LLM failure can never
+ * strip an otherwise-selected excerpt — the deterministic scorer stays the floor. Verdicts are cached
+ * per (criterion, excerpt).
+ */
+export async function isExcerptRelevant(config: LlmConfig, input: ExcerptRelevanceInput, logger?: Logger): Promise<boolean> {
+  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  if (!providers.length) return true; // can't check → keep (deterministic fallback)
+
+  const cacheKey = excerptRelevanceCacheKey(input);
+  const cached = excerptRelevanceCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  let lastError: Error | undefined;
+  for (let index = 0; index < providers.length; index += 1) {
+    const provider = providers[index];
+    try {
+      const relevant = await checkExcerptRelevanceWithProvider(provider, input);
+      excerptRelevanceCache.set(cacheKey, relevant);
+      return relevant;
+    } catch (error) {
+      lastError = error as Error;
+      const hasFallback = index < providers.length - 1;
+      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) break;
+    }
+  }
+
+  logger?.warn('context.ac_excerpt_relevance_failed', {
+    errorMessage: lastError instanceof Error ? lastError.message : String(lastError),
+  });
+  return true; // fail-open: never drop evidence because the relevance check itself failed
 }
 
 export async function translateScopeSnapshot(config: LlmConfig, context: QaContext, targetLanguage: 'id'): Promise<ScopeSnapshotTranslation> {
