@@ -41,7 +41,7 @@ test('AtlassianClient retries Confluence page fetch across accessible resources'
               id: '1228177422',
               title: 'PRD Page',
               body: { atlas_doc_format: { value: { type: 'doc', content: [] } } },
-              _links: { webui: '/wiki/spaces/ORB/pages/1228177422' },
+              _links: { webui: '/spaces/ORB/pages/1228177422' },
             })
           )
         );
@@ -65,11 +65,68 @@ test('AtlassianClient retries Confluence page fetch across accessible resources'
   try {
     const page = await client.getConfluencePage('1228177422');
     assert.equal(page.id, '1228177422');
+    assert.equal(page.webUrl, 'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422');
     assert.equal(requests.some((entry) => entry.includes('/ex/confluence/jira-cloud/')), true);
     assert.equal(requests.some((entry) => entry.includes('/ex/confluence/confluence-cloud/')), true);
   } finally {
     (https.default as any).request = originalRequest;
     globalThis.fetch = originalFetch;
+  }
+});
+
+test('BUG-08: Confluence web URL is not double-prefixed when webui already includes /wiki', async () => {
+  const client = new AtlassianClient({
+    accessToken: 'test-token',
+    cloudId: 'confluence-cloud',
+    resources: [{ id: 'confluence-cloud', url: 'https://bvarta-project.atlassian.net' }],
+    selectedResource: { id: 'confluence-cloud', url: 'https://bvarta-project.atlassian.net' },
+  });
+
+  const https = await import('node:https');
+  const originalRequest = https.default.request;
+
+  (https.default as any).request = ((options: any, callback: any) => {
+    const handlers: Record<string, Function> = {};
+    const response = {
+      statusCode: 200,
+      on(event: string, handler: Function) {
+        handlers[event] = handler;
+      },
+    };
+
+    queueMicrotask(() => {
+      callback(response);
+      handlers.data?.(
+        Buffer.from(
+          JSON.stringify({
+            id: '999',
+            title: 'Spec Page',
+            body: { atlas_doc_format: { value: { type: 'doc', content: [] } } },
+            _links: { webui: '/wiki/spaces/ORB/pages/999' },
+          })
+        )
+      );
+      handlers.end?.();
+    });
+
+    return {
+      on() {
+        return this;
+      },
+      write() {
+        return this;
+      },
+      end() {
+        return this;
+      },
+    };
+  }) as any;
+
+  try {
+    const page = await client.getConfluencePage('999');
+    assert.equal(page.webUrl, 'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/999');
+  } finally {
+    (https.default as any).request = originalRequest;
   }
 });
 

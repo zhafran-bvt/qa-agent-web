@@ -29,6 +29,45 @@ test('extracts Confluence page links from Jira text', () => {
   ]);
 });
 
+test('BUG-07: tags a link introduced as the design doc as spec-descendant', () => {
+  const refs = extractConfluencePageRefsFromText(
+    '> Refers to **Task 1** of the design doc: [Grid Analysis - Dasymetric Proportion](https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1819967490/Grid+Analysis+-+Dasymetric+Proportion). Reference data is loaded separately by the Airflow ETL (Task 2).',
+    'ORB-3310',
+    'main-description'
+  );
+
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].pageId, '1819967490');
+  assert.equal(refs[0].relationship, 'spec-descendant');
+});
+
+test('BUG-07: a plain Confluence link with no spec-introducing phrase stays untagged', () => {
+  const refs = extractConfluencePageRefsFromText(
+    'See the release notes: https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1759412239/Draft+Improvement+Grid+Analysis+form+VOI+gap for background.',
+    'ORB-3194',
+    'parent-story-description'
+  );
+
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].relationship, '');
+});
+
+test('BUG-07: recognizes spec keyword variants immediately before Confluence links', () => {
+  const techSpec = extractConfluencePageRefsFromText(
+    'See the tech spec: https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1111111111/Foo',
+    'ORB-1',
+    'description'
+  );
+  const rfc = extractConfluencePageRefsFromText(
+    'Discussed in RFC https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/2222222222/Bar',
+    'ORB-2',
+    'description'
+  );
+
+  assert.equal(techSpec[0].relationship, 'spec-descendant');
+  assert.equal(rfc[0].relationship, 'spec-descendant');
+});
+
 test('normalizes anchor fragments into heading text', () => {
   assert.equal(anchorToHeading('5.-As-a-PM,-I-want-the-filter-function'), '5. As a PM, I want the filter function');
 });
