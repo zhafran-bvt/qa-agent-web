@@ -118,7 +118,9 @@ function buildConfluenceWebUrl(siteUrl: string | null | undefined, webUi?: strin
   if (/^https?:\/\//i.test(raw)) return raw;
   const base = normalizeSiteUrl(siteUrl);
   if (!base) return raw;
-  return `${base}${raw.startsWith('/') ? '' : '/'}${raw}`;
+  const wikiBase = /\/wiki$/i.test(base) ? base : `${base}/wiki`;
+  const path = raw.replace(/^\/?(wiki\/)?/i, '/');
+  return `${wikiBase}${path}`;
 }
 
 export function buildAuthUrl(config: AtlassianAuthConfig, state: string): string {
