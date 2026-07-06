@@ -6,6 +6,7 @@ import {
   buildScopePriorityContext,
   findAcceptanceCriteriaArray,
   findCaseArray,
+  getSinglePolarityGaps,
   isFallbackError,
   normalizeBddScenario,
   normalizeCase,
@@ -507,4 +508,47 @@ test('localizes scope snapshot with field-by-field fallback and preserves ids', 
   assert.equal(localized.acceptanceCriteria[0].sourceExcerptUrl, 'https://example.test/prd#AI-Summary-NO-SCORE');
   assert.equal(localized.acceptanceCriteria[1].id, 'AC-2');
   assert.equal(localized.acceptanceCriteria[1].text, 'Strategic Takeaways remain available for the no-score variant.');
+});
+
+test('BUG-10: getSinglePolarityGaps surfaces a conditional criterion covered only in one polarity', () => {
+  const context = {
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is 0' }],
+  };
+  const testCases = [
+    {
+      id: 'TC-1',
+      caseIntent: 'negative',
+      coversAcceptanceCriteria: ['AC-1'],
+      title: 'Generate Results button disabled when radius is 0',
+      bddScenario: 'Given radius is 0 When the form is checked Then the Generate Results button is disabled',
+    },
+  ];
+  const gaps = getSinglePolarityGaps(context as any, testCases as any);
+  assert.equal(gaps.length, 1);
+  assert.equal(gaps[0].id, 'AC-1');
+  assert.deepEqual(gaps[0].missing, ['positive']);
+});
+
+test('BUG-10: getSinglePolarityGaps reports no gap once both polarities are covered', () => {
+  const context = {
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is 0' }],
+  };
+  const testCases = [
+    {
+      id: 'TC-1',
+      caseIntent: 'negative',
+      coversAcceptanceCriteria: ['AC-1'],
+      title: 'Generate Results button disabled when radius is 0',
+      bddScenario: 'Given radius is 0 Then the Generate Results button is disabled',
+    },
+    {
+      id: 'TC-2',
+      caseIntent: 'positive',
+      coversAcceptanceCriteria: ['AC-1'],
+      title: 'Generate Results button enabled when radius is valid',
+      bddScenario: 'Given a valid radius Then the Generate Results button is enabled',
+    },
+  ];
+  const gaps = getSinglePolarityGaps(context as any, testCases as any);
+  assert.equal(gaps.length, 0);
 });

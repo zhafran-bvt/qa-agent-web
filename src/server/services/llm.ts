@@ -1072,6 +1072,26 @@ function getMissingAcceptanceCriteria(context: GenerateContext, testCases: Gener
   return (context.acceptanceCriteria || []).filter((criterion) => uncovered.has(criterion.id));
 }
 
+// BUG-10: buildCoverage() already detects conditional criteria covered in only one polarity (e.g. a
+// positive case exists but no negative, or vice versa) via singlePolarityCriteria — but that was
+// surfaced as a report-only warning with nothing feeding it back into generation, unlike uncovered
+// criteria which self-heal via getMissingAcceptanceCriteria + repairMissingCoverageWithProvider. This
+// mirrors that pattern for the polarity case: a pure, directly-testable gap detector.
+export function getSinglePolarityGaps(
+  context: GenerateContext,
+  testCases: GeneratedTestCase[]
+): Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> {
+  const coverage = buildCoverage(testCases, context.acceptanceCriteria, { enforceAcceptanceCriteria: true });
+  const byId = new Map((context.acceptanceCriteria || []).map((criterion) => [criterion.id, criterion]));
+  const gaps: Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> = [];
+  for (const entry of coverage.singlePolarityCriteria || []) {
+    const criterion = byId.get(entry.criterionId);
+    if (!criterion) continue;
+    gaps.push({ id: criterion.id, text: criterion.text, missing: entry.missing });
+  }
+  return gaps;
+}
+
 export function isFallbackError(error: Error & { statusCode?: number }): boolean {
   const message = String(error && error.message ? error.message : '').toLowerCase();
   return (
@@ -1300,6 +1320,76 @@ async function repairMissingCoverageWithProvider(
   };
 }
 
+// BUG-10: repair pass that mirrors repairMissingCoverageWithProvider, but for one-sided coverage —
+// each listed criterion is already covered, but only in one polarity, leaving a conditional branch
+// unexercised. Asks the provider for just the missing-polarity cases.
+async function repairSinglePolarityWithProvider(
+  provider: ProviderConfig,
+  context: GenerateContext,
+  existingCases: GeneratedTestCase[],
+  polarityGaps: Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }>
+): Promise<ProviderGenerationResult> {
+  const scopePriority = buildScopePriorityContext(context);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api';
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const systemPrompt = [
+    'You are a senior QA engineer repairing one-sided acceptance-criteria coverage.',
+    'Each listed criterion already has at least one test case, but every existing case shares the same polarity, leaving a conditional branch of the criterion unexercised (e.g. only the accepted/enabled path is tested, never the rejected/disabled path, or vice versa).',
+    'Return strict JSON only. No markdown and no explanation.',
+    'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
+    'Return only the test cases needed to add the missing polarity listed for each criterion. Do not add cases for a polarity that is not listed as missing for that criterion.',
+    'Each returned case must set caseIntent to exactly one of the missing polarities requested for that criterion (positive or negative), and must include that criterion id in coversAcceptanceCriteria.',
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    'Reuse the same named actors/resources/fixtures already established by the existing cases so repair cases read consistently with the set, rather than introducing new unrelated fixtures.',
+    'Keep the set minimal but sufficient: one case per missing polarity per criterion is normally enough unless the criterion bundles multiple distinct branches for that polarity.',
+  ].filter(Boolean).join('\n');
+
+  const userPrompt = JSON.stringify(
+    {
+      instruction: 'Generate only the missing-polarity repair cases.',
+      scopePriority,
+      polarityGaps,
+      existingCases: existingCases.map((testCase) => ({
+        id: testCase.id,
+        title: testCase.title,
+        caseIntent: testCase.caseIntent,
+        coversAcceptanceCriteria: testCase.coversAcceptanceCriteria,
+        preconditions: testCase.preconditions,
+      })),
+      context: buildGenerationPromptContext(context),
+    },
+    null,
+    2
+  );
+
+  const response = await requestJson<any>(
+    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
+    { Authorization: `Bearer ${provider.apiKey}` },
+    {
+      model: provider.model,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }
+  );
+
+  const content = providerContent(response, 'polarity repair');
+  const parsed = extractJson(content);
+  const cases = findCaseArray(parsed);
+  if (!Array.isArray(cases)) {
+    throw new Error('LLM polarity repair response JSON must contain a testCases array.');
+  }
+  return {
+    provider: provider.name,
+    model: provider.model,
+    testCases: cases.map((testCase, index) => normalizeCase(testCase as Record<string, unknown>, index)),
+  };
+}
+
 export async function generateTestCases(config: LlmConfig, context: GenerateContext) {
   const providers = (config.providers || []).filter((provider) => provider.apiKey);
   if (!providers.length) {
@@ -1320,6 +1410,15 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       if (missingCriteria.length) {
         const repair = await repairMissingCoverageWithProvider(provider, context, mergedCases, missingCriteria);
         mergedCases = dedupeGeneratedCases([...mergedCases, ...repair.testCases]);
+      }
+
+      // BUG-10: after full-coverage repair, close single-polarity gaps the same way. Runs after the
+      // missing-coverage pass, so it only ever sees criteria that are already covered at all — a
+      // criterion still fully uncovered is handled above, not here. No-op when polarityGaps is empty.
+      const polarityGaps = getSinglePolarityGaps(context, mergedCases);
+      if (polarityGaps.length) {
+        const polarityRepair = await repairSinglePolarityWithProvider(provider, context, mergedCases, polarityGaps);
+        mergedCases = dedupeGeneratedCases([...mergedCases, ...polarityRepair.testCases]);
       }
 
       return {
