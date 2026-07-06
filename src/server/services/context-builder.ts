@@ -495,6 +495,13 @@ function addPageRef(pageRefs: Map<string, PageRef>, ref: (ConfluenceReference & 
   }
 }
 
+// BUG-07: a link is only recognized as pointing to a technical spec via isTechnicalSpecPage()'s title
+// regex — which misses real design docs whose own page title doesn't literally contain a spec keyword
+// (e.g. a page titled "Grid Analysis - Dasymetric Proportion" that a ticket introduces as "Refers to
+// Task 1 of the design doc: [Grid Analysis - Dasymetric Proportion]"). We detect that introducing
+// phrase in the ~100 chars immediately preceding the link and tag the resulting reference as
+// spec-descendant, so it flows into isTechnicalSpecPage()'s existing sourceRefs check regardless of the
+// target page's own title. A link with no spec-introducing phrase nearby stays untagged as before.
 export function extractConfluencePageRefsFromText(text: string, issueKey: string, sourceType: string): ConfluenceReference[] {
   // Pull Confluence links from Jira descriptions/comments where remote-link metadata is often missing.
   const refs: ConfluenceReference[] = [];

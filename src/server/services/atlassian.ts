@@ -112,6 +112,13 @@ function buildJiraIssueWebUrl(siteUrl: string | null | undefined, issueKey?: str
   return `${base}/browse/${issueKey}`;
 }
 
+// BUG-08: Confluence Cloud's web UI is always mounted under /wiki on the site domain — the same
+// convention this file already relies on for the API host (`/wiki/api/v2`). The REST API's
+// _links.webui is a path relative to that /wiki root (e.g. "/spaces/ORB/pages/123/Title"), not
+// relative to the bare site root returned by accessible-resources, so concatenating it directly onto
+// siteUrl drops /wiki and produces a URL that 404s (".../spaces/ORB/pages/..." instead of
+// ".../wiki/spaces/ORB/pages/..."). The double-/wiki guard covers a siteUrl or webui that already
+// includes it.
 function buildConfluenceWebUrl(siteUrl: string | null | undefined, webUi?: string | null): string | null {
   const raw = String(webUi || '').trim();
   if (!raw) return null;
