@@ -1,5 +1,5 @@
 import type { ApiContractEndpoint, ApiContractSummary, QaContext, QaScopeType, ResolvedQaScopeType } from '../../shared/contracts';
-import { requestText } from './http';
+import { requestText, withTimeout } from './http';
 import { TtlCache, mapWithConcurrency } from './ttl-cache';
 
 const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
@@ -189,23 +189,6 @@ function docsTimeoutMs(): number {
 
 function docsTotalBudgetMs(): number {
   return Number(process.env.API_DOCS_TOTAL_TIMEOUT_MS || 20_000);
-}
-
-/** Reject if a promise outruns the budget, so a hung crawl can't block the caller. */
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${label} exceeded ${ms}ms`)), ms);
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        reject(error);
-      }
-    );
-  });
 }
 
 interface DocPortalPage {

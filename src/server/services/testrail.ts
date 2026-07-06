@@ -235,7 +235,15 @@ function parseList(body: unknown, key: string): Record<string, unknown>[] {
   return [];
 }
 
-/** Fetch a paginated bulk endpoint, looping limit/offset until the page is short. */
+// Hard wall-clock budget for a whole paginated fetch. Each page already has a per-request timeout, but
+// a large suite under the shared rate limiter (or a starved queue behind a big fan-out) could otherwise
+// loop for many minutes — which hangs the HTTP request (and, in dev, holds the process so the watcher
+// can't restart). Bound the total and fail fast with a clear error instead.
+function paginationBudgetMs(): number {
+  return Number(process.env.TESTRAIL_PAGINATION_BUDGET_MS || 45_000);
+}
+
+/** Fetch a paginated bulk endpoint, looping limit/offset until the page is short or the budget elapses. */
 async function trGetPaginated(
   config: TestRailConfig,
   pathBase: string,
@@ -243,8 +251,12 @@ async function trGetPaginated(
 ): Promise<Record<string, unknown>[]> {
   const out: Record<string, unknown>[] = [];
   let offset = 0;
+  const deadline = Date.now() + paginationBudgetMs();
   // hard stop guards against a misbehaving endpoint that never shortens
   for (let page = 0; page < 200; page++) {
+    if (Date.now() > deadline) {
+      throw new Error(`TestRail bulk fetch exceeded ${paginationBudgetMs()}ms after ${out.length} records; narrow the query or raise TESTRAIL_PAGINATION_BUDGET_MS.`);
+    }
     const path = `${pathBase}&limit=${TR_PAGE_LIMIT}&offset=${offset}`;
     const batch = parseList(await trGet(config, path), key);
     out.push(...batch);
