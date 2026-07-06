@@ -498,10 +498,14 @@ function addPageRef(pageRefs: Map<string, PageRef>, ref: (ConfluenceReference & 
 export function extractConfluencePageRefsFromText(text: string, issueKey: string, sourceType: string): ConfluenceReference[] {
   // Pull Confluence links from Jira descriptions/comments where remote-link metadata is often missing.
   const refs: ConfluenceReference[] = [];
-  const urls = String(text || '').match(/https?:\/\/[^\s"'<>]+/g) || [];
-  for (const rawUrl of urls) {
-    const cleaned = rawUrl.replace(/[),.;]+$/, '');
-    const ref = parseConfluenceReference(cleaned, issueKey, sourceType);
+  const raw = String(text || '');
+  const urlRe = /https?:\/\/[^\s"'<>]+/g;
+  let match: RegExpExecArray | null;
+  while ((match = urlRe.exec(raw)) !== null) {
+    const cleaned = match[0].replace(/[),.;]+$/, '');
+    const precedingContext = raw.slice(Math.max(0, match.index - 100), match.index);
+    const relationship = SPEC_PAGE_TITLE_RE.test(precedingContext) ? 'spec-descendant' : '';
+    const ref = parseConfluenceReference(cleaned, issueKey, sourceType, relationship);
     if (ref) refs.push(ref);
   }
   return refs;
