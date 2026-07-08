@@ -236,6 +236,24 @@ test('marks the run not-production-ready and records a reason when synthesis ret
   assert.match(diagnostics.synthesisFailureReason || '', /no usable acceptance criteria/i);
 });
 
+test('marks the run not-production-ready when no usable raw acceptance criteria exist', async () => {
+  const context = buildBaseContext({
+    acceptanceCriteria: [],
+    acceptanceCriteriaDiagnostics: {
+      allIssueUserStories: [],
+      allIssueCriteria: [],
+      confluenceCriteria: [],
+    },
+  });
+  const finalized = await finalizeAcceptanceCriteria(context);
+  const diagnostics = finalized.acceptanceCriteriaDiagnostics;
+
+  assert.equal(diagnostics.rawAcceptanceCriteriaQuality, 'none');
+  assert.equal(diagnostics.synthesisUsed, false);
+  assert.equal(diagnostics.acceptanceCriteriaNotProductionReady, true);
+  assert.match(diagnostics.acceptanceCriteriaNotProductionReadyReason || '', /none/i);
+});
+
 test('falls back to deterministic quality-gated criteria when synthesis is unavailable', async () => {
   const context = buildBaseContext();
   const finalized = await finalizeAcceptanceCriteria(context);
@@ -1026,6 +1044,52 @@ test('classifies ORB-3310 acceptance criteria by executable surface', () => {
   assert.equal(byId.get('AC-4')?.executionType, 'manual_integration');
   assert.equal(byId.get('AC-5')?.executionType, 'postman');
   assert.match(byId.get('AC-5')?.observableSurface || '', /GET \/v1\/analysis\/\{id\}\/stream/);
+});
+
+test('classifies API-observable enum and schema acceptance criteria as postman, not manual artifacts', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-4000',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The response enum values must include AREA and DASYMETRIC.',
+      },
+      {
+        id: 'AC-2',
+        text: 'The GET /v1/analysis/{id}/stream response must conform to the dataset schema.',
+      },
+      {
+        id: 'AC-3',
+        text: 'Proto orbis-go-proto adds ProportionMethod enum and generated Output.proportion_method field.',
+      },
+      {
+        id: 'AC-4',
+        text: 'The database schema migration creates dasymetric_h3_level_8 and its covering index.',
+      },
+      {
+        id: 'AC-5',
+        text:
+          'The new dasymetric_h3_level_8 reference table must be created with soft-delete columns and a foreign key to adm_area.',
+      },
+    ],
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/stream', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+  });
+
+  const byId = new Map(classifyAcceptanceCriteriaExecution(context).map((item) => [item.criterionId, item]));
+
+  assert.equal(byId.get('AC-1')?.executionType, 'postman');
+  assert.equal(byId.get('AC-2')?.executionType, 'postman');
+  assert.equal(byId.get('AC-3')?.executionType, 'manual_code_review');
+  assert.equal(byId.get('AC-4')?.executionType, 'manual_db');
+  assert.equal(byId.get('AC-5')?.executionType, 'manual_db');
 });
 
 test('classifies web-scope onboarding criteria without analysis API defaults', () => {

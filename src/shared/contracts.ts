@@ -404,7 +404,7 @@ export interface CoverageSummary {
   unmappedCases: string[];
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC. Surfaced as a
   // non-blocking warning so reviewers can see weak/inflated coverage that still "counts" as mapped.
-  unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }>;
+  unsubstantiatedClaims: Array<{ caseId: string; criterionId: string; reason?: 'weak_evidence' | 'execution_mismatch' }>;
   // API-observable, polarity-sensitive ACs that ARE covered, but only by cases of a single polarity —
   // e.g. the "disabled when invalid" branch is tested while the "enabled when valid" branch is not.
   // Manual DB/code/internal verification items are intentionally excluded because they are artifact checks,

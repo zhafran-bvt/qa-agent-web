@@ -535,13 +535,25 @@ Then values match`,
 
 test('trulyUncoveredCriteria separates genuine gaps from weak-only-claimed ACs (so weak claims stay overrideable)', () => {
   // AC-1 nothing claims (true gap); AC-2 is uncovered only because its sole claim was flagged weak.
-  const coverage = { uncoveredCriteria: ['AC-1', 'AC-2'], unsubstantiatedClaims: [{ caseId: 'TC-02', criterionId: 'AC-2' }] };
+  const coverage = {
+    uncoveredCriteria: ['AC-1', 'AC-2'],
+    unsubstantiatedClaims: [{ caseId: 'TC-02', criterionId: 'AC-2', reason: 'weak_evidence' as const }],
+  };
   assert.deepEqual(trulyUncoveredCriteria(coverage), ['AC-1']); // AC-2 excluded → overrideable, not a hard block
   assert.deepEqual(trulyUncoveredCriteria({ uncoveredCriteria: [], unsubstantiatedClaims: [] }), []);
   assert.deepEqual(
     trulyUncoveredCriteria({ uncoveredCriteria: ['AC-9'], unsubstantiatedClaims: [] }),
     ['AC-9']
   );
+});
+
+test('trulyUncoveredCriteria keeps execution-mismatched claims as hard uncovered gaps', () => {
+  const coverage = {
+    uncoveredCriteria: ['AC-API'],
+    unsubstantiatedClaims: [{ caseId: 'TC-1', criterionId: 'AC-API', reason: 'execution_mismatch' as const }],
+  };
+
+  assert.deepEqual(trulyUncoveredCriteria(coverage), ['AC-API']);
 });
 
 test('builds coverage that flags unsubstantiated claims without dropping them silently', () => {
@@ -863,8 +875,9 @@ And the response body should include "id"`,
 
   assert.equal(validation.valid, true);
   assert.match(validation.warnings.join('\n'), /classified as manual_db/);
-  assert.deepEqual(coverage.unsubstantiatedClaims, [{ caseId: 'TC-DB-1', criterionId: 'AC-DB' }]);
+  assert.deepEqual(coverage.unsubstantiatedClaims, [{ caseId: 'TC-DB-1', criterionId: 'AC-DB', reason: 'execution_mismatch' }]);
   assert.deepEqual(coverage.uncoveredCriteria, ['AC-DB']);
+  assert.deepEqual(trulyUncoveredCriteria(coverage), ['AC-DB']);
 });
 
 test('web coverage accepts legacy FE BDD evidence without Postman execution mismatch', () => {

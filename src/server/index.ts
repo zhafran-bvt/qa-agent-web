@@ -1372,18 +1372,18 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
           log.info('context.api_docs_skipped', { jiraKey, reason: relevance.reason });
         }
       }
-      finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan = classifyAcceptanceCriteriaExecution(finalizedContext);
-      finalizedContext.acceptanceCriteriaDiagnostics.cache = {
-        ...(finalizedContext.acceptanceCriteriaDiagnostics.cache || {}),
-        analysisSourceHash,
-        finalizedAcHash: finalizedAcceptanceCriteriaHash(finalizedContext),
-        executionPlanHash: executionPlanHash(finalizedContext),
-        apiContractHash: apiContractHash(finalizedContext),
-        acProvider: acProvider?.name || '',
-        acModel: acProvider?.model || '',
-        cacheHit: false,
-      };
     }
+    finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan = classifyAcceptanceCriteriaExecution(finalizedContext);
+    finalizedContext.acceptanceCriteriaDiagnostics.cache = {
+      ...(finalizedContext.acceptanceCriteriaDiagnostics.cache || {}),
+      analysisSourceHash,
+      finalizedAcHash: finalizedAcceptanceCriteriaHash(finalizedContext),
+      executionPlanHash: executionPlanHash(finalizedContext),
+      apiContractHash: apiContractHash(finalizedContext),
+      acProvider: acProvider?.name || '',
+      acModel: acProvider?.model || '',
+      cacheHit: Boolean(finalizedContext.acceptanceCriteriaDiagnostics.cache?.cacheHit),
+    };
     log.info('context.ac_execution_plan', {
       jiraKey,
       items: (finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan || []).map((item) => ({

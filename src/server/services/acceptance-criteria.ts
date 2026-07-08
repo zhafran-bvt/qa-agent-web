@@ -1089,7 +1089,7 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
       };
     }
 
-    if (/\b(proto|protobuf|orbis-go-proto|generated code|go mod|vendor|enum|message output)\b/i.test(text)) {
+    if (/\b(proto|protobuf|orbis-go-proto|generated code|go mod|vendor|message output)\b/i.test(text)) {
       return {
         criterionId: criterion.id,
         executionType: 'manual_code_review',
@@ -1099,29 +1099,7 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
       };
     }
 
-    if (
-      /\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|sql|schema|dasymetric_h3_level_8)\b/i.test(text)
-    ) {
-      return {
-        criterionId: criterion.id,
-        executionType: 'manual_db',
-        observableSurface: 'Database schema / migration state',
-        reason: 'Criterion verifies database structure or indexes that are not directly API-observable.',
-        coveragePolicy: 'db_verification',
-      };
-    }
-
-    if (/\b(prefetch|repository|processrowsparams|processrowgridworker|worker|concurrent|read-only|lock-free|geth3buildingratio|ratio map)\b/i.test(text)) {
-      return {
-        criterionId: criterion.id,
-        executionType: 'manual_integration',
-        observableSurface: 'Service integration/runtime behavior',
-        reason: 'Criterion verifies internal runtime plumbing; use integration/manual verification unless an endpoint directly exposes it.',
-        coveragePolicy: 'integration_verification',
-      };
-    }
-
-    if (/\b(get\s+\/|stream|sse|dataset metadata|output row|columns?|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
+    if (/\b(get\s+\/|stream|sse|dataset metadata|output row|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
       return {
         criterionId: criterion.id,
         executionType: 'postman',
@@ -1142,6 +1120,29 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
           ? 'Criterion is observable through its referenced API endpoint.'
           : 'Criterion is observable through the submit-analysis request contract.',
         coveragePolicy: 'api_assertion',
+      };
+    }
+
+    if (
+      /\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|dasymetric_h3_level_8)\b/i.test(text) ||
+      (/\b(?:database|db|ddl|migration|table|index|foreign key)\b/i.test(text) && /\b(?:schema|sql)\b/i.test(text))
+    ) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_db',
+        observableSurface: 'Database schema / migration state',
+        reason: 'Criterion verifies database structure or indexes that are not directly API-observable.',
+        coveragePolicy: 'db_verification',
+      };
+    }
+
+    if (/\b(prefetch|repository|processrowsparams|processrowgridworker|worker|concurrent|read-only|lock-free|geth3buildingratio|ratio map)\b/i.test(text)) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_integration',
+        observableSurface: 'Service integration/runtime behavior',
+        reason: 'Criterion verifies internal runtime plumbing; use integration/manual verification unless an endpoint directly exposes it.',
+        coveragePolicy: 'integration_verification',
       };
     }
 
@@ -1262,14 +1263,15 @@ export async function finalizeAcceptanceCriteria(
     }
   }
 
-  // Not-production-ready gate: raw ACs were weak AND synthesis did not produce a usable set (it threw,
-  // returned empty, or was not configured). The final AC set is a reduced/noisy fallback, so generating
-  // against it is unsafe. This drives the analyze-stage block (overridable) and the UI/push guards.
-  const acceptanceCriteriaNotProductionReady = quality.quality === 'weak' && !synthesisUsed;
+  // Not-production-ready gate: raw ACs were not strong (weak or none) AND synthesis did not produce a
+  // usable set (it threw, returned empty, or was not configured). The final AC set is a reduced/noisy
+  // fallback, so generating against it is unsafe. This drives the analyze-stage block (overridable) and
+  // the UI/push guards.
+  const acceptanceCriteriaNotProductionReady = quality.quality !== 'strong' && !synthesisUsed;
   const acceptanceCriteriaNotProductionReadyReason = acceptanceCriteriaNotProductionReady
     ? synthesisFailureReason
-      ? `Raw acceptance criteria were weak and LLM synthesis failed (${synthesisFailureReason}); the final set is a reduced deterministic fallback.`
-      : 'Raw acceptance criteria were weak and LLM synthesis did not produce a usable set; the final set is a reduced deterministic fallback.'
+      ? `Raw acceptance criteria were ${quality.quality} and LLM synthesis failed (${synthesisFailureReason}); the final set is a reduced deterministic fallback.`
+      : `Raw acceptance criteria were ${quality.quality} and LLM synthesis did not produce a usable set; the final set is a reduced deterministic fallback.`
     : '';
 
   finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);

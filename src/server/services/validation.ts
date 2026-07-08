@@ -476,9 +476,13 @@ export function validateCases(testCases: GeneratedLikeCase[], options: Validatio
  */
 export function trulyUncoveredCriteria(coverage: {
   uncoveredCriteria: string[];
-  unsubstantiatedClaims: Array<{ criterionId: string }>;
+  unsubstantiatedClaims: Array<{ criterionId: string; reason?: 'weak_evidence' | 'execution_mismatch' }>;
 }): string[] {
-  const weakClaimed = new Set((coverage.unsubstantiatedClaims || []).map((claim) => claim.criterionId));
+  const weakClaimed = new Set(
+    (coverage.unsubstantiatedClaims || [])
+      .filter((claim) => claim.reason !== 'execution_mismatch')
+      .map((claim) => claim.criterionId)
+  );
   return (coverage.uncoveredCriteria || []).filter((id) => !weakClaimed.has(id));
 }
 
@@ -533,7 +537,7 @@ export function buildCoverage(
   const unmappedCases: string[] = [];
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC — surfaced so coverage
   // isn't silently inflated (e.g. an email-routing AC "covered" by dataset tests that never assert email).
-  const unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }> = [];
+  const unsubstantiatedClaims: Array<{ caseId: string; criterionId: string; reason: 'weak_evidence' | 'execution_mismatch' }> = [];
   // Polarity (positive/negative/edge) of the cases that actually substantiate each AC — used below to
   // detect conditional ACs tested in only one direction. Keyed by criterion id, separate from `entries`
   // so the serialized byCriterion shape (CoverageCriterion) is unchanged.
@@ -555,11 +559,11 @@ export function buildCoverage(
       if (!entry) continue;
       const plannedExecution = executionPlanById.get(criterionId);
       if (scopeType === 'api' && plannedExecution && executionType && plannedExecution.executionType !== executionType) {
-        unsubstantiatedClaims.push({ caseId, criterionId });
+        unsubstantiatedClaims.push({ caseId, criterionId, reason: 'execution_mismatch' });
         continue;
       }
       if (entry.text && !isAcceptanceCriterionSubstantiated(entry.text, evidenceText)) {
-        unsubstantiatedClaims.push({ caseId, criterionId });
+        unsubstantiatedClaims.push({ caseId, criterionId, reason: 'weak_evidence' });
         continue;
       }
       entry.coveredBy.push(caseId);
