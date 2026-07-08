@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { detectCrossSourceConflicts, finalizeAcceptanceCriteria } from '../../src/server/services/acceptance-criteria';
+import {
+  assessAcceptanceCriteriaQuality,
+  classifyAcceptanceCriteriaExecution,
+  detectCrossSourceConflicts,
+  finalizeAcceptanceCriteria,
+} from '../../src/server/services/acceptance-criteria';
 import type { QaContext } from '../../src/shared/contracts';
 
 function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
@@ -81,6 +86,111 @@ function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
   };
 }
 
+test('classifies ORB-3310-style SQL, sample tables, and rendered implementation chunks as weak AC', () => {
+  const assessment = assessAcceptanceCriteriaQuality([
+    {
+      id: 'AC-1',
+      text:
+        '-- unique among live rows only CREATE UNIQUE INDEX uq_dasymetric_h3_level_8_h3_adm ON dasymetric_h3_level_8 (h3_id, adm_area_id) WHERE deleted = false; CREATE INDEX idx_dasymetric_h3_level_8_adm_area_id ON dasymetric_h3_level_8 (adm_area_id) INCLUDE (h3_id, building_ratio) WHERE deleted = false;',
+      source: 'ORB-3310 description',
+    },
+    {
+      id: 'AC-2',
+      text:
+        '0.30 x 1,000 = 300 Expected Output - Dataset After Analysis Table Assumptions: K2z55 (Catchment 1) weight=0.40; kFUkt (Catchment 2) weight=0.20; FJnEy (Catchment 2) weight=0.65.',
+      source: 'ORB-3310 description',
+    },
+    {
+      id: 'AC-3',
+      text:
+        '91.74 2,790 4,036 Implementation (BE - Task 1a / 1b / 1c) Proto (orbis-go-proto): add ProportionMethod enum (AREA=0, DASYMETRIC=1) + proportion_method = 5 to message Output in geospatial/proto/analytics/analytics.proto (NOT GridConfig); regenerate &amp; publish. Migration (DDL only): create dasymetric_h3_level_8.',
+      source: 'ORB-3310 rendered description',
+    },
+    {
+      id: 'AC-4',
+      text: 'Dataset metadata proportion_method = DASYMETRIC.',
+      source: 'ORB-3310 description',
+    },
+  ]);
+
+  assert.equal(assessment.quality, 'weak');
+  assert.equal(assessment.kept.length, 0);
+  assert.equal(assessment.discarded.length, 4);
+  assert.ok(assessment.weakSignals.some((signal) => /noisy implementation fragments/i.test(signal)));
+});
+
+test('keeps clean behavior-focused acceptance criteria strong', () => {
+  const assessment = assessAcceptanceCriteriaQuality([
+    {
+      id: 'AC-1',
+      text: 'POST /v1/analysis must accept an optional output-level proportion_method field and default to AREA when omitted.',
+      source: 'ORB-3310 synthesized',
+    },
+    {
+      id: 'AC-2',
+      text: 'When proportion_method is DASYMETRIC, the result stream must include Dasymetric Weight and renamed proportion columns.',
+      source: 'ORB-3310 synthesized',
+    },
+    {
+      id: 'AC-3',
+      text: 'The service must prefetch distinct adm_area_id values once per dataset before row processing.',
+      source: 'ORB-3310 synthesized',
+    },
+  ]);
+
+  assert.equal(assessment.quality, 'strong');
+  assert.equal(assessment.discarded.length, 0);
+});
+
+test('does not skip synthesis for noisy implementation fragments even when strong-skip is requested', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3310',
+    mainIssue: {
+      key: 'ORB-3310',
+      summary: '[BE] Spatial Analysis - Dasymetric Proportion',
+      description:
+        'Implementation (BE): create dasymetric_h3_level_8 indexes and add proportion_method. Expected Output table contains numeric examples.',
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text:
+          '-- unique among live rows CREATE UNIQUE INDEX uq_dasymetric_h3_level_8_h3_adm ON dasymetric_h3_level_8 (h3_id, adm_area_id) WHERE deleted = false; CREATE INDEX idx_dasymetric_h3_level_8_adm_area_id ON dasymetric_h3_level_8 (adm_area_id) WHERE deleted = false;',
+        source: 'ORB-3310 description',
+      },
+      {
+        id: 'AC-2',
+        text:
+          '0.30 x 1,000 = 300 Expected Output - Dataset After Analysis Table Assumptions: K2z55 weight=0.40; kFUkt weight=0.20; FJnEy weight=0.65.',
+        source: 'ORB-3310 description',
+      },
+    ],
+  });
+  let synthesisCalled = false;
+
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    skipStrongLlmSynthesis: true,
+    synthesizer: async () => {
+      synthesisCalled = true;
+      return {
+        acceptanceCriteria: [
+          {
+            id: 'AC-1',
+            text: 'When proportion_method is DASYMETRIC, the result stream must include Dasymetric Weight and renamed proportion columns.',
+          },
+        ],
+      };
+    },
+  });
+
+  assert.equal(synthesisCalled, true);
+  assert.equal(finalized.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality, 'weak');
+  assert.equal(finalized.acceptanceCriteriaDiagnostics.synthesisUsed, true);
+  assert.deepEqual(finalized.acceptanceCriteria.map((criterion) => criterion.text), [
+    'When proportion_method is DASYMETRIC, the result stream must include Dasymetric Weight and renamed proportion columns.',
+  ]);
+});
+
 test('finalizes weak technical-design criteria into a synthesized canonical set', async () => {
   const context = buildBaseContext();
   const finalized = await finalizeAcceptanceCriteria(context, {
@@ -111,6 +221,19 @@ test('finalizes weak technical-design criteria into a synthesized canonical set'
   assert.equal(finalized.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality, 'weak');
   assert.equal((finalized.acceptanceCriteriaDiagnostics.discardedFragmentExamples || []).some((text) => /└── if/i.test(text)), true);
   assert.match(finalized.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '', /synthesized/i);
+});
+
+test('marks the run not-production-ready and records a reason when synthesis returns an empty set', async () => {
+  const context = buildBaseContext();
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async () => ({ acceptanceCriteria: [], provider: 'deepseek', model: 'deepseek-v4-pro' }),
+  });
+  const diagnostics = finalized.acceptanceCriteriaDiagnostics;
+  // Empty synthesis on weak raw ACs must not silently ship the reduced fallback as if it were fine.
+  assert.equal(diagnostics.synthesisUsed, false);
+  assert.equal(diagnostics.rawAcceptanceCriteriaQuality, 'weak');
+  assert.equal(diagnostics.acceptanceCriteriaNotProductionReady, true);
+  assert.match(diagnostics.synthesisFailureReason || '', /no usable acceptance criteria/i);
 });
 
 test('falls back to deterministic quality-gated criteria when synthesis is unavailable', async () => {
@@ -863,4 +986,80 @@ test('F3: the relevance gate never touches weak-tier excerpts', async () => {
   });
   // The weak fallback excerpt is a separate, lower tier — left untouched, so the check is never called.
   assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'weak');
+});
+
+test('classifies ORB-3310 acceptance criteria by executable surface', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3310',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'POST /v1/analysis accepts optional output-level proportion_method and defaults to AREA when omitted.',
+      },
+      {
+        id: 'AC-2',
+        text: 'Proto orbis-go-proto adds ProportionMethod enum and generated Output.proportion_method field.',
+      },
+      {
+        id: 'AC-3',
+        text: 'Migration creates dasymetric_h3_level_8 table and unique covering indexes.',
+      },
+      {
+        id: 'AC-4',
+        text: 'Repository prefetches distinct adm_area_id values before processRowGridWorker builds its ratio map.',
+      },
+      {
+        id: 'AC-5',
+        text: 'GET /v1/analysis/{id}/stream returns Dasymetric Weight, renamed proportion columns, and metadata proportion_method.',
+      },
+    ],
+  });
+
+  const plan = classifyAcceptanceCriteriaExecution(context);
+  const byId = new Map(plan.map((item) => [item.criterionId, item]));
+
+  assert.equal(byId.get('AC-1')?.executionType, 'postman');
+  assert.match(byId.get('AC-1')?.observableSurface || '', /POST \/v1\/analysis/);
+  assert.equal(byId.get('AC-2')?.executionType, 'manual_code_review');
+  assert.equal(byId.get('AC-3')?.executionType, 'manual_db');
+  assert.equal(byId.get('AC-4')?.executionType, 'manual_integration');
+  assert.equal(byId.get('AC-5')?.executionType, 'postman');
+  assert.match(byId.get('AC-5')?.observableSurface || '', /GET \/v1\/analysis\/\{id\}\/stream/);
+});
+
+test('classifies web-scope onboarding criteria without analysis API defaults', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3218',
+    epic: 'Miscellaneous',
+    constraints: { feOnly: true, beAlreadyTested: false, scopeType: 'web', apiContractRelevant: false },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text:
+          'On app load, the frontend must fetch onboarding modules and onboarding progress in parallel using GET /onboarding/modules and GET /onboarding/progress, then store both responses in global state before deciding what onboarding UI to show.',
+      },
+      {
+        id: 'AC-4',
+        text:
+          'The onboarding module walkthrough content must be defined on the frontend in a local module definition file, including step content and total step count derived locally; the backend must not be responsible for step content, step ordering, or total_steps.',
+      },
+      {
+        id: 'AC-8',
+        text:
+          'PUT /onboarding/progress/{module_id} must upsert the user’s progress for that module using the request body fields current_step, status, and walkthrough_version.',
+      },
+    ],
+  });
+
+  const plan = classifyAcceptanceCriteriaExecution(context);
+  const byId = new Map(plan.map((item) => [item.criterionId, item]));
+
+  assert.equal(plan.some((item) => item.executionType === 'postman'), false);
+  assert.equal(plan.some((item) => item.observableSurface.includes('/v1/analysis')), false);
+  assert.equal(byId.get('AC-1')?.executionType, 'manual_integration');
+  assert.match(byId.get('AC-1')?.observableSurface || '', /GET \/onboarding\/modules/);
+  assert.equal(byId.get('AC-4')?.executionType, 'manual_integration');
+  assert.equal(byId.get('AC-8')?.executionType, 'manual_integration');
+  assert.match(byId.get('AC-8')?.observableSurface || '', /PUT \/onboarding\/progress\/\{module_id\}/);
 });

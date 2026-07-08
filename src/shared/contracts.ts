@@ -92,6 +92,7 @@ export interface LinkedIssueSummary {
   linkSummary?: string;
   fetchError?: string;
   classification?: string;
+  labels?: string[];
 }
 
 export interface ConfluencePageSourceRef {
@@ -220,6 +221,16 @@ export interface CrossSourceConflict {
   sharedSubjects: string[];
 }
 
+export type TestExecutionType = 'postman' | 'manual_db' | 'manual_code_review' | 'manual_integration' | 'manual_other';
+
+export interface AcceptanceCriteriaExecutionPlanItem {
+  criterionId: string;
+  executionType: TestExecutionType;
+  observableSurface: string;
+  reason: string;
+  coveragePolicy: 'api_assertion' | 'db_verification' | 'code_review' | 'integration_verification' | 'manual_verification';
+}
+
 export interface AcceptanceCriteriaDiagnostics {
   allIssueUserStories: ScopedItem[];
   allIssueCriteria: ScopedItem[];
@@ -238,12 +249,21 @@ export interface AcceptanceCriteriaDiagnostics {
   scopeAnchorResolvedFromChain?: boolean;
   synthesisUsed?: boolean;
   synthesisReason?: string;
+  // When synthesis was attempted but threw, the reason (surfaced so a synthesisUsed=false run explains
+  // itself without grepping logs). Empty when synthesis succeeded or was not attempted.
+  synthesisFailureReason?: string;
+  // True when the raw acceptance criteria were weak AND synthesis did not produce a usable set — the run
+  // fell back to a reduced/noisy AC set, so generating against it is not production-ready. Drives the
+  // analyze-stage block (overridable) and the UI/push guards.
+  acceptanceCriteriaNotProductionReady?: boolean;
+  acceptanceCriteriaNotProductionReadyReason?: string;
   rawAcceptanceCriteriaQuality?: 'none' | 'weak' | 'strong';
   rawAcceptanceCriteriaWeakSignals?: string[];
   discardedFragmentCount?: number;
   discardedFragmentExamples?: string[];
   // Opposite-polarity contradictions between the synthesized criteria and their source corpora (F1).
   crossSourceConflicts?: CrossSourceConflict[];
+  acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
 }
 
 export interface QaContext {
@@ -307,7 +327,7 @@ export interface GeneratedTestCase {
   id: string;
   title: string;
   type: string;
-  executionType?: 'postman' | 'manual_db' | 'manual_other';
+  executionType?: TestExecutionType;
   caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference: string;
   preconditions: string;
@@ -375,10 +395,10 @@ export interface CoverageSummary {
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC. Surfaced as a
   // non-blocking warning so reviewers can see weak/inflated coverage that still "counts" as mapped.
   unsubstantiatedClaims: Array<{ caseId: string; criterionId: string }>;
-  // Conditional ACs (when/if/disabled/enabled/…) that ARE covered, but only by cases of a single
-  // polarity — e.g. the "disabled when invalid" branch is tested while the "enabled when valid" branch
-  // is not. A green coverage number can hide this. Soft, overrideable signal (acknowledge-to-override),
-  // not a hard block, because some ACs are genuinely one-directional.
+  // API-observable, polarity-sensitive ACs that ARE covered, but only by cases of a single polarity —
+  // e.g. the "disabled when invalid" branch is tested while the "enabled when valid" branch is not.
+  // Manual DB/code/internal verification items are intentionally excluded because they are artifact checks,
+  // not behavior matrices. Soft, overrideable signal (acknowledge-to-override), not a hard block by itself.
   singlePolarityCriteria: Array<{
     criterionId: string;
     have: Array<'positive' | 'negative' | 'edge'>;
@@ -386,10 +406,63 @@ export interface CoverageSummary {
   }>;
 }
 
+export type GenerationStepName =
+  | 'initial_generation'
+  | 'scenario_plan_repair'
+  | 'coverage_repair'
+  | 'polarity_repair'
+  | 'validation_repair'
+  | 'compaction';
+
+export interface GenerationStepTiming {
+  step: GenerationStepName;
+  provider: string;
+  model: string;
+  durationMs: number;
+  attempted: boolean;
+  changedCaseCount?: number;
+  error?: string;
+}
+
 export interface GenerateRequest {
   context: QaContext;
   confidencePermissionApproved: boolean;
   manualScopeOverrideReason?: string;
+  // Explicit override for the not-production-ready block (weak raw ACs + failed/empty synthesis). Without
+  // it, generation is refused so the model cannot produce cases against a reduced/noisy AC set.
+  acceptanceCriteriaOverrideApproved?: boolean;
+}
+
+export interface GenerateQualityEvaluation {
+  mode: 'deepseek_quality_first' | 'quality_baseline';
+  provider: string;
+  model: string;
+  durationMs: number;
+  acceptanceCriteriaCount: number;
+  testCaseCount: number;
+  coverageEnforced: boolean;
+  coveredCriteria: number;
+  totalCriteria: number;
+  uncoveredCriteria: string[];
+  weakCoverageClaims: number;
+  singlePolarityWarnings: number;
+  singlePolarityWarningLimit: number;
+  validationWarningCount: number;
+  broadCoverageWarnings: number;
+  broadCoverageWarningLimit: number;
+  duplicateCaseWarnings: number;
+  endpointAlignmentWarnings: number;
+  executionAlignmentWarnings: number;
+  executionTypeMismatchWarnings: number;
+  invalidCaseIds: string[];
+  minimumFocusedCaseCount: number;
+  tinyBroadSuite: boolean;
+  rawAcceptanceCriteriaQuality: string;
+  synthesisUsed: boolean;
+  noisyRawAcceptanceCriteria: boolean;
+  falseGreenCoverageRisk: boolean;
+  stepTimings?: GenerationStepTiming[];
+  qualityGate: 'pass' | 'warn' | 'fail';
 }
 
 export interface GenerateResponse {
@@ -402,6 +475,7 @@ export interface GenerateResponse {
   provider: string;
   model: string;
   pendingReplacement: boolean;
+  qualityEvaluation: GenerateQualityEvaluation;
 }
 
 export interface ValidateRequest {
@@ -417,6 +491,7 @@ export interface ValidateRequest {
   // Lean copy of the matched API endpoints so the push/preflight gates can flag invented apiSpec
   // paths without shipping the whole context. Sourced from context.apiContract.matchedEndpoints.
   matchedEndpoints?: ApiContractEndpoint[];
+  acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
 }
 
 export interface ValidateResponse {
@@ -438,6 +513,11 @@ export interface PushRequest extends ValidateRequest {
   // echoes them here (with the ack) so the push gate can enforce acknowledgement, mirroring matchedEndpoints.
   crossSourceConflicts?: CrossSourceConflict[];
   crossSourceConflictsAcknowledged?: boolean;
+  // Backup safety net: the generation quality gate is recomputed at push (when context is present). A
+  // qualityGate=fail blocks the push unless the reviewer explicitly acknowledges it with a reason, so a
+  // degraded run cannot silently reach TestRail even if the UI was bypassed or stale cases were submitted.
+  qualityGateAcknowledged?: boolean;
+  qualityGateAcknowledgedReason?: string;
 }
 
 export type DuplicateCaseDecision = 'include' | 'exclude' | 'review';
@@ -535,6 +615,9 @@ export interface WorkflowHistoryDetail {
   testCases: GeneratedTestCase[];
   validation: ValidationEntry[];
   coverage: CoverageSummary | null;
+  qualityEvaluation?: GenerateQualityEvaluation | null;
+  durationMs?: number | null;
+  stepTimings?: GenerationStepTiming[];
   provider?: string;
   model?: string;
   push?: {

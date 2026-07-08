@@ -76,7 +76,10 @@ Create an Atlassian OAuth 3LO app and set its callback to `http://localhost:5180
 | `ATLASSIAN_REDIRECT_URI` | prod | Must match the OAuth callback URL |
 | `ATLASSIAN_SCOPES` | prod | e.g. `read:jira-work read:confluence-content.all read:confluence-space.summary offline_access` |
 | `DATABASE_URL` | prod | Enables Postgres persistence; dev falls back to `file+memory` if init fails |
-| `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` | ✅ (≥1) | Primary / fallback LLM. `OPENAI_MODEL`, `DEEPSEEK_MODEL` optional overrides |
+| `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | ✅ (≥1) | OpenAI is the default primary LLM (`gpt-5.4-mini`) for AC synthesis and BDD generation, with DeepSeek as fallback (`deepseek-v4-pro`). A DeepSeek evaluation found it under-covers and emits invalid case shapes on this repo's structured workflow, so it's fallback/opt-in only. Override order with `LLM_PRIMARY_PROVIDER=deepseek`; override models with `DEEPSEEK_MODEL` / `OPENAI_MODEL` |
+| `LLM_RETRY_ATTEMPTS` / `LLM_MAX_OUTPUT_TOKENS_*` | optional | Defaults to one same-provider retry for empty/malformed/truncated JSON. Per-task output caps are available for `GENERATION`, `SYNTHESIS`, `TRANSLATION`, `DUPLICATE_REVIEW`, `EXCERPT_RELEVANCE`, and `ENDPOINT_SELECTION` |
+| `LLM_DEEPSEEK_FAST_GENERATION` | optional | Defaults to `false` (full-quality generation: scenario-plan + polarity repair run). Set to `true` to skip those repair passes on DeepSeek to reduce latency — at the cost of coverage, so use only for deliberate speed experiments |
+| `LLM_DEEPSEEK_FAST_AC` | optional | Defaults to `false`. Keep quality-first AC synthesis on for DeepSeek; set to `true` only for deliberate latency experiments after deterministic AC quality gates pass |
 | `API_DOCS_URL` | optional | Default API documentation URL for API/hybrid ticket analysis; per-analysis override is available in the UI |
 | `TESTRAIL_BASE_URL` / `_USER` / `_API_KEY` | for push | TestRail credentials. `TESTRAIL_SECTION_ID` optional default |
 | `TESTRAIL_PROJECT_ID` | recommended for push | Enables the pre-push duplicate check that searches existing TestRail cases by Jira ref. Push still works without it, but duplicate review is skipped |

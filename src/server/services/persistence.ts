@@ -3,6 +3,8 @@ import path from 'node:path';
 import { Pool } from 'pg';
 import type {
   CoverageSummary,
+  GenerateQualityEvaluation,
+  GenerationStepTiming,
   GeneratedTestCase,
   PushCaseResult,
   QaContext,
@@ -64,6 +66,9 @@ interface StoredGenerationRunInput {
   coverage: CoverageSummary;
   coverageEnforced: boolean;
   manualScopeOverride: boolean;
+  qualityEvaluation?: GenerateQualityEvaluation;
+  durationMs?: number;
+  stepTimings?: GenerationStepTiming[];
 }
 
 interface StoredPushRunInput {
@@ -879,9 +884,10 @@ class PostgresPersistence implements Persistence {
   async createGeneratedRun(input: StoredGenerationRunInput): Promise<string> {
     const result = await this.pool.query(
       `INSERT INTO generated_runs (
-         analysis_run_id, jira_key, user_name, provider, model, validation_json, coverage_json, coverage_enforced, manual_scope_override
+         analysis_run_id, jira_key, user_name, provider, model, validation_json, coverage_json, coverage_enforced, manual_scope_override,
+         quality_json, step_timings_json, duration_ms
        )
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb, $11::jsonb, $12)
        RETURNING id`,
       [
         input.analysisRunId,
@@ -893,6 +899,9 @@ class PostgresPersistence implements Persistence {
         JSON.stringify(input.coverage),
         input.coverageEnforced,
         input.manualScopeOverride,
+        input.qualityEvaluation ? JSON.stringify(input.qualityEvaluation) : null,
+        JSON.stringify(input.stepTimings || []),
+        input.durationMs ?? null,
       ]
     );
     const generatedRunId = String(result.rows[0].id);
@@ -1038,6 +1047,7 @@ class PostgresPersistence implements Persistence {
   private async getGeneratedRun(id: string): Promise<WorkflowHistoryDetail | null> {
     const result = await this.pool.query(
       `SELECT gr.id, gr.jira_key, gr.user_name, gr.created_at, gr.provider, gr.model, gr.validation_json, gr.coverage_json,
+              gr.quality_json, gr.step_timings_json, gr.duration_ms,
               ar.context_json
        FROM generated_runs gr
        LEFT JOIN analysis_runs ar ON ar.id = gr.analysis_run_id
@@ -1057,6 +1067,9 @@ class PostgresPersistence implements Persistence {
       testCases,
       validation: row.validation_json || [],
       coverage: row.coverage_json || null,
+      qualityEvaluation: row.quality_json || null,
+      durationMs: row.duration_ms ?? null,
+      stepTimings: row.step_timings_json || [],
       provider: row.provider || undefined,
       model: row.model || undefined,
       push: null,
@@ -1067,6 +1080,7 @@ class PostgresPersistence implements Persistence {
     const result = await this.pool.query(
       `SELECT pr.id, pr.jira_key, pr.user_name, pr.created_at, pr.section_id, pr.summary_json,
               gr.id AS generated_run_id, gr.provider, gr.model, gr.validation_json, gr.coverage_json,
+              gr.quality_json, gr.step_timings_json, gr.duration_ms,
               ar.context_json
        FROM push_runs pr
        LEFT JOIN generated_runs gr ON gr.id = pr.generated_run_id
@@ -1088,6 +1102,9 @@ class PostgresPersistence implements Persistence {
       testCases,
       validation: row.validation_json || [],
       coverage: row.coverage_json || null,
+      qualityEvaluation: row.quality_json || null,
+      durationMs: row.duration_ms ?? null,
+      stepTimings: row.step_timings_json || [],
       provider: row.provider || undefined,
       model: row.model || undefined,
       push: {

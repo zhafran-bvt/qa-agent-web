@@ -2,19 +2,275 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildGenerationPromptContext,
+  buildChatCompletionBody,
   buildDeterministicDuplicateRecommendations,
   buildScopePriorityContext,
+  buildScenarioPlan,
+  canonicalizeApiSpecPaths,
+  configuredLlmProviders,
   findAcceptanceCriteriaArray,
   findCaseArray,
+  getMissingScenarioPlanItems,
+  getUnderGranularAcceptanceCriteria,
   getSinglePolarityGaps,
   isFallbackError,
+  isRetryableLlmContentError,
+  maxOutputTokensForTask,
+  mergeGeneratedCasesWithQualityGate,
+  mergeRepairedCases,
+  normalizeAssertionList,
   normalizeBddScenario,
   normalizeCase,
   normalizeJiraReference,
   normalizeScopeSnapshotTranslation,
   normalizeTextList,
+  orderLlmProviders,
   providerContent,
+  providerBehavior,
+  allowLlmFallback,
+  usesFastAcceptanceCriteriaPath,
+  usesFastGenerationPath,
 } from '../../src/server/services/llm';
+
+test('orders OpenAI first by default while preserving fallback providers', () => {
+  const providers = orderLlmProviders([
+    { name: 'deepseek', model: 'deepseek-v4-pro' },
+    { name: 'openai', model: 'gpt-5.4-mini' },
+  ]);
+
+  assert.deepEqual(providers.map((provider) => provider.name), ['openai', 'deepseek']);
+});
+
+test('orders DeepSeek first when LLM_PRIMARY_PROVIDER requests it', () => {
+  const providers = orderLlmProviders(
+    [
+      { name: 'openai', model: 'gpt-5.4-mini' },
+      { name: 'deepseek', model: 'deepseek-v4-pro' },
+    ],
+    'deepseek'
+  );
+
+  assert.deepEqual(providers.map((provider) => provider.name), ['deepseek', 'openai']);
+});
+
+test('configured providers remove disabled providers and skip fallback when disabled', () => {
+  const previousPrimary = process.env.LLM_PRIMARY_PROVIDER;
+  const previousDisabled = process.env.LLM_DISABLED_PROVIDERS;
+  const previousFallback = process.env.LLM_ALLOW_FALLBACK;
+  try {
+    process.env.LLM_PRIMARY_PROVIDER = 'deepseek';
+    process.env.LLM_DISABLED_PROVIDERS = 'openai';
+    process.env.LLM_ALLOW_FALLBACK = 'false';
+
+    const providers = configuredLlmProviders([
+      { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'openai-key', model: 'gpt-5.4-mini' },
+      { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'deepseek-key', model: 'deepseek-v4-pro' },
+    ]);
+
+    assert.equal(allowLlmFallback(), false);
+    assert.deepEqual(providers.map((provider) => provider.name), ['deepseek']);
+  } finally {
+    if (previousPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+    else process.env.LLM_PRIMARY_PROVIDER = previousPrimary;
+    if (previousDisabled === undefined) delete process.env.LLM_DISABLED_PROVIDERS;
+    else process.env.LLM_DISABLED_PROVIDERS = previousDisabled;
+    if (previousFallback === undefined) delete process.env.LLM_ALLOW_FALLBACK;
+    else process.env.LLM_ALLOW_FALLBACK = previousFallback;
+  }
+});
+
+test('configured providers do not use fallback by default', () => {
+  const previousPrimary = process.env.LLM_PRIMARY_PROVIDER;
+  const previousDisabled = process.env.LLM_DISABLED_PROVIDERS;
+  const previousFallback = process.env.LLM_ALLOW_FALLBACK;
+  try {
+    process.env.LLM_PRIMARY_PROVIDER = 'deepseek';
+    delete process.env.LLM_DISABLED_PROVIDERS;
+    delete process.env.LLM_ALLOW_FALLBACK;
+
+    const providers = configuredLlmProviders([
+      { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'openai-key', model: 'gpt-5.4-mini' },
+      { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'deepseek-key', model: 'deepseek-v4-pro' },
+    ]);
+
+    assert.equal(allowLlmFallback(), false);
+    assert.deepEqual(providers.map((provider) => provider.name), ['deepseek']);
+  } finally {
+    if (previousPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+    else process.env.LLM_PRIMARY_PROVIDER = previousPrimary;
+    if (previousDisabled === undefined) delete process.env.LLM_DISABLED_PROVIDERS;
+    else process.env.LLM_DISABLED_PROVIDERS = previousDisabled;
+    if (previousFallback === undefined) delete process.env.LLM_ALLOW_FALLBACK;
+    else process.env.LLM_ALLOW_FALLBACK = previousFallback;
+  }
+});
+
+test('configured providers keep ordered fallback only when explicitly allowed', () => {
+  const previousPrimary = process.env.LLM_PRIMARY_PROVIDER;
+  const previousDisabled = process.env.LLM_DISABLED_PROVIDERS;
+  const previousFallback = process.env.LLM_ALLOW_FALLBACK;
+  try {
+    process.env.LLM_PRIMARY_PROVIDER = 'deepseek';
+    delete process.env.LLM_DISABLED_PROVIDERS;
+    process.env.LLM_ALLOW_FALLBACK = 'true';
+
+    const providers = configuredLlmProviders([
+      { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'openai-key', model: 'gpt-5.4-mini' },
+      { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'deepseek-key', model: 'deepseek-v4-pro' },
+    ]);
+
+    assert.equal(allowLlmFallback(), true);
+    assert.deepEqual(providers.map((provider) => provider.name), ['deepseek', 'openai']);
+  } finally {
+    if (previousPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+    else process.env.LLM_PRIMARY_PROVIDER = previousPrimary;
+    if (previousDisabled === undefined) delete process.env.LLM_DISABLED_PROVIDERS;
+    else process.env.LLM_DISABLED_PROVIDERS = previousDisabled;
+    if (previousFallback === undefined) delete process.env.LLM_ALLOW_FALLBACK;
+    else process.env.LLM_ALLOW_FALLBACK = previousFallback;
+  }
+});
+
+test('DeepSeek request bodies include JSON contract and task max tokens', () => {
+  const body = buildChatCompletionBody(
+    { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'key', model: 'deepseek-v4-pro' },
+    'generation',
+    {
+      model: 'deepseek-v4-pro',
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: 'Return strict JSON only.' },
+        { role: 'user', content: '{"ticketKey":"ORB-1"}' },
+      ],
+    }
+  );
+
+  assert.equal(body.max_tokens, maxOutputTokensForTask('generation'));
+  assert.match(String((body.messages as any[])[0].content), /Return exactly one valid JSON object/);
+  assert.match(String((body.messages as any[])[0].content), /Return strict JSON only/);
+});
+
+test('OpenAI request bodies keep prompts unchanged and use max_completion_tokens', () => {
+  const body = buildChatCompletionBody(
+    { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'key', model: 'gpt-5.4-mini' },
+    'translation',
+    {
+      model: 'gpt-5.4-mini',
+      messages: [{ role: 'system', content: 'Translate scope.' }],
+    }
+  );
+
+  assert.equal(body.max_completion_tokens, maxOutputTokensForTask('translation'));
+  assert.equal(body.max_tokens, undefined);
+  assert.equal(String((body.messages as any[])[0].content), 'Translate scope.');
+});
+
+test('provider behavior isolates model-specific generation hints from validation', () => {
+  const deepseek = providerBehavior({ name: 'deepseek' });
+  const openai = providerBehavior({ name: 'openai' });
+
+  assert.equal(deepseek.tokenParameter, 'max_tokens');
+  assert.match(deepseek.jsonContract, /Return exactly one valid JSON object/);
+  assert.match(deepseek.caseDirectives.join('\n'), /non-duplicative/);
+  assert.match(deepseek.caseDirectives.join('\n'), /apiSpec\.assertions must be an array of plain strings/);
+
+  assert.equal(openai.tokenParameter, 'max_completion_tokens');
+  assert.equal(openai.jsonContract, '');
+  assert.match(openai.caseDirectives.join('\n'), /DB\/migration\/index ACs must be manual_db/);
+  assert.doesNotMatch(openai.caseDirectives.join('\n'), /non-duplicative/);
+});
+
+test('provider behavior exposes provider-specific repair attempt knobs', () => {
+  const previousScenarioAttempts = process.env.LLM_DEEPSEEK_SCENARIO_REPAIR_ATTEMPTS;
+  const previousValidationAttempts = process.env.LLM_OPENAI_VALIDATION_REPAIR_ATTEMPTS;
+  try {
+    process.env.LLM_DEEPSEEK_SCENARIO_REPAIR_ATTEMPTS = '1';
+    process.env.LLM_OPENAI_VALIDATION_REPAIR_ATTEMPTS = '0';
+
+    assert.equal(providerBehavior({ name: 'deepseek' }).scenarioPlanRepairMaxAttempts, 1);
+    assert.equal(providerBehavior({ name: 'openai' }).validationRepairMaxAttempts, 0);
+  } finally {
+    if (previousScenarioAttempts === undefined) delete process.env.LLM_DEEPSEEK_SCENARIO_REPAIR_ATTEMPTS;
+    else process.env.LLM_DEEPSEEK_SCENARIO_REPAIR_ATTEMPTS = previousScenarioAttempts;
+    if (previousValidationAttempts === undefined) delete process.env.LLM_OPENAI_VALIDATION_REPAIR_ATTEMPTS;
+    else process.env.LLM_OPENAI_VALIDATION_REPAIR_ATTEMPTS = previousValidationAttempts;
+  }
+});
+
+test('fast generation path is off by default so full-quality generation runs', () => {
+  const previous = process.env.LLM_DEEPSEEK_FAST_GENERATION;
+  delete process.env.LLM_DEEPSEEK_FAST_GENERATION;
+  try {
+    assert.equal(usesFastGenerationPath({ name: 'deepseek' }), false);
+    assert.equal(usesFastGenerationPath({ name: 'openai' }), false);
+  } finally {
+    if (previous === undefined) delete process.env.LLM_DEEPSEEK_FAST_GENERATION;
+    else process.env.LLM_DEEPSEEK_FAST_GENERATION = previous;
+  }
+});
+
+test('DeepSeek fast generation is opt-in via LLM_DEEPSEEK_FAST_GENERATION=true', () => {
+  const previous = process.env.LLM_DEEPSEEK_FAST_GENERATION;
+  process.env.LLM_DEEPSEEK_FAST_GENERATION = 'true';
+  try {
+    assert.equal(usesFastGenerationPath({ name: 'deepseek' }), true);
+    assert.equal(usesFastGenerationPath({ name: 'openai' }), false);
+  } finally {
+    if (previous === undefined) delete process.env.LLM_DEEPSEEK_FAST_GENERATION;
+    else process.env.LLM_DEEPSEEK_FAST_GENERATION = previous;
+  }
+});
+
+test('DeepSeek fast acceptance-criteria path is disabled by default when primary', () => {
+  const previous = process.env.LLM_DEEPSEEK_FAST_AC;
+  delete process.env.LLM_DEEPSEEK_FAST_AC;
+  try {
+    assert.equal(
+      usesFastAcceptanceCriteriaPath({
+        providers: [
+          { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'key', model: 'deepseek-v4-pro' },
+          { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'key', model: 'gpt-5.4-mini' },
+        ],
+      }),
+      false
+    );
+  } finally {
+    if (previous === undefined) delete process.env.LLM_DEEPSEEK_FAST_AC;
+    else process.env.LLM_DEEPSEEK_FAST_AC = previous;
+  }
+});
+
+test('fast acceptance-criteria path stays off for OpenAI primary and requires explicit DeepSeek opt-in', () => {
+  const previousFastAc = process.env.LLM_DEEPSEEK_FAST_AC;
+  const previousPrimary = process.env.LLM_PRIMARY_PROVIDER;
+  try {
+    process.env.LLM_PRIMARY_PROVIDER = 'openai';
+    assert.equal(
+      usesFastAcceptanceCriteriaPath({
+        providers: [
+          { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'key', model: 'deepseek-v4-pro' },
+          { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'key', model: 'gpt-5.4-mini' },
+        ],
+      }),
+      false
+    );
+
+    process.env.LLM_PRIMARY_PROVIDER = 'deepseek';
+    process.env.LLM_DEEPSEEK_FAST_AC = 'true';
+    assert.equal(
+      usesFastAcceptanceCriteriaPath({
+        providers: [{ name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'key', model: 'deepseek-v4-pro' }],
+      }),
+      true
+    );
+  } finally {
+    if (previousFastAc === undefined) delete process.env.LLM_DEEPSEEK_FAST_AC;
+    else process.env.LLM_DEEPSEEK_FAST_AC = previousFastAc;
+    if (previousPrimary === undefined) delete process.env.LLM_PRIMARY_PROVIDER;
+    else process.env.LLM_PRIMARY_PROVIDER = previousPrimary;
+  }
+});
 
 test('providerContent throws on truncated responses (finish_reason=length) but returns normal content', () => {
   // BUG-09: a truncated case array must not be silently sliced into a partial-but-valid array.
@@ -27,6 +283,17 @@ test('providerContent throws on truncated responses (finish_reason=length) but r
     '{"testCases":[]}'
   );
   assert.equal(providerContent({ choices: [{ message: {} }] }, 'generation'), '');
+});
+
+test('truncated LLM content is retryable and eligible for fallback', () => {
+  let error: unknown;
+  try {
+    providerContent({ choices: [{ finish_reason: 'length', message: { content: '{"testCases":[{"id":"TC-01"' } }] }, 'generation');
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(isRetryableLlmContentError(error), true);
+  assert.equal(isFallbackError(error as Error), true);
 });
 
 test('finds generated cases from common LLM JSON wrappers', () => {
@@ -551,4 +818,416 @@ test('BUG-10: getSinglePolarityGaps reports no gap once both polarities are cove
   ];
   const gaps = getSinglePolarityGaps(context as any, testCases as any);
   assert.equal(gaps.length, 0);
+});
+
+test('scenario plan derives generic, domain-neutral families mapped to real criteria', () => {
+  const context = {
+    ticketKey: 'ORB-1000',
+    epic: 'Platform',
+    mainIssue: {
+      key: 'ORB-1000',
+      summary: '[BE] Add an optional output method to the analysis endpoint',
+      description: [
+        'The endpoint accepts an optional method field. Omitting it preserves the existing default behavior for current callers.',
+        'An explicit opt-in method value changes the output as specified.',
+        'Invalid method values are rejected by validation.',
+        'Re-running an existing analysis without the new field is unchanged.',
+        'The method also applies to a secondary surface as well as the primary one.',
+        'An alternate output format also supports the method.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The optional method defaults to existing behavior when omitted and supports an explicit value.' },
+      { id: 'AC-2', text: 'Invalid method values are rejected and the alternate output format is supported.' },
+    ],
+    confluencePages: [],
+  };
+  const plan = buildScenarioPlan(context as any);
+  const titles = plan.map((item) => item.title).join('\n');
+
+  assert.match(titles, /defaults to existing behavior/i);
+  assert.match(titles, /explicit opt-in method/i);
+  assert.match(titles, /Invalid method value/i);
+  assert.match(titles, /Re-running an existing analysis/i);
+  assert.match(titles, /Secondary surface/i);
+  assert.match(titles, /Alternate output format/i);
+  // Every planned item maps to a genuinely-matching criterion — no forced first-AC fallback.
+  assert.ok(plan.every((item) => item.sourceCriterionIds.length > 0));
+});
+
+test('scenario plan drops a family that matches no acceptance criterion (no forced first-AC mapping)', () => {
+  // The source fires the invalid-value family, but no AC mentions validation/rejection or any generic
+  // method vocabulary — so matchingCriterionIds returns [] and the family is dropped, not force-credited
+  // to an arbitrary first criterion (the old slice(0,1) fallback).
+  const context = {
+    ticketKey: 'ORB-1001',
+    epic: 'Auth',
+    mainIssue: {
+      key: 'ORB-1001',
+      summary: '[BE] Login',
+      description: 'Invalid method values are rejected by validation. Users can also sign in and sign out.',
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'A user can sign in with correct credentials.' },
+      { id: 'AC-2', text: 'A signed-in user can sign out and see a goodbye screen.' },
+    ],
+    confluencePages: [],
+  };
+  const plan = buildScenarioPlan(context as any);
+  assert.equal(plan.some((item) => item.id === 'SP-INVALID-VALUE'), false);
+});
+
+test('one generic case does not cover distinct scenario families', () => {
+  const context = {
+    ticketKey: 'ORB-1000',
+    epic: 'Platform',
+    mainIssue: {
+      key: 'ORB-1000',
+      description: [
+        'Omitting the optional method preserves the existing default behavior.',
+        'Invalid method values are rejected by validation.',
+        'The method also applies to a secondary surface as well as the primary one.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'The optional method defaults to existing behavior and rejects invalid values.' }],
+    confluencePages: [],
+  };
+  const plan = buildScenarioPlan(context as any);
+  const oneCase = [
+    {
+      id: 'TC-1',
+      title: 'Submit analysis without the optional method uses the default',
+      bddScenario: 'Given the method is omitted When the analysis runs Then the existing default behavior is preserved',
+      evidence: { coverageNote: '' },
+      sourceScope: [],
+      coversAcceptanceCriteria: ['AC-1'],
+    },
+  ];
+  const gaps = getMissingScenarioPlanItems(plan, oneCase as any);
+  assert.ok(gaps.some((gap) => /Invalid method value/i.test(gap.title)));
+  assert.ok(gaps.some((gap) => /Secondary surface/i.test(gap.title)));
+});
+
+test('scenario plan clears once each fired family has a covering case', () => {
+  const context = {
+    ticketKey: 'ORB-1000',
+    epic: 'Platform',
+    mainIssue: {
+      key: 'ORB-1000',
+      description: [
+        'Omitting the optional method preserves the existing default behavior.',
+        'Invalid method values are rejected by validation.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'The optional method defaults to existing behavior and rejects invalid values.' }],
+    confluencePages: [],
+  };
+  const plan = buildScenarioPlan(context as any);
+  const cases = [
+    {
+      title: 'Default: submit without the optional method',
+      bddScenario: 'Given the method is omitted Then the default behavior is preserved',
+      evidence: { coverageNote: '' },
+      sourceScope: [],
+    },
+    {
+      title: 'Invalid: an unsupported method value is rejected',
+      bddScenario: 'Given an invalid method value When submitted Then validation rejects it',
+      evidence: { coverageNote: '' },
+      sourceScope: [],
+    },
+  ];
+  assert.deepEqual(getMissingScenarioPlanItems(plan, cases as any), []);
+});
+
+test('scenario plan respects the 14-item cap', () => {
+  const context = {
+    ticketKey: 'ORB-9000',
+    epic: 'Platform',
+    mainIssue: {
+      key: 'ORB-9000',
+      description: [
+        'Omitting the optional method preserves existing callers and default behavior.',
+        'An explicit opt-in method value changes the output.',
+        'The calculated output uses the specified weighting formula.',
+        'Multiple entities produce one row per entity.',
+        'A known reference with no matching rows produces a zero result.',
+        'Missing reference data triggers the documented fallback behavior.',
+        'Re-running an existing analysis is unchanged.',
+        'The method also applies to a secondary surface as well as the primary.',
+        'Invalid method values are rejected by validation.',
+        'Unrelated attributes remain unaffected and unchanged.',
+        'Coarser parent output levels aggregate child values.',
+        'An alternate output format also supports the method.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [{ id: 'AC-1', text: 'The optional method behavior, output, and value handling are supported.' }],
+    confluencePages: [],
+  };
+
+  assert.ok(buildScenarioPlan(context as any).length <= 14);
+});
+
+test('scenario plan maps a family to its specific criteria, not every base-matching AC', () => {
+  const context = {
+    ticketKey: 'ORB-1002',
+    epic: 'Platform',
+    mainIssue: {
+      key: 'ORB-1002',
+      description: [
+        'Omitting the optional method preserves the existing default behavior.',
+        'Coarser parent output levels aggregate child values.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The optional method defaults to existing behavior when omitted.' },
+      { id: 'AC-2', text: 'Coarser parent output levels aggregate child values.' },
+      { id: 'AC-3', text: 'The response includes a status field.' },
+    ],
+    confluencePages: [],
+  };
+  const plan = buildScenarioPlan(context as any);
+  const byId = new Map(plan.map((item) => [item.id, item]));
+  // Specific matches win: the default family maps only to AC-1, the aggregation family only to AC-2.
+  // AC-3 matches only broad base vocabulary ("field") and must NOT be swept into either family — this is
+  // the coverage-inflation fix (previously a family grabbed every base-matching AC via baseCriterionPatterns).
+  assert.deepEqual(byId.get('SP-DEFAULT')?.sourceCriterionIds, ['AC-1']);
+  assert.deepEqual(byId.get('SP-AGGREGATION')?.sourceCriterionIds, ['AC-2']);
+  assert.ok(plan.every((item) => !item.sourceCriterionIds.includes('AC-3')));
+});
+
+test('under-granular coverage flags broad cases that staple many AC ids onto a tiny suite', () => {
+  const context = {
+    acceptanceCriteria: Array.from({ length: 9 }, (_, index) => ({ id: `AC-${index + 1}`, text: `Criterion ${index + 1}` })),
+  };
+  const cases = [
+    { title: 'Broad case 1', coversAcceptanceCriteria: ['AC-1', 'AC-2', 'AC-3'] },
+    { title: 'Broad case 2', coversAcceptanceCriteria: ['AC-4', 'AC-5', 'AC-6'] },
+    { title: 'Broad case 3', coversAcceptanceCriteria: ['AC-7', 'AC-8', 'AC-9'] },
+  ];
+
+  const targets = getUnderGranularAcceptanceCriteria(context as any, cases as any, []);
+
+  assert.deepEqual(targets.map((criterion) => criterion.id), ['AC-1', 'AC-2', 'AC-3', 'AC-4']);
+});
+
+test('under-granular coverage does not flag once focused case count is sufficient', () => {
+  const context = {
+    acceptanceCriteria: Array.from({ length: 4 }, (_, index) => ({ id: `AC-${index + 1}`, text: `Criterion ${index + 1}` })),
+  };
+  const cases = [
+    { title: 'Focused case 1', coversAcceptanceCriteria: ['AC-1'] },
+    { title: 'Focused case 2', coversAcceptanceCriteria: ['AC-2'] },
+    { title: 'Focused case 3', coversAcceptanceCriteria: ['AC-3'] },
+    { title: 'Focused case 4', coversAcceptanceCriteria: ['AC-4'] },
+  ];
+
+  assert.deepEqual(getUnderGranularAcceptanceCriteria(context as any, cases as any, []), []);
+});
+
+test('validation repair: mergeRepairedCases swaps invalid cases in place by id and keeps the rest', () => {
+  const original = [
+    { id: 'TC-1', title: 'Valid A' },
+    { id: 'TC-2', title: 'Invalid B (no apiSpec)' },
+    { id: 'TC-3', title: 'Valid C' },
+  ];
+  const repaired = [
+    { id: 'TC-2', title: 'Fixed B', apiSpec: { method: 'POST', path: '/v1/analysis' } },
+    { id: 'TC-99', title: 'Stray with no matching original — must be ignored' },
+  ];
+
+  const merged = mergeRepairedCases(original as any, repaired as any);
+
+  // No appends, no drops, original order preserved.
+  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-1', 'TC-2', 'TC-3']);
+  // The invalid case is replaced in place with the corrected version.
+  assert.equal(merged[1].title, 'Fixed B');
+  assert.deepEqual((merged[1] as any).apiSpec, { method: 'POST', path: '/v1/analysis' });
+  // Untouched cases are kept exactly (same reference).
+  assert.equal(merged[0], original[0]);
+  assert.equal(merged[2], original[2]);
+});
+
+test('generation merge drops semantic duplicate repair candidates before final validation', () => {
+  const context = {
+    acceptanceCriteria: [
+      {
+        id: 'AC-2',
+        text: 'GET /onboarding/modules returns only active org modules and returns an empty modules array when no active modules exist.',
+      },
+      {
+        id: 'AC-3',
+        text: 'GET /onboarding/progress returns first_login_completed with module progress.',
+      },
+    ],
+    constraints: { scopeType: 'web' },
+    acceptanceCriteriaDiagnostics: { acceptanceCriteriaExecutionPlan: [] },
+  };
+  const existing = [
+    {
+      id: 'TC-ORB-3218-AC2',
+      title: '[FE][Miscellaneous][ORB-3218] GET onboarding modules returns only active org modules and empty array when none exist',
+      coversAcceptanceCriteria: ['AC-2'],
+      caseIntent: 'positive',
+      bddScenario: `Feature: Onboarding modules
+Scenario: Active org modules are returned
+Given the user has active and deleted modules
+When the frontend requests GET /onboarding/modules
+Then the response includes only active org modules
+And the response is an empty modules array when no active modules exist`,
+    },
+  ];
+  const repairCandidates = [
+    {
+      id: 'TC-ORB-3218-AC2-N1',
+      title: '[FE][Miscellaneous][ORB-3218] GET onboarding modules returns an empty array when no active org modules exist',
+      coversAcceptanceCriteria: ['AC-2'],
+      caseIntent: 'negative',
+      bddScenario: `Feature: Onboarding modules
+Scenario: Empty active module set
+Given the org has no active modules
+When the frontend requests GET /onboarding/modules
+Then the response is an empty modules array`,
+    },
+    {
+      id: 'TC-ORB-3218-AC3',
+      title: '[FE][Miscellaneous][ORB-3218] GET onboarding progress returns first_login_completed and progress records',
+      coversAcceptanceCriteria: ['AC-3'],
+      caseIntent: 'positive',
+      bddScenario: `Feature: Onboarding progress
+Scenario: Load progress
+Given the user has module progress
+When the frontend requests GET /onboarding/progress
+Then the response includes first_login_completed and progress records`,
+    },
+  ];
+
+  const merged = mergeGeneratedCasesWithQualityGate(context as any, [], existing as any, repairCandidates as any);
+
+  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3218-AC2', 'TC-ORB-3218-AC3']);
+});
+
+test('generation merge drops repair candidates with incompatible execution type', () => {
+  const context = {
+    acceptanceCriteria: [
+      {
+        id: 'AC-3',
+        text: 'Submitting an analysis without proportion_method keeps the existing AREA behavior.',
+      },
+      {
+        id: 'AC-4',
+        text: 'Generated protobuf code includes proportion_method.',
+      },
+    ],
+    constraints: { scopeType: 'api' },
+    acceptanceCriteriaDiagnostics: {
+      acceptanceCriteriaExecutionPlan: [
+        {
+          criterionId: 'AC-3',
+          executionType: 'postman',
+          observableSurface: 'POST /v1/analysis',
+          reason: 'API request behavior.',
+          coveragePolicy: 'api_assertion',
+        },
+        {
+          criterionId: 'AC-4',
+          executionType: 'manual_code_review',
+          observableSurface: 'Generated protobuf code',
+          reason: 'Code artifact verification.',
+          coveragePolicy: 'code_review',
+        },
+      ],
+    },
+  };
+  const existing = [
+    {
+      id: 'TC-ORB-3310-001',
+      title: '[BE][Spatial Analysis][ORB-3310] Submit analysis without optional method defaults to existing behavior',
+      executionType: 'postman',
+      coversAcceptanceCriteria: ['AC-3'],
+      caseIntent: 'positive',
+      apiSpec: { method: 'POST', path: '/v1/analysis' },
+      bddScenario: 'Given no proportion_method When POST /v1/analysis is sent Then AREA behavior is preserved',
+    },
+  ];
+  const repairCandidates = [
+    {
+      id: 'TC-ORB-3310-014',
+      title: '[BE][Spatial Analysis][ORB-3310] Analysis model maps empty proportion method to AREA',
+      executionType: 'manual_code_review',
+      coversAcceptanceCriteria: ['AC-3'],
+      caseIntent: 'negative',
+      manualVerification: {
+        target: 'internal/model/analysis.go',
+        steps: ['Review the model defaulting code.'],
+        expectedResult: 'Empty proportion method maps to AREA.',
+      },
+      bddScenario: 'Given the code is available When the model defaulting code is reviewed Then empty proportion method maps to AREA',
+    },
+    {
+      id: 'TC-ORB-3310-010',
+      title: '[BE][Spatial Analysis][ORB-3310] Proto exposes proportion method contract',
+      executionType: 'manual_code_review',
+      coversAcceptanceCriteria: ['AC-4'],
+      caseIntent: 'positive',
+      manualVerification: {
+        target: 'analytics.proto',
+        steps: ['Review generated protobuf code.'],
+        expectedResult: 'Generated protobuf code includes proportion_method.',
+      },
+      bddScenario: 'Given generated protobuf code is available When it is reviewed Then proportion_method exists',
+    },
+  ];
+
+  const merged = mergeGeneratedCasesWithQualityGate(context as any, [], existing as any, repairCandidates as any);
+
+  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3310-001', 'TC-ORB-3310-010']);
+});
+
+test('canonicalizeApiSpecPaths snaps a fabricated id back to the documented {id} template', () => {
+  const cases = [
+    { id: 'TC-1', apiSpec: { method: 'GET', path: '/v1/analysis/AC3PosAnalysis/stream' } },
+    { id: 'TC-2', apiSpec: { method: 'POST', path: '/v1/analysis' } },
+    { id: 'TC-3', apiSpec: { method: 'GET', path: '/v1/unknown/thing' } },
+    { id: 'TC-4', title: 'no apiSpec' },
+  ];
+  const matchedEndpoints = [
+    { method: 'POST', path: '/v1/analysis' },
+    { method: 'GET', path: '/v1/analysis/{id}/stream' },
+  ];
+
+  const result = canonicalizeApiSpecPaths(cases as any, matchedEndpoints);
+
+  // Fabricated concrete id is snapped to the documented template.
+  assert.equal((result[0] as any).apiSpec.path, '/v1/analysis/{id}/stream');
+  // Already-correct path is left unchanged.
+  assert.equal((result[1] as any).apiSpec.path, '/v1/analysis');
+  // A path that matches no documented endpoint is left untouched (not fabricated into a match).
+  assert.equal((result[2] as any).apiSpec.path, '/v1/unknown/thing');
+  // A case without apiSpec is untouched.
+  assert.equal((result[3] as any).apiSpec, undefined);
+});
+
+test('normalizeAssertionList extracts text from object assertions instead of yielding [object Object]', () => {
+  const result = normalizeAssertionList([
+    'response status is 201',
+    { assertion: 'Dasymetric Weight = 0.65' },
+    { description: 'proportion equals value times weight', expected: 1950 },
+    { field: 'Dasymetric Weight', expected: 0.65 },
+    '',
+    null,
+  ]);
+  assert.deepEqual(result, [
+    'response status is 201',
+    'Dasymetric Weight = 0.65',
+    'proportion equals value times weight (expected 1950)',
+    'field: Dasymetric Weight, expected: 0.65',
+  ]);
+  // No coerced object survives.
+  assert.equal(result.some((s) => s.includes('[object Object]')), false);
+  // String input splits on newlines only, so commas inside an assertion are preserved.
+  assert.deepEqual(normalizeAssertionList('status is 201, body has id\nweight is 0.5'), [
+    'status is 201, body has id',
+    'weight is 0.5',
+  ]);
 });

@@ -1,4 +1,10 @@
-import type { ConfluencePageSummary, CrossSourceConflict, QaContext, ScopedItem } from '../../shared/contracts';
+import type {
+  AcceptanceCriteriaExecutionPlanItem,
+  ConfluencePageSummary,
+  CrossSourceConflict,
+  QaContext,
+  ScopedItem,
+} from '../../shared/contracts';
 import type { Logger } from './logger';
 import { canonicalize } from './context-builder';
 import { NEGATION_CUES, POLARITY_AXES, SPEC_PAGE_TITLE_RE } from './keywords';
@@ -49,6 +55,9 @@ export type ExcerptRelevanceCheck = (input: ExcerptRelevanceInput) => Promise<bo
 export interface AcceptanceCriteriaFinalizationOptions {
   synthesizer?: (input: AcceptanceCriteriaSynthesisInput) => Promise<AcceptanceCriteriaSynthesisResult>;
   logger?: Logger;
+  // Optional latency lever. Keep this off for quality-first runs: noisy deterministic AC must be
+  // synthesized, and "strong" is intentionally conservative after the implementation-fragment checks below.
+  skipStrongLlmSynthesis?: boolean;
   // F3: config for the LLM excerpt-relevance gate. The gate runs only when EXCERPT_RELEVANCE_LLM is
   // enabled (so per-excerpt token cost/latency is strictly opt-in); off → the deterministic token-overlap
   // scorer remains the sole selector. `excerptRelevanceCheck` overrides `llm` and runs regardless of the
@@ -129,9 +138,61 @@ function isFragmentaryCriterion(text: string): boolean {
 }
 
 function isFeTestableRequirement(text: string): boolean {
-  return /(should|must|required|display|shown|hidden|enabled|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync|summary|narrative|score|scoring|risk|takeaways|tab|characteristics|signals|zone|api|endpoint|schema|validation|response|request|post|put|get|patch|delete|database|db|migration|backfill|dataset_schema|is_dimension|is_measure)/i.test(
+  return /(should|must|required|display|shown|hidden|enable|enabled|disable|disabled|render|save|open|select|preserve|payload|dataset|polygon|multipolygon|location|marker|label|popup|traceable|mapped|fallback|gate|prevent|allow|include|exclude|sync|summary|narrative|score|scoring|risk|takeaways|tab|characteristics|signals|zone|api|endpoint|schema|validation|response|request|post|put|get|patch|delete|database|db|migration|backfill|dataset_schema|is_dimension|is_measure)/i.test(
     text
   );
+}
+
+function countMatches(value: string, pattern: RegExp): number {
+  return value.match(pattern)?.length || 0;
+}
+
+function hasClearExpectedBehaviorSignal(text: string): boolean {
+  return /\b(should|shall|must|required|require|when|if|then|ensure|verify|validate|validated|validation|prevent|allow|reject|accept|access|default|preserve|fallback|remain|unchanged|include|return|available|display|displays|shown|hidden|enable|enabled|disable|disabled|render|save|open|select|support|build|create|use|compute|calculate|add|rename|expose|surface|surfaces|gain|gains|map|maps|mapped|traceable|consistent|relies|occurs|follow|follows)\b/i.test(
+    text
+  );
+}
+
+function isNoisyImplementationCriterion(criterion: ScopedItem, text: string): boolean {
+  const normalized = normalizeInlineText(text);
+  const lower = normalized.toLowerCase();
+  const source = String(criterion.source || '').toLowerCase();
+
+  if (!normalized) return true;
+  if (normalized.length > 520) return true;
+  if (/rendered description/.test(source) && (normalized.length > 220 || /&(?:amp|lt|gt);|implementation\s*\(/i.test(normalized))) {
+    return true;
+  }
+
+  const sqlKeywordCount = countMatches(
+    lower,
+    /\b(create|alter|drop|select|insert|update|delete|index|constraint|foreign key|unique index|on conflict|where|include)\b/g
+  );
+  if (sqlKeywordCount >= 3 && /(?:;|\bddl\b|\bmigration\b|\bpartial\b|\bwhere\b)/i.test(normalized)) return true;
+
+  const sampleNumberCount = countMatches(normalized, /\b\d+(?:[.,]\d+)?%?\b/g);
+  if (
+    sampleNumberCount >= 6 &&
+    /\b(expected output|assumptions?|table|rises|weight=|catchment|dataset after analysis|spatial analysis result)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+  if (/^\d+(?:\.\d+)?\s*[x×*]\s*[\d,]+/.test(normalized)) return true;
+
+  const codeTokenCount = countMatches(
+    normalized,
+    /(?:[A-Za-z0-9_/-]+\.(?:go|proto|sql|tsx?|jsx?)|[A-Za-z0-9_/-]+\/[A-Za-z0-9_/-]+|[A-Za-z][A-Za-z0-9_]*\([^)]*\)|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*|[A-Za-z]+\.[A-Za-z]+)/g
+  );
+  if (
+    codeTokenCount >= 4 &&
+    /\b(regenerate|publish|vendor|processor\.go|handler\.go|analysis\.go|message output|internal\/|db\/migration)\b/i.test(normalized)
+  ) {
+    return true;
+  }
+
+  if (!hasClearExpectedBehaviorSignal(normalized)) return true;
+
+  return false;
 }
 
 export function parseMainIssueSections(text: string): ParsedIssueSection[] {
@@ -193,6 +254,10 @@ export function assessAcceptanceCriteriaQuality(criteria: ScopedItem[]): Criteri
       discarded.push({ ...criterion, text });
       continue;
     }
+    if (isNoisyImplementationCriterion(criterion, text)) {
+      discarded.push({ ...criterion, text });
+      continue;
+    }
     if (!isFeTestableRequirement(text)) {
       discarded.push({ ...criterion, text });
       continue;
@@ -205,6 +270,9 @@ export function assessAcceptanceCriteriaQuality(criteria: ScopedItem[]): Criteri
   }
   if (discarded.length > 0) {
     weakSignals.push('Some extracted acceptance criteria were discarded as weak or fragmentary.');
+  }
+  if (discarded.some((criterion) => /create|index|expected output|assumptions?|\.go|\.proto|db\/migration|rendered description|implementation\s*\(/i.test(`${criterion.text} ${criterion.source || ''}`))) {
+    weakSignals.push('Some extracted acceptance criteria were noisy implementation fragments and require synthesis.');
   }
   if (kept.length > 0 && kept.length <= 2 && criteria.length >= 4) {
     weakSignals.push('Most extracted acceptance criteria were weak relative to the raw candidate set.');
@@ -955,6 +1023,148 @@ export function detectCrossSourceConflicts(
   return conflicts;
 }
 
+export function classifyAcceptanceCriteriaExecution(context: QaContext): AcceptanceCriteriaExecutionPlanItem[] {
+  const matchedEndpoints = context.apiContract?.matchedEndpoints || [];
+  const scopeType = context.constraints?.scopeType || 'web';
+  const endpointSurface = (method: string, path: string): string =>
+    `${method.toUpperCase()} ${path}`.trim();
+  const firstEndpoint = (matcher: RegExp): string => {
+    const matched = matchedEndpoints.find((endpoint) => matcher.test(`${endpoint.method || ''} ${endpoint.path || ''} ${endpoint.summary || ''}`));
+    return matched ? endpointSurface(matched.method || '', matched.path || '') : '';
+  };
+  const firstCriterionEndpoint = (text: string): string => {
+    const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\s+((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/i);
+    if (!match) return '';
+    return endpointSurface(match[1], match[2].replace(/[.,;:)\]]+$/, ''));
+  };
+
+  return (context.acceptanceCriteria || []).map((criterion): AcceptanceCriteriaExecutionPlanItem => {
+    const text = normalizeInlineText(criterion.text);
+    const postEndpoint = firstEndpoint(/^POST\b.*\/v1\/analysis\b/i);
+    const streamEndpoint = firstEndpoint(/^GET\b.*(?:\/stream\b|analysis\/\{?id\}?\/stream)/i);
+    const criterionEndpoint = firstCriterionEndpoint(text);
+
+    if (scopeType !== 'api') {
+      if (/\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|sql|schema)\b/i.test(text)) {
+        return {
+          criterionId: criterion.id,
+          executionType: 'manual_other',
+          observableSurface: 'Web-scope reviewer verification',
+          reason: 'Backend implementation detail appears in a web-scope criterion; do not convert it into a Postman/API case.',
+          coveragePolicy: 'manual_verification',
+        };
+      }
+
+      if (/\b(proto|protobuf|generated code|go mod|vendor|enum|message output)\b/i.test(text)) {
+        return {
+          criterionId: criterion.id,
+          executionType: 'manual_other',
+          observableSurface: 'Web-scope reviewer verification',
+          reason: 'Code-generation detail appears in a web-scope criterion; do not convert it into a Postman/API case.',
+          coveragePolicy: 'manual_verification',
+        };
+      }
+
+      if (
+        criterionEndpoint ||
+        /\b(frontend|front-end|web|ui|screen|render|walkthrough|tour|button|click|global state|local state|app load|opened|next|skip|finish|browser|network|local config|local module)\b/i.test(text)
+      ) {
+        return {
+          criterionId: criterion.id,
+          executionType: 'manual_integration',
+          observableSurface: criterionEndpoint
+            ? `Web UI / frontend network behavior (${criterionEndpoint})`
+            : 'Web UI / frontend runtime behavior',
+          reason: 'Criterion is web-scope behavior; verify through frontend BDD/browser evidence rather than Postman-only API evidence.',
+          coveragePolicy: 'integration_verification',
+        };
+      }
+
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_other',
+        observableSurface: 'Manual web-scope reviewer verification',
+        reason: 'No deterministic frontend runtime surface was identified for this web-scope criterion.',
+        coveragePolicy: 'manual_verification',
+      };
+    }
+
+    if (/\b(proto|protobuf|orbis-go-proto|generated code|go mod|vendor|enum|message output)\b/i.test(text)) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_code_review',
+        observableSurface: 'Source diff / generated protobuf code',
+        reason: 'Criterion verifies proto/generated-code contract, not runtime HTTP behavior.',
+        coveragePolicy: 'code_review',
+      };
+    }
+
+    if (
+      /\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|sql|schema|dasymetric_h3_level_8)\b/i.test(text)
+    ) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_db',
+        observableSurface: 'Database schema / migration state',
+        reason: 'Criterion verifies database structure or indexes that are not directly API-observable.',
+        coveragePolicy: 'db_verification',
+      };
+    }
+
+    if (/\b(prefetch|repository|processrowsparams|processrowgridworker|worker|concurrent|read-only|lock-free|geth3buildingratio|ratio map)\b/i.test(text)) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_integration',
+        observableSurface: 'Service integration/runtime behavior',
+        reason: 'Criterion verifies internal runtime plumbing; use integration/manual verification unless an endpoint directly exposes it.',
+        coveragePolicy: 'integration_verification',
+      };
+    }
+
+    if (/\b(get\s+\/|stream|sse|dataset metadata|output row|columns?|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'postman',
+        observableSurface: criterionEndpoint || streamEndpoint || 'GET /v1/analysis/{id}/stream',
+        reason: criterionEndpoint
+          ? 'Criterion is observable through its referenced API endpoint.'
+          : 'Criterion is observable in the analysis result stream response.',
+        coveragePolicy: 'api_assertion',
+      };
+    }
+
+    if (/\b(post\s+\/|submit analysis|request body|payload|optional field|proportion_method|enum values?|default)\b/i.test(text)) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'postman',
+        observableSurface: criterionEndpoint || postEndpoint || 'POST /v1/analysis',
+        reason: criterionEndpoint
+          ? 'Criterion is observable through its referenced API endpoint.'
+          : 'Criterion is observable through the submit-analysis request contract.',
+        coveragePolicy: 'api_assertion',
+      };
+    }
+
+    if (context.constraints?.scopeType === 'api' && context.constraints.apiContractRelevant !== false) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_integration',
+        observableSurface: 'Integration behavior requiring reviewer-selected evidence',
+        reason: 'Criterion is backend scope but not clearly tied to a single API response.',
+        coveragePolicy: 'integration_verification',
+      };
+    }
+
+    return {
+      criterionId: criterion.id,
+      executionType: 'manual_other',
+      observableSurface: 'Manual reviewer verification',
+      reason: 'No deterministic API, DB, code, or integration surface was identified.',
+      coveragePolicy: 'manual_verification',
+    };
+  });
+}
+
 export async function finalizeAcceptanceCriteria(
   context: QaContext,
   options: AcceptanceCriteriaFinalizationOptions = {}
@@ -988,11 +1198,12 @@ export async function finalizeAcceptanceCriteria(
 
   let finalCriteria = dedupeCriteria(quality.kept.map((criterion) => ({ text: criterion.text, source: criterion.source })));
   let synthesisUsed = false;
+  let synthesisFailureReason = '';
   let synthesisReason = quality.quality === 'strong'
     ? 'Deterministic acceptance criteria were preserved after canonical normalization.'
     : 'Deterministic acceptance criteria were weak, so the final set fell back to deterministic quality-gated output.';
 
-  if (options.synthesizer) {
+  if (options.synthesizer && !(options.skipStrongLlmSynthesis && quality.quality === 'strong')) {
     try {
       const synthesis = await options.synthesizer({
         ticketKey: context.ticketKey,
@@ -1035,14 +1246,31 @@ export async function finalizeAcceptanceCriteria(
           quality.quality === 'strong'
             ? 'Acceptance criteria were normalized through LLM-assisted canonical synthesis.'
             : 'Acceptance criteria were synthesized from structured technical design because deterministic extraction was weak.';
+      } else {
+        // Distinct from a thrown failure below: synthesis ran (and already retried empties internally) but
+        // still produced nothing usable. Log it explicitly so a synthesisUsed=false run is diagnosable
+        // without guessing, and record the reason that feeds the not-production-ready gate.
+        synthesisFailureReason = 'LLM synthesis returned no usable acceptance criteria after retries.';
+        options.logger?.warn('context.ac_synthesis_empty', { jiraKey: context.ticketKey });
       }
     } catch (error) {
+      synthesisFailureReason = error instanceof Error ? error.message : String(error);
       options.logger?.warn('context.ac_synthesis_failed', {
         jiraKey: context.ticketKey,
-        errorMessage: error instanceof Error ? error.message : String(error),
+        errorMessage: synthesisFailureReason,
       });
     }
   }
+
+  // Not-production-ready gate: raw ACs were weak AND synthesis did not produce a usable set (it threw,
+  // returned empty, or was not configured). The final AC set is a reduced/noisy fallback, so generating
+  // against it is unsafe. This drives the analyze-stage block (overridable) and the UI/push guards.
+  const acceptanceCriteriaNotProductionReady = quality.quality === 'weak' && !synthesisUsed;
+  const acceptanceCriteriaNotProductionReadyReason = acceptanceCriteriaNotProductionReady
+    ? synthesisFailureReason
+      ? `Raw acceptance criteria were weak and LLM synthesis failed (${synthesisFailureReason}); the final set is a reduced deterministic fallback.`
+      : 'Raw acceptance criteria were weak and LLM synthesis did not produce a usable set; the final set is a reduced deterministic fallback.'
+    : '';
 
   finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);
   // Spec-grounded tickets can pull the spec's broader capabilities (e.g. login isolation) into the
@@ -1089,6 +1317,9 @@ export async function finalizeAcceptanceCriteria(
         : context.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason,
       synthesisUsed,
       synthesisReason,
+      synthesisFailureReason,
+      acceptanceCriteriaNotProductionReady,
+      acceptanceCriteriaNotProductionReadyReason,
       rawAcceptanceCriteriaQuality: quality.quality,
       rawAcceptanceCriteriaWeakSignals: quality.weakSignals,
       discardedFragmentCount: quality.discarded.length,

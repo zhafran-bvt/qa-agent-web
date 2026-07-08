@@ -431,6 +431,19 @@ export function classifyLinkedIssue(linkedIssue?: LinkedIssueSummary): string {
   return 'other';
 }
 
+function hasScopeLabel(labels: string[] | undefined): boolean {
+  return (labels || []).some((label) => /^(frontend|backend)$/i.test(String(label || '').trim()));
+}
+
+function scopeResolutionLabels(mainIssue: SimplifiedIssue, linkedIssues: LinkedIssueSummary[]): string[] {
+  const mainLabels = mainIssue.labels || [];
+  if (hasScopeLabel(mainLabels)) return mainLabels;
+  const implementationLabels = linkedIssues
+    .filter((issue) => issue.classification === 'related implementation' && !issue.fetchError)
+    .flatMap((issue) => issue.labels || []);
+  return [...mainLabels, ...implementationLabels];
+}
+
 export function parseConfluenceReference(url: string, issueKey: string, sourceType: string, relationship = ''): ConfluenceReference | null {
   const raw = String(url || '').trim();
   if (!raw || !raw.includes('/wiki/')) return null;
@@ -558,6 +571,7 @@ function mergeIssueMetadata(mainIssue: SimplifiedIssue, fetchedIssue: Simplified
   const meta = metaByKey.get(fetchedIssue.key);
   return {
     ...fetchedIssue,
+    issueType: fetchedIssue.issueType || meta?.issueType,
     linkRelation: meta?.relation,
     linkSummary: meta?.summary,
   };
@@ -1370,13 +1384,6 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   const linkedIssueFetchConcurrency = Number(process.env.QA_CONTEXT_ISSUE_CONCURRENCY || 4);
   const confluenceFetchConcurrency = Number(process.env.QA_CONTEXT_CONFLUENCE_CONCURRENCY || 4);
   const mainIssue = await client.getIssue(jiraKey);
-  const resolvedScopeType = resolveScopeType({
-    requestedScopeType: options.scopeType || 'auto',
-    feOnly: options.feOnly,
-    title: mainIssue.summary || '',
-    text: [mainIssue.description || '', mainIssue.renderedDescription || '', ...(mainIssue.comments || [])].join('\n'),
-    labels: mainIssue.labels || [],
-  });
   const linkedIssueKeys = new Set<string>();
 
   for (const linked of mainIssue.linkedIssues || []) {
@@ -1400,6 +1407,18 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
         summary: meta?.summary,
       } as LinkedIssueSummary;
     }
+  });
+
+  const classifiedLinkedIssues = linkedIssues.map((issue) => ({
+    ...issue,
+    classification: classifyLinkedIssue(issue),
+  }));
+  const resolvedScopeType = resolveScopeType({
+    requestedScopeType: options.scopeType || 'auto',
+    feOnly: options.feOnly,
+    title: mainIssue.summary || '',
+    text: [mainIssue.description || '', mainIssue.renderedDescription || '', ...(mainIssue.comments || [])].join('\n'),
+    labels: scopeResolutionLabels(mainIssue, classifiedLinkedIssues),
   });
 
   const pageRefs = new Map<string, PageRef>();
@@ -1498,10 +1517,6 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     }
   }
 
-  const classifiedLinkedIssues = linkedIssues.map((issue) => ({
-    ...issue,
-    classification: classifyLinkedIssue(issue),
-  }));
   const mainIssueCriteria = extractMainIssueCriteria(mainIssue, resolvedScopeType === 'api');
   const mainIssueThin = isThinMainIssue(mainIssue, mainIssueCriteria);
   const scopeParentIssue = classifiedLinkedIssues.find((issue) => issue.classification === 'parent story' && !issue.fetchError) || null;

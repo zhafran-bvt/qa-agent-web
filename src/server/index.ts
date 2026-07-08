@@ -12,9 +12,18 @@ import {
   refreshAccessToken,
   type AccessibleResource,
 } from './services/atlassian';
-import { finalizeAcceptanceCriteria } from './services/acceptance-criteria';
+import { classifyAcceptanceCriteriaExecution, finalizeAcceptanceCriteria } from './services/acceptance-criteria';
 import { buildQaContext } from './services/context-builder';
-import { generateTestCases, recommendDuplicateCases, selectScopedApiEndpoints, synthesizeAcceptanceCriteria, translateScopeSnapshot } from './services/llm';
+import {
+  configuredLlmProviders,
+  generateTestCases,
+  orderLlmProviders,
+  recommendDuplicateCases,
+  selectScopedApiEndpoints,
+  synthesizeAcceptanceCriteria,
+  translateScopeSnapshot,
+  usesFastAcceptanceCriteriaPath,
+} from './services/llm';
 import { startPrivacyReportingLoop } from './services/privacy';
 import { buildSprintBurndownJql, buildTicketSuggestionsJql } from './services/suggestions';
 import { summarizeSprintBurndown } from './services/sprint-burndown';
@@ -29,9 +38,13 @@ import { getRecentIssues, logger } from './services/logger';
 import { createPersistence, type SessionRecord } from './services/persistence';
 import type {
   AnalyzeRequest,
+  CoverageSummary,
   ConfigResponse,
   DiagnosticsResponse,
+  GenerationStepTiming,
   GenerateRequest,
+  GenerateQualityEvaluation,
+  GeneratedTestCase,
   ManageCaseRequest,
   ManageRunRequest,
   PushPreflightRequest,
@@ -42,6 +55,7 @@ import type {
   TicketSuggestionsResponse,
   JiraSprintBurndownResponse,
   ValidateRequest,
+  ValidationEntry,
 } from '../shared/contracts';
 
 const PORT = Number(process.env.PORT || process.env.QA_AGENT_PORT || 5174);
@@ -91,20 +105,20 @@ const config = {
     ),
   },
   llm: {
-    providers: [
-      {
-        name: 'openai',
-        baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-        apiKey: process.env.OPENAI_API_KEY || '',
-        model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
-      },
+    providers: orderLlmProviders([
       {
         name: 'deepseek',
         baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
         apiKey: process.env.DEEPSEEK_API_KEY || '',
         model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-pro',
       },
-    ],
+      {
+        name: 'openai',
+        baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+        apiKey: process.env.OPENAI_API_KEY || '',
+        model: process.env.OPENAI_MODEL || 'gpt-5.4-mini',
+      },
+    ]),
   },
   testrail: {
     baseUrl: process.env.TESTRAIL_BASE_URL || '',
@@ -446,6 +460,103 @@ function shouldEnforceAcceptanceCriteria(context: QaContext | null, _confidenceP
   return Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
 }
 
+function buildGenerationQualityEvaluation(input: {
+  provider: string;
+  model: string;
+  context: QaContext;
+  testCases: GeneratedTestCase[];
+  validation: ValidationEntry[];
+  coverage: CoverageSummary;
+  coverageEnforced: boolean;
+  durationMs: number;
+  stepTimings?: GenerationStepTiming[];
+}): GenerateQualityEvaluation {
+  const totalCriteria = input.coverage.totalCriteria || 0;
+  const acceptanceCriteriaCount = input.context.acceptanceCriteria?.length || 0;
+  const testCaseCount = input.testCases.length;
+  const weakCoverageClaims = input.coverage.unsubstantiatedClaims?.length || 0;
+  const singlePolarityWarnings = input.coverage.singlePolarityCriteria?.length || 0;
+  const allWarnings = input.validation.flatMap((item) => item.warnings || []);
+  const validationWarningCount = allWarnings.length;
+  const broadCoverageWarnings = allWarnings.filter((warning) => /maps to \d+ acceptance criteria/i.test(warning)).length;
+  const duplicateCaseWarnings = allWarnings.filter((warning) => /Potential duplicate of/i.test(warning)).length;
+  const endpointAlignmentWarnings = allWarnings.filter((warning) =>
+    /additional endpoint\(s\).*not represented by apiSpec/i.test(warning)
+  ).length;
+  const executionAlignmentWarnings = allWarnings.filter((warning) =>
+    /executionType is .* but apiSpec defines|Postman API case|Manual DB case|apiSpec endpoint .* not in the matched API contract/i.test(warning)
+  ).length;
+  const executionTypeMismatchWarnings = allWarnings.filter((warning) => /is classified as .* but this case is/i.test(warning)).length;
+  const invalidCaseIds = input.validation.filter((item) => !item.valid).map((item) => item.id);
+  const minimumFocusedCaseCount = totalCriteria
+    ? Math.min(totalCriteria, 12, Math.max(4, Math.ceil(totalCriteria * 0.75)))
+    : 0;
+  const tinyBroadSuite =
+    Boolean(input.coverageEnforced && totalCriteria >= 4 && input.coverage.uncoveredCriteria.length === 0) &&
+    testCaseCount < minimumFocusedCaseCount;
+  const diagnostics = input.context.acceptanceCriteriaDiagnostics || {};
+  const noisyRawAcceptanceCriteria = Boolean(diagnostics.rawAcceptanceCriteriaQuality !== 'strong' && !diagnostics.synthesisUsed);
+  const singlePolarityWarningLimit = totalCriteria ? Math.max(3, Math.ceil(totalCriteria * 0.35)) : 0;
+  // Broad cases (mapping to >2 ACs) are ratio-limited rather than zero-tolerance: a single stream/response
+  // can legitimately verify several related output ACs in one well-substantiated case, and genuine
+  // false-green (breadth hiding unasserted claims) is already a hard-fail via weakCoverageClaims. So allow a
+  // small number of consolidated cases proportional to suite size; only an excess signals lazy mapping.
+  const broadCoverageWarningLimit = testCaseCount ? Math.max(1, Math.ceil(testCaseCount * 0.15)) : 0;
+  const falseGreenCoverageRisk =
+    input.coverage.uncoveredCriteria.length === 0 &&
+    (weakCoverageClaims > 0 ||
+      singlePolarityWarnings > 0 ||
+      tinyBroadSuite ||
+      noisyRawAcceptanceCriteria ||
+      broadCoverageWarnings > 0 ||
+      duplicateCaseWarnings > 0 ||
+      endpointAlignmentWarnings > 0 ||
+      executionTypeMismatchWarnings > 0);
+  const failed =
+    invalidCaseIds.length > 0 ||
+    input.coverage.uncoveredCriteria.length > 0 ||
+    weakCoverageClaims > 0 ||
+    singlePolarityWarnings > singlePolarityWarningLimit ||
+    tinyBroadSuite ||
+    noisyRawAcceptanceCriteria ||
+    broadCoverageWarnings > broadCoverageWarningLimit ||
+    duplicateCaseWarnings > 0 ||
+    endpointAlignmentWarnings > 0 ||
+    executionTypeMismatchWarnings > 0;
+
+  return {
+    mode: input.provider.toLowerCase() === 'deepseek' ? 'deepseek_quality_first' : 'quality_baseline',
+    provider: input.provider,
+    model: input.model,
+    durationMs: input.durationMs,
+    acceptanceCriteriaCount,
+    testCaseCount,
+    coverageEnforced: input.coverageEnforced,
+    coveredCriteria: input.coverage.coveredCriteria,
+    totalCriteria,
+    uncoveredCriteria: input.coverage.uncoveredCriteria,
+    weakCoverageClaims,
+    singlePolarityWarnings,
+    singlePolarityWarningLimit,
+    validationWarningCount,
+    broadCoverageWarnings,
+    broadCoverageWarningLimit,
+    duplicateCaseWarnings,
+    endpointAlignmentWarnings,
+    executionAlignmentWarnings,
+    executionTypeMismatchWarnings,
+    invalidCaseIds,
+    minimumFocusedCaseCount,
+    tinyBroadSuite,
+    rawAcceptanceCriteriaQuality: diagnostics.rawAcceptanceCriteriaQuality || 'none',
+    synthesisUsed: Boolean(diagnostics.synthesisUsed),
+    noisyRawAcceptanceCriteria,
+    falseGreenCoverageRisk,
+    stepTimings: input.stepTimings || [],
+    qualityGate: failed ? 'fail' : falseGreenCoverageRisk ? 'warn' : 'pass',
+  };
+}
+
 async function appendAudit(event: Record<string, unknown>): Promise<void> {
   await persistence.appendAudit(event);
 }
@@ -638,7 +749,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         : undefined,
       ready: {
         atlassian: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
-        llm: config.llm.providers.some((provider) => Boolean(provider.apiKey)),
+        llm: configuredLlmProviders(config.llm.providers).length > 0,
         testrail: Boolean(config.testrail.baseUrl && config.testrail.user && config.testrail.apiKey),
         database: persistence.isDatabaseBacked(),
       },
@@ -694,7 +805,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       persistence: persistence.getDiagnostics(),
       readiness: {
         atlassian: Boolean(config.atlassian.clientId && config.atlassian.clientSecret),
-        llm: config.llm.providers.some((provider) => Boolean(provider.apiKey)),
+        llm: configuredLlmProviders(config.llm.providers).length > 0,
         testrail: Boolean(config.testrail.baseUrl && config.testrail.user && config.testrail.apiKey),
         database: persistence.isDatabaseBacked(),
       },
@@ -1125,8 +1236,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       logger: log,
     });
     const finalizedContext = await finalizeAcceptanceCriteria(context, {
-      synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input),
+      synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input, log),
       logger: log,
+      skipStrongLlmSynthesis: usesFastAcceptanceCriteriaPath(config.llm),
       // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
       llm: config.llm,
     });
@@ -1154,6 +1266,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         log.info('context.api_docs_skipped', { jiraKey, reason: relevance.reason });
       }
     }
+    finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan = classifyAcceptanceCriteriaExecution(finalizedContext);
+    log.info('context.ac_execution_plan', {
+      jiraKey,
+      items: finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan.map((item) => ({
+        criterionId: item.criterionId,
+        executionType: item.executionType,
+        coveragePolicy: item.coveragePolicy,
+        observableSurface: item.observableSurface,
+      })),
+    });
     log.info('context.ac_finalized', {
       jiraKey,
       source: finalizedContext.acceptanceCriteriaSource,
@@ -1182,7 +1304,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   if (req.method === 'POST' && url.pathname === '/api/context/translate') {
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
-    if (!config.llm.providers.some((provider) => provider.apiKey)) {
+    if (!configuredLlmProviders(config.llm.providers).length) {
       sendError(res, 400, 'No LLM provider API key is configured.');
       return;
     }
@@ -1218,7 +1340,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     const sessionEnvelope = await requireSession(req, res);
     if (!sessionEnvelope) return;
     const { session } = sessionEnvelope;
-    if (!config.llm.providers.some((provider) => provider.apiKey)) {
+    if (!configuredLlmProviders(config.llm.providers).length) {
       sendError(res, 400, 'No LLM provider API key is configured.');
       return;
     }
@@ -1232,6 +1354,25 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sendError(res, 400, `Scope confidence requires QA permission: ${(body.context.confidenceReasons || []).join(' ')}`);
       return;
     }
+    // Not-production-ready block: weak raw ACs + failed/empty synthesis produced a reduced AC set. Refuse
+    // to generate against it unless explicitly overridden, so a transient synthesis failure can't silently
+    // ship a degraded suite. (The synthesizer retries transient errors first; this catches the residue.)
+    const acDiagnostics = body.context.acceptanceCriteriaDiagnostics;
+    if (acDiagnostics?.acceptanceCriteriaNotProductionReady && !body.acceptanceCriteriaOverrideApproved) {
+      log.warn('api.generate.blocked_not_production_ready', {
+        jiraKey: body.context.ticketKey,
+        user: session.user,
+        reason: acDiagnostics.acceptanceCriteriaNotProductionReadyReason || '',
+      });
+      sendJson(res, 422, {
+        blocked: true,
+        reason: 'acceptance_criteria_not_production_ready',
+        message:
+          acDiagnostics.acceptanceCriteriaNotProductionReadyReason ||
+          'Acceptance criteria are weak and synthesis did not produce a usable set. Re-run analyze (synthesis retries transient failures) or override explicitly to generate anyway.',
+      });
+      return;
+    }
     const coverageEnforced = shouldEnforceAcceptanceCriteria(body.context, confidencePermissionApproved);
     const generationContext = {
       ...body.context,
@@ -1242,14 +1383,25 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     log.info('api.generate.start', {
       jiraKey: body.context.ticketKey,
       user: session.user,
-      providerCandidates: config.llm.providers.filter((provider) => provider.apiKey).map((provider) => provider.name),
+      providerCandidates: configuredLlmProviders(config.llm.providers).map((provider) => provider.name),
       coverageEnforced,
       acceptanceCriteriaCount: body.context.acceptanceCriteria.length,
       scopeAuthorityType: body.context.scopeAuthority?.type || 'none',
       scopeType: body.context.constraints.scopeType,
       manualScopeOverride: generationContext.manualScopeOverride,
     });
+    const generationStartedAt = Date.now();
     const generation = await generateTestCases(config.llm, generationContext);
+    const generationDurationMs = Date.now() - generationStartedAt;
+    // Per-LLM-step timing breakdown (initial gen + each repair pass) so a slow run shows which pass burned
+    // the time, not just the total. Especially important for multi-minute DeepSeek runs.
+    log.info('api.generate.step_timings', {
+      jiraKey: body.context.ticketKey,
+      provider: generation.provider,
+      model: generation.model,
+      totalDurationMs: generationDurationMs,
+      steps: generation.stepTimings || [],
+    });
     const testCases = hydrateTestCasesWithEvidence(generation.testCases, body.context);
     const validation = validateCases(testCases, {
       jiraKey: body.context.ticketKey,
@@ -1259,9 +1411,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       acceptanceCriteria: body.context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
       matchedEndpoints: body.context.apiContract?.matchedEndpoints,
+      acceptanceCriteriaExecutionPlan: body.context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
     });
     const coverage = buildCoverage(testCases, body.context.acceptanceCriteria, {
       enforceAcceptanceCriteria: coverageEnforced,
+      scopeType: body.context.constraints?.scopeType,
+      acceptanceCriteriaExecutionPlan: body.context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+    });
+    const qualityEvaluation = buildGenerationQualityEvaluation({
+      provider: generation.provider,
+      model: generation.model,
+      context: body.context,
+      testCases,
+      validation,
+      coverage,
+      coverageEnforced,
+      durationMs: generationDurationMs,
+      stepTimings: generation.stepTimings || [],
     });
     const runId = body.context.analysisRunId
       ? await persistence.createGeneratedRun({
@@ -1275,6 +1441,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
           coverage,
           coverageEnforced,
           manualScopeOverride: generationContext.manualScopeOverride,
+          qualityEvaluation,
+          durationMs: generationDurationMs,
+          stepTimings: generation.stepTimings || [],
         })
       : null;
     log.info('api.generate.complete', {
@@ -1290,7 +1459,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       totalCriteria: coverage.totalCriteria,
       uncoveredCriteria: coverage.uncoveredCriteria,
       invalidCases: validation.filter((item) => !item.valid).map((item) => item.id),
+      durationMs: generationDurationMs,
+      qualityGate: qualityEvaluation.qualityGate,
+      weakCoverageClaims: qualityEvaluation.weakCoverageClaims,
+      singlePolarityWarnings: qualityEvaluation.singlePolarityWarnings,
+      broadCoverageWarnings: qualityEvaluation.broadCoverageWarnings,
+      duplicateCaseWarnings: qualityEvaluation.duplicateCaseWarnings,
+      endpointAlignmentWarnings: qualityEvaluation.endpointAlignmentWarnings,
+      executionTypeMismatchWarnings: qualityEvaluation.executionTypeMismatchWarnings,
     });
+    log.info('api.generate.quality_evaluation', { ...qualityEvaluation });
     await appendAudit({
       type: 'generate',
       user: session.user,
@@ -1299,6 +1477,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       provider: generation.provider,
       model: generation.model,
       coverageEnforced,
+      durationMs: generationDurationMs,
+      qualityGate: qualityEvaluation.qualityGate,
+      weakCoverageClaims: qualityEvaluation.weakCoverageClaims,
+      singlePolarityWarnings: qualityEvaluation.singlePolarityWarnings,
+      broadCoverageWarnings: qualityEvaluation.broadCoverageWarnings,
+      duplicateCaseWarnings: qualityEvaluation.duplicateCaseWarnings,
+      endpointAlignmentWarnings: qualityEvaluation.endpointAlignmentWarnings,
+      executionTypeMismatchWarnings: qualityEvaluation.executionTypeMismatchWarnings,
+      qualityEvaluation,
     });
     sendJson(res, 200, {
       runId,
@@ -1310,6 +1497,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       provider: generation.provider,
       model: generation.model,
       pendingReplacement: false,
+      qualityEvaluation,
     });
     return;
   }
@@ -1317,6 +1505,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
   if (req.method === 'POST' && url.pathname === '/api/validate') {
     const body = await readBody<ValidateRequest>(req);
     const testCases = body.context ? hydrateTestCasesWithEvidence(body.testCases || [], body.context) : body.testCases || [];
+    const acceptanceCriteriaExecutionPlan =
+      body.acceptanceCriteriaExecutionPlan || body.context?.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan;
     const validation = validateCases(testCases, {
       jiraKey: body.jiraKey,
       epic: body.epic,
@@ -1325,13 +1515,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       allowNonMainRefs: body.allowNonMainRefs,
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
-      matchedEndpoints: body.context?.apiContract?.matchedEndpoints,
+      matchedEndpoints: body.matchedEndpoints || body.context?.apiContract?.matchedEndpoints,
+      acceptanceCriteriaExecutionPlan,
     });
     sendJson(res, 200, {
       testCases,
       validation,
       coverage: buildCoverage(testCases, body.acceptanceCriteria, {
         enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+        scopeType: body.scopeType || body.context?.constraints.scopeType,
+        acceptanceCriteriaExecutionPlan,
       }),
     });
     log.info('api.validate.complete', {
@@ -1363,6 +1556,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       return;
     }
     const testCases = body.testCases || [];
+    const acceptanceCriteriaExecutionPlan =
+      body.acceptanceCriteriaExecutionPlan || body.context?.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan;
     const validation = validateCases(testCases, {
       jiraKey: body.jiraKey,
       epic: body.epic,
@@ -1372,10 +1567,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
       matchedEndpoints: body.matchedEndpoints || body.context?.apiContract?.matchedEndpoints,
+      acceptanceCriteriaExecutionPlan,
     });
     const invalid = validation.filter((item) => !item.valid);
     const coverage = buildCoverage(testCases, body.acceptanceCriteria, {
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+      scopeType: body.scopeType || body.context?.constraints.scopeType,
+      acceptanceCriteriaExecutionPlan,
     });
     // Only a genuine gap (an AC nothing even claims) hard-blocks. An AC whose sole claim was flagged
     // weak is overrideable via the weak-coverage acknowledgement below, not blocked here.
@@ -1471,6 +1669,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       sendError(res, 400, 'TestRail section ID is required.');
       return;
     }
+    const acceptanceCriteriaExecutionPlan =
+      body.acceptanceCriteriaExecutionPlan || body.context?.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan;
     const validation = validateCases(body.testCases || [], {
       jiraKey: body.jiraKey,
       epic: body.epic,
@@ -1480,10 +1680,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       acceptanceCriteria: body.acceptanceCriteria,
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
       matchedEndpoints: body.matchedEndpoints || body.context?.apiContract?.matchedEndpoints,
+      acceptanceCriteriaExecutionPlan,
     });
     const invalid = validation.filter((item) => !item.valid);
     const coverage = buildCoverage(body.testCases || [], body.acceptanceCriteria, {
       enforceAcceptanceCriteria: body.enforceAcceptanceCriteria !== false,
+      scopeType: body.scopeType || body.context?.constraints.scopeType,
+      acceptanceCriteriaExecutionPlan,
     });
     // Genuine gaps hard-block; weak-only-claimed ACs fall through to the acknowledgement gate below.
     if (invalid.length || (coverage.enforced && trulyUncoveredCriteria(coverage).length)) {
@@ -1542,6 +1745,59 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
         coverage,
       });
       return;
+    }
+    // Backup quality-gate guard: even if the UI is bypassed or stale cases are submitted directly, a run
+    // with unresolved quality problems must not silently reach TestRail. Recompute the gate here (needs the
+    // analyzed context for AC diagnostics) and block on the RESIDUAL issues the earlier push gates do not
+    // already cover — invalid/uncovered are hard-blocked above, and weak-coverage/single-polarity/cross-
+    // source are acknowledge-gated above, so enforcing the whole qualityGate here would double-block those.
+    // The residue is: not-production-ready (noisy/unsynthesized ACs), broad coverage over the limit, and
+    // endpoint-alignment / duplicate / tiny-suite warnings. Overridable with an explicit acknowledgement.
+    if (body.context) {
+      const pushQualityEvaluation = buildGenerationQualityEvaluation({
+        provider: 'push',
+        model: 'push',
+        context: body.context,
+        testCases: body.testCases || [],
+        validation,
+        coverage,
+        coverageEnforced: body.enforceAcceptanceCriteria !== false,
+        durationMs: 0,
+      });
+      const residualQualityIssues =
+        pushQualityEvaluation.noisyRawAcceptanceCriteria ||
+        pushQualityEvaluation.broadCoverageWarnings > pushQualityEvaluation.broadCoverageWarningLimit ||
+        pushQualityEvaluation.endpointAlignmentWarnings > 0 ||
+        pushQualityEvaluation.duplicateCaseWarnings > 0 ||
+        pushQualityEvaluation.tinyBroadSuite;
+      if (residualQualityIssues && !body.qualityGateAcknowledged) {
+        log.warn('api.push.quality_gate_blocked', {
+          jiraKey: body.jiraKey,
+          user: session.user,
+          qualityGate: pushQualityEvaluation.qualityGate,
+          noisyRawAcceptanceCriteria: pushQualityEvaluation.noisyRawAcceptanceCriteria,
+          broadCoverageWarnings: pushQualityEvaluation.broadCoverageWarnings,
+          endpointAlignmentWarnings: pushQualityEvaluation.endpointAlignmentWarnings,
+          duplicateCaseWarnings: pushQualityEvaluation.duplicateCaseWarnings,
+          tinyBroadSuite: pushQualityEvaluation.tinyBroadSuite,
+        });
+        sendJson(res, 400, {
+          error:
+            'This run has unresolved quality issues (e.g. weak/unsynthesized acceptance criteria, broad or duplicate cases), so it is not safe to push. Acknowledge to proceed anyway.',
+          requiresQualityGateAck: true,
+          qualityEvaluation: pushQualityEvaluation,
+          validation,
+          coverage,
+        });
+        return;
+      }
+      if (residualQualityIssues) {
+        log.warn('api.push.quality_gate_overridden', {
+          jiraKey: body.jiraKey,
+          user: session.user,
+          reason: body.qualityGateAcknowledgedReason || '',
+        });
+      }
     }
     const trConfig = await resolveTestrailConfig(session);
     const results = await pushCases(trConfig, sectionId, body.testCases || []);
@@ -1778,7 +2034,7 @@ function validateStartupConfig(): void {
   if (!config.atlassian.clientId || !config.atlassian.clientSecret) {
     logger.warn('startup.config.atlassian_missing');
   }
-  if (!config.llm.providers.some((provider) => provider.apiKey)) {
+  if (!configuredLlmProviders(config.llm.providers).length) {
     logger.warn('startup.config.llm_missing');
   }
   if (!config.testrail.baseUrl || !config.testrail.user || !config.testrail.apiKey) {

@@ -1277,6 +1277,47 @@ test('frontend ticket does NOT treat an endpoint-list bullet as criteria (contro
   assert.equal(context.acceptanceCriteria.length, 0);
 });
 
+test('linked implementation frontend label resolves unlabeled endpoint-heavy ticket to web scope', async () => {
+  const issues = {
+    'ORB-3218': {
+      key: 'ORB-3218',
+      summary: 'Integrate onboarding modules and progress',
+      description:
+        'AC:\n1. Call API from frontend to update onboarding modules and progress using GET /onboarding/modules and GET /onboarding/progress.',
+      renderedDescription: '',
+      labels: [],
+      linkedIssues: [{ key: 'ORB-3216', relation: 'relates to', summary: 'Onboarding frontend implementation', issueType: 'Task' }],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Miscellaneous', issueType: 'Epic' },
+    },
+    'ORB-3216': {
+      key: 'ORB-3216',
+      summary: 'Onboarding frontend implementation',
+      issueType: 'Task',
+      description: 'PRD:\nTech Design:\nAC:\n1. Call API from frontend to update onboarding module state.',
+      renderedDescription: '',
+      labels: ['Frontend'],
+      linkedIssues: [],
+      subtasks: [],
+      comments: [],
+      parent: { summary: 'Miscellaneous', issueType: 'Epic' },
+    },
+  };
+
+  const client = {
+    getIssue: async (key: keyof typeof issues) => issues[key] as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({ id: '1', title: 'unused', body: '' }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3218', { includeComments: true });
+
+  assert.equal(context.constraints.scopeType, 'web');
+  assert.equal(context.linkedIssues.find((issue) => issue.key === 'ORB-3216')?.labels?.[0], 'Frontend');
+});
+
 test('narrows a multi-subsection PRD to the ticket-relevant subsection for a (non-thin) BE ticket', async () => {
   const issues = {
     'ORB-9100': {

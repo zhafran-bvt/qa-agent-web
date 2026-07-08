@@ -2,18 +2,21 @@ import type {
   ApiContractEndpoint,
   DuplicateCaseRecommendation,
   ExistingTestRailCase,
+  GenerationStepName,
+  GenerationStepTiming,
   GeneratedTestCase,
   QaContext,
   ScopeSnapshotTranslation,
+  TestExecutionType,
 } from '../../shared/contracts';
-import { buildCoverage } from './validation';
+import { buildCoverage, casesLookDuplicative, normalizeAcceptanceCriteriaId, validateCases } from './validation';
 import { normalizeSelectedEndpoints } from './api-docs';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 import { requestHttpsJson } from './http';
 import { TtlCache } from './ttl-cache';
 import type { Logger } from './logger';
 
-interface ProviderConfig {
+export interface ProviderConfig {
   name: string;
   baseUrl: string;
   apiKey: string;
@@ -34,6 +37,7 @@ interface ProviderGenerationResult {
   provider: string;
   model: string;
   testCases: GeneratedTestCase[];
+  stepTimings?: GenerationStepTiming[];
 }
 
 interface ProviderSynthesisResult {
@@ -58,6 +62,246 @@ interface ProviderDuplicateReviewResult {
   provider: string;
   model: string;
   recommendations: DuplicateCaseRecommendation[];
+}
+
+export type LlmTask =
+  | 'synthesis'
+  | 'synthesis_repair'
+  | 'generation'
+  | 'coverage_repair'
+  | 'scenario_plan_repair'
+  | 'polarity_repair'
+  | 'translation'
+  | 'duplicate_review'
+  | 'excerpt_relevance'
+  | 'endpoint_selection';
+
+interface ProviderBehavior {
+  name: string;
+  tokenParameter: 'max_tokens' | 'max_completion_tokens';
+  jsonContract: string;
+  caseDirectives: string[];
+  scenarioPlanRepairMaxAttempts: number;
+  coverageRepairMaxAttempts: number;
+  polarityRepairEnabled: boolean;
+  validationRepairMaxAttempts: number;
+  fastGenerationEnabled: boolean;
+}
+
+class RetryableLlmContentError extends Error {
+  retryableLlmContent = true;
+
+  constructor(
+    message: string,
+    public readonly expectedShape: string,
+    public readonly rawContent = ''
+  ) {
+    super(message);
+    this.name = 'RetryableLlmContentError';
+  }
+}
+
+export function isRetryableLlmContentError(error: unknown): boolean {
+  return Boolean((error as { retryableLlmContent?: boolean })?.retryableLlmContent);
+}
+
+export function orderLlmProviders<T extends { name: string }>(providers: T[], primaryProvider = process.env.LLM_PRIMARY_PROVIDER || 'openai'): T[] {
+  const primary = String(primaryProvider || 'openai').trim().toLowerCase();
+  return [...providers].sort((a, b) => {
+    const aPrimary = a.name.toLowerCase() === primary ? 0 : 1;
+    const bPrimary = b.name.toLowerCase() === primary ? 0 : 1;
+    if (aPrimary !== bPrimary) return aPrimary - bPrimary;
+    return 0;
+  });
+}
+
+function disabledProviderNames(): Set<string> {
+  return new Set(
+    String(process.env.LLM_DISABLED_PROVIDERS || '')
+      .split(',')
+      .map((name) => name.trim().toLowerCase())
+      .filter(Boolean)
+  );
+}
+
+export function allowLlmFallback(): boolean {
+  return String(process.env.LLM_ALLOW_FALLBACK || '').trim().toLowerCase() === 'true';
+}
+
+export function configuredLlmProviders<T extends { name: string; apiKey?: string }>(
+  providers: T[],
+  options: { allowFallback?: boolean } = {}
+): T[] {
+  const disabled = disabledProviderNames();
+  const ordered = orderLlmProviders((providers || []).filter((provider) => provider.apiKey && !disabled.has(provider.name.toLowerCase())));
+  const fallbackAllowed = options.allowFallback ?? allowLlmFallback();
+  return fallbackAllowed ? ordered : ordered.slice(0, 1);
+}
+
+export function maxOutputTokensForTask(task: LlmTask): number {
+  const envByTask: Record<LlmTask, string> = {
+    synthesis: 'LLM_MAX_OUTPUT_TOKENS_SYNTHESIS',
+    synthesis_repair: 'LLM_MAX_OUTPUT_TOKENS_SYNTHESIS',
+    generation: 'LLM_MAX_OUTPUT_TOKENS_GENERATION',
+    coverage_repair: 'LLM_MAX_OUTPUT_TOKENS_GENERATION',
+    scenario_plan_repair: 'LLM_MAX_OUTPUT_TOKENS_GENERATION',
+    polarity_repair: 'LLM_MAX_OUTPUT_TOKENS_GENERATION',
+    translation: 'LLM_MAX_OUTPUT_TOKENS_TRANSLATION',
+    duplicate_review: 'LLM_MAX_OUTPUT_TOKENS_DUPLICATE_REVIEW',
+    excerpt_relevance: 'LLM_MAX_OUTPUT_TOKENS_EXCERPT_RELEVANCE',
+    endpoint_selection: 'LLM_MAX_OUTPUT_TOKENS_ENDPOINT_SELECTION',
+  };
+  const defaults: Record<LlmTask, number> = {
+    synthesis: 4_000,
+    synthesis_repair: 4_000,
+    generation: 14_000,
+    coverage_repair: 8_000,
+    scenario_plan_repair: 8_000,
+    polarity_repair: 8_000,
+    translation: 4_000,
+    duplicate_review: 4_000,
+    excerpt_relevance: 400,
+    endpoint_selection: 4_000,
+  };
+  const configured = Number(process.env[envByTask[task]]);
+  return Number.isFinite(configured) && configured > 0 ? configured : defaults[task];
+}
+
+function providerEnvPrefix(name: string): string {
+  return String(name || 'provider').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toUpperCase();
+}
+
+function providerIntegerEnv(name: string, suffix: string, fallback: number): number {
+  const configured = Number(process.env[`LLM_${providerEnvPrefix(name)}_${suffix}`]);
+  return Number.isFinite(configured) && configured >= 0 ? configured : fallback;
+}
+
+export function providerBehavior(provider: { name: string }): ProviderBehavior {
+  const name = String(provider.name || '').trim().toLowerCase();
+  const isDeepSeek = name === 'deepseek';
+  const isOpenAI = name === 'openai';
+  const fastGenerationEnabled =
+    isDeepSeek && String(process.env.LLM_DEEPSEEK_FAST_GENERATION ?? 'false').toLowerCase() === 'true';
+
+  return {
+    name,
+    tokenParameter: isOpenAI ? 'max_completion_tokens' : 'max_tokens',
+    jsonContract: isDeepSeek
+      ? [
+          'Return exactly one valid JSON object.',
+          'Do not wrap JSON in markdown.',
+          'Do not include commentary before or after the JSON.',
+          'If a collection is optional or uncertain, return an empty array instead of prose.',
+        ].join('\n')
+      : '',
+    caseDirectives: [
+      isDeepSeek
+        ? 'Provider guard: keep the suite compact and non-duplicative. Do not create multiple cases with the same endpoint, setup, and assertion just to satisfy coverage.'
+        : '',
+      isDeepSeek
+        ? 'Provider guard: apiSpec.assertions must be an array of plain strings, never objects. The BDD When/Then must mention the same apiSpec method/path and must not list extra HTTP endpoints.'
+        : '',
+      isOpenAI
+        ? 'Provider guard: before finalizing, audit every context.acceptanceCriteriaExecutionPlan item. DB/migration/index ACs must be manual_db, proto/generated-code ACs must be manual_code_review, and worker/prefetch/runtime ACs must be manual_integration. Do not substitute a broader manual type.'
+        : '',
+    ].filter(Boolean),
+    scenarioPlanRepairMaxAttempts: fastGenerationEnabled ? 0 : providerIntegerEnv(name, 'SCENARIO_REPAIR_ATTEMPTS', 2),
+    coverageRepairMaxAttempts: providerIntegerEnv(name, 'COVERAGE_REPAIR_ATTEMPTS', 2),
+    polarityRepairEnabled: !fastGenerationEnabled,
+    validationRepairMaxAttempts: providerIntegerEnv(name, 'VALIDATION_REPAIR_ATTEMPTS', 2),
+    fastGenerationEnabled,
+  };
+}
+
+function providerJsonContract(provider: ProviderConfig): string {
+  return providerBehavior(provider).jsonContract;
+}
+
+export function buildChatCompletionBody(provider: ProviderConfig, task: LlmTask, body: Record<string, unknown>): Record<string, unknown> {
+  const messages = Array.isArray(body.messages) ? body.messages.map((message) => ({ ...(message as Record<string, unknown>) })) : [];
+  const contract = providerJsonContract(provider);
+  const explicitMaxCompletionTokens = Number((body as { max_completion_tokens?: unknown }).max_completion_tokens);
+  const explicitMaxTokens = Number((body as { max_tokens?: unknown }).max_tokens);
+  const tokenLimit = Number.isFinite(explicitMaxCompletionTokens) && explicitMaxCompletionTokens > 0
+    ? explicitMaxCompletionTokens
+    : Number.isFinite(explicitMaxTokens) && explicitMaxTokens > 0
+      ? explicitMaxTokens
+      : maxOutputTokensForTask(task);
+  if (contract && messages.length) {
+    const systemIndex = messages.findIndex((message) => message.role === 'system');
+    if (systemIndex >= 0) {
+      messages[systemIndex].content = `${contract}\n\n${String(messages[systemIndex].content || '')}`;
+    } else {
+      messages.unshift({ role: 'system', content: contract });
+    }
+  }
+  const nextBody = {
+    ...body,
+    messages,
+  };
+  delete (nextBody as { max_tokens?: unknown }).max_tokens;
+  delete (nextBody as { max_completion_tokens?: unknown }).max_completion_tokens;
+  const behavior = providerBehavior(provider);
+  if (behavior.tokenParameter === 'max_completion_tokens') {
+    return { ...nextBody, max_completion_tokens: tokenLimit };
+  }
+  return { ...nextBody, max_tokens: tokenLimit };
+}
+
+function retryAttempts(): number {
+  const configured = Number(process.env.LLM_RETRY_ATTEMPTS);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 1;
+}
+
+export function usesFastGenerationPath(provider: { name: string }): boolean {
+  return providerBehavior(provider).fastGenerationEnabled;
+}
+
+export function usesFastAcceptanceCriteriaPath(config: LlmConfig): boolean {
+  const primary = configuredLlmProviders(config.providers || [])[0];
+  if (!primary || primary.name.toLowerCase() !== 'deepseek') return false;
+  return String(process.env.LLM_DEEPSEEK_FAST_AC ?? 'false').toLowerCase() === 'true';
+}
+
+function retryBody(provider: ProviderConfig, task: LlmTask, expectedShape: string, rawContent: string): Record<string, unknown> {
+  return buildChatCompletionBody(provider, task, {
+    model: provider.model,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Your previous response was invalid for this QA Agent task.',
+          `Return strict JSON only with this expected shape: ${expectedShape}`,
+          'Do not include markdown, explanation, or any text outside the JSON object.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify(
+          {
+            task,
+            invalidResponse: String(rawContent || '').slice(0, 8_000),
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  });
+}
+
+interface ScenarioPlanItem {
+  id: string;
+  title: string;
+  intent: string;
+  caseIntent: 'positive' | 'negative' | 'edge';
+  sourceCriterionIds: string[];
+  sourceEvidence: string;
+  requiredTerms: string[];
+  priority: number;
+  executionHint: string;
 }
 
 function stripAcceptanceCriteriaSections(text: string): string {
@@ -187,22 +431,73 @@ function requestJson<T>(url: string, headers: Record<string, string>, body: unkn
   });
 }
 
+async function requestProviderJson<T>(
+  provider: ProviderConfig,
+  task: LlmTask,
+  label: string,
+  expectedShape: string,
+  body: Record<string, unknown>,
+  parse: (parsed: unknown) => T
+): Promise<T> {
+  const url = `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  let requestBody = buildChatCompletionBody(provider, task, body);
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt <= retryAttempts(); attempt += 1) {
+    try {
+      const response = await requestJson<any>(url, { Authorization: `Bearer ${provider.apiKey}` }, requestBody);
+      const content = providerContent(response, label);
+      const parsed = extractJson(content);
+      return parse(parsed);
+    } catch (error) {
+      lastError = error as Error;
+      if (!isRetryableLlmContentError(error) || attempt >= retryAttempts()) {
+        throw error;
+      }
+      requestBody = retryBody(
+        provider,
+        task,
+        expectedShape,
+        (error as RetryableLlmContentError).rawContent || ''
+      );
+    }
+  }
+
+  throw lastError || new Error(`LLM ${label} failed.`);
+}
+
+function missingShape(label: string, expectedShape: string, parsed: unknown): never {
+  throw new RetryableLlmContentError(
+    `LLM ${label} response JSON must match expected shape: ${expectedShape}`,
+    expectedShape,
+    JSON.stringify(parsed).slice(0, 8_000)
+  );
+}
+
 function extractJson(text: string): unknown {
   // Providers sometimes wrap JSON in markdown or prose; accept common wrappers but still parse strict JSON.
   const trimmed = String(text || '').trim();
-  if (!trimmed) throw new Error('LLM provider returned an empty response.');
+  if (!trimmed) throw new RetryableLlmContentError('LLM provider returned an empty response.', '{"result":{}}');
 
   try {
     return JSON.parse(trimmed);
   } catch (error) {
-    const match = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) return JSON.parse(match[1]);
-    const arrayStart = trimmed.indexOf('[');
-    const arrayEnd = trimmed.lastIndexOf(']');
-    if (arrayStart >= 0 && arrayEnd > arrayStart) {
-      return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1));
+    try {
+      const match = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (match) return JSON.parse(match[1]);
+      const arrayStart = trimmed.indexOf('[');
+      const arrayEnd = trimmed.lastIndexOf(']');
+      if (arrayStart >= 0 && arrayEnd > arrayStart) {
+        return JSON.parse(trimmed.slice(arrayStart, arrayEnd + 1));
+      }
+    } catch {
+      /* throw retryable error below */
     }
-    throw error;
+    throw new RetryableLlmContentError(
+      `LLM provider returned invalid JSON: ${(error as Error).message}`,
+      '{"result":{}}',
+      trimmed
+    );
   }
 }
 
@@ -213,7 +508,11 @@ export function providerContent(response: any, label: string): string {
   // truncation as a provider error so the fallback/retry path handles it instead.
   const choice = response?.choices?.[0];
   if (choice?.finish_reason === 'length') {
-    throw new Error(`LLM ${label} response was truncated (finish_reason=length); reduce scope or raise the response token limit.`);
+    throw new RetryableLlmContentError(
+      `LLM ${label} response was truncated (finish_reason=length); reduce scope or raise the response token limit.`,
+      '{"result":{}}',
+      choice?.message?.content ?? ''
+    );
   }
   return choice?.message?.content ?? '';
 }
@@ -283,10 +582,12 @@ function normalizeCaseIntent(value: unknown): 'positive' | 'negative' | 'edge' |
   return undefined;
 }
 
-function normalizeExecutionType(value: unknown): 'postman' | 'manual_db' | 'manual_other' | undefined {
+function normalizeExecutionType(value: unknown): TestExecutionType | undefined {
   const normalized = String(value || '').trim().toLowerCase();
   if (normalized === 'postman' || normalized === 'api') return 'postman';
   if (normalized === 'manual_db' || normalized === 'db' || normalized === 'database') return 'manual_db';
+  if (normalized === 'manual_code_review' || normalized === 'code_review' || normalized === 'code' || normalized === 'manual_code') return 'manual_code_review';
+  if (normalized === 'manual_integration' || normalized === 'integration' || normalized === 'manual_runtime') return 'manual_integration';
   if (normalized === 'manual_other' || normalized === 'manual') return 'manual_other';
   return undefined;
 }
@@ -407,6 +708,41 @@ export function normalizeIdList(value: unknown): string[] {
     .split(/[\n,]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+// apiSpec.assertions are free-text statements, not ids. LLMs (DeepSeek especially) sometimes emit each
+// assertion as a structured object (e.g. {assertion, expected} or {field, expected}) rather than a string;
+// running those through normalizeIdList yields "[object Object]" and destroys the assertion. Extract the
+// human-readable assertion text instead, and split string input on newlines only (assertions may contain
+// commas, so the id-list comma split would wrongly fragment them).
+export function normalizeAssertionList(value: unknown): string[] {
+  const formatScalar = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v));
+  const stringifyAssertion = (item: unknown): string => {
+    if (item === null || item === undefined) return '';
+    if (typeof item !== 'object') return String(item).trim();
+    const record = item as Record<string, unknown>;
+    for (const key of ['assertion', 'description', 'text', 'check', 'rule', 'name', 'condition', 'statement', 'expect']) {
+      const label = record[key];
+      if (typeof label === 'string' && label.trim()) {
+        const base = label.trim();
+        const expected = record.expected ?? record.expectedValue ?? record.value ?? record.expectation;
+        return expected != null && !base.includes(String(expected))
+          ? `${base} (expected ${formatScalar(expected)})`
+          : base;
+      }
+    }
+    const scalarParts = Object.entries(record)
+      .filter(([, v]) => v !== null && v !== undefined && typeof v !== 'object')
+      .map(([k, v]) => `${k}: ${formatScalar(v)}`);
+    if (scalarParts.length) return scalarParts.join(', ');
+    try {
+      return JSON.stringify(item);
+    } catch {
+      return '';
+    }
+  };
+  const items = Array.isArray(value) ? value : String(value || '').split(/\n/);
+  return items.map((item) => stringifyAssertion(item).trim()).filter(Boolean);
 }
 
 export function normalizeBddScenario(value: unknown): string {
@@ -570,7 +906,7 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
   const title = String(testCase.title || '');
   // Titles use a single [BE]/[FE] tag (not [API]/[DB]), so execution type is inferred from the
   // structured payload: an apiSpec ⇒ postman, a manualVerification block ⇒ manual_db.
-  const inferredExecutionType = apiMethod || apiPath ? 'postman' : Object.keys(manualRecord).length ? 'manual_db' : undefined;
+  const inferredExecutionType: TestExecutionType | undefined = apiMethod || apiPath ? 'postman' : Object.keys(manualRecord).length ? 'manual_other' : undefined;
   const executionType = normalizeExecutionType(testCase.executionType || testCase.execution_type) || inferredExecutionType;
   const manualSteps = Array.isArray(manualRecord.steps)
     ? manualRecord.steps.map((step) => String(step || '').trim()).filter(Boolean)
@@ -594,7 +930,7 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
             path: apiPath,
             samplePayload: normalizeTextList(apiSpecRecord.samplePayload || apiSpecRecord.sample_payload || testCase.samplePayload || ''),
             expectedResponse: normalizeTextList(apiSpecRecord.expectedResponse || apiSpecRecord.expected_response || testCase.expectedResponse || ''),
-            assertions: normalizeIdList(apiSpecRecord.assertions || testCase.assertions || ''),
+            assertions: normalizeAssertionList(apiSpecRecord.assertions || testCase.assertions || ''),
           },
         }
       : {}),
@@ -663,6 +999,63 @@ function dedupeGeneratedCases(testCases: GeneratedTestCase[]): GeneratedTestCase
   return output;
 }
 
+function pruneSemanticDuplicateCases(
+  testCases: GeneratedTestCase[]
+): GeneratedTestCase[] {
+  const candidates = dedupeGeneratedCases(testCases);
+  const selected: GeneratedTestCase[] = [];
+
+  for (const candidate of candidates) {
+    if (selected.some((existing) => casesLookDuplicative(existing, candidate))) continue;
+    selected.push(candidate);
+  }
+
+  return selected;
+}
+
+function inferGeneratedCaseExecutionType(testCase: GeneratedTestCase, scopeType?: 'web' | 'api'): TestExecutionType | undefined {
+  const explicit = normalizeExecutionType(testCase.executionType);
+  if (explicit) return explicit;
+  if (testCase.apiSpec?.method || testCase.apiSpec?.path) return 'postman';
+  if (testCase.manualVerification) return 'manual_other';
+  return scopeType === 'api' ? 'postman' : undefined;
+}
+
+function matchesAcceptanceCriteriaExecutionPlan(context: GenerateContext, testCase: GeneratedTestCase): boolean {
+  const executionPlan = context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [];
+  if (!executionPlan.length) return true;
+  const planById = new Map(executionPlan.map((item) => [normalizeAcceptanceCriteriaId(item.criterionId), item]));
+  const mappedCriteria = normalizeIdList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
+  const plannedCriteria = mappedCriteria.map((criterionId) => planById.get(criterionId)).filter((item): item is NonNullable<typeof item> => Boolean(item));
+  if (!plannedCriteria.length) return true;
+  const executionType = inferGeneratedCaseExecutionType(testCase, context.constraints?.scopeType);
+  if (!executionType) return true;
+  return plannedCriteria.every((item) => item.executionType === executionType);
+}
+
+function pruneExecutionTypeMismatchedCases(context: GenerateContext, testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  return testCases.filter((testCase) => matchesAcceptanceCriteriaExecutionPlan(context, testCase));
+}
+
+export function mergeGeneratedCasesWithQualityGate(
+  context: GenerateContext,
+  scenarioPlan: ScenarioPlanItem[],
+  existingCases: GeneratedTestCase[],
+  candidateCases: GeneratedTestCase[]
+): GeneratedTestCase[] {
+  void scenarioPlan;
+  const base = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(existingCases));
+  let merged = [...base];
+
+  for (const candidate of dedupeGeneratedCases(candidateCases)) {
+    if (!matchesAcceptanceCriteriaExecutionPlan(context, candidate)) continue;
+    if (merged.some((existing) => casesLookDuplicative(existing, candidate))) continue;
+    merged.push(candidate);
+  }
+
+  return pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(merged));
+}
+
 export function buildGenerationPromptContext(context: GenerateContext) {
   return {
     ticketKey: context.ticketKey,
@@ -698,6 +1091,7 @@ export function buildGenerationPromptContext(context: GenerateContext) {
       : null,
     scopeAuthority: context.scopeAuthority,
     acceptanceCriteria: context.acceptanceCriteria,
+    acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [],
     acceptanceCriteriaSource: context.acceptanceCriteriaSource,
     userStories: context.userStories,
     confidenceLevel: context.confidenceLevel,
@@ -763,9 +1157,11 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     .filter(Boolean)
     .join('\n');
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const criteria = await requestProviderJson(
+    provider,
+    'synthesis',
+    'synthesis',
+    '{"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}',
     {
       model: provider.model,
       temperature: 0, // deterministic AC synthesis: same ticket → stable criteria set run-to-run
@@ -784,15 +1180,15 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
           ),
         },
       ],
+    },
+    (parsed) => {
+      const criteria = findAcceptanceCriteriaArray(parsed);
+      if (!Array.isArray(criteria)) {
+        return missingShape('synthesis', '{"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}', parsed);
+      }
+      return criteria;
     }
   );
-
-  const content = providerContent(response, 'synthesis');
-  const parsed = extractJson(content);
-  const criteria = findAcceptanceCriteriaArray(parsed);
-  if (!Array.isArray(criteria)) {
-    throw new Error('LLM synthesis response JSON must contain an acceptanceCriteria array.');
-  }
 
   let normalizedCriteria = normalizeSynthesisCriteria(criteria);
 
@@ -818,9 +1214,11 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
       .filter(Boolean)
       .join('\n');
 
-    const repairResponse = await requestJson<any>(
-      `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-      { Authorization: `Bearer ${provider.apiKey}` },
+    const repairedCriteria = await requestProviderJson(
+      provider,
+      'synthesis_repair',
+      'synthesis repair',
+      '{"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}',
       {
         model: provider.model,
         temperature: 0, // deterministic granularity repair, consistent with the synthesis pass above
@@ -840,12 +1238,16 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
             ),
           },
         ],
+      },
+      (parsed) => {
+        const repairedCriteria = findAcceptanceCriteriaArray(parsed);
+        if (!Array.isArray(repairedCriteria)) {
+          return missingShape('synthesis repair', '{"acceptanceCriteria":[{"id":"AC-1","text":"..."}]}', parsed);
+        }
+        return repairedCriteria;
       }
     );
 
-    const repairContent = providerContent(repairResponse, 'synthesis repair');
-    const repairParsed = extractJson(repairContent);
-    const repairedCriteria = findAcceptanceCriteriaArray(repairParsed);
     if (Array.isArray(repairedCriteria)) {
       normalizedCriteria = normalizeSynthesisCriteria(repairedCriteria);
     }
@@ -877,9 +1279,11 @@ async function translateScopeSnapshotWithProvider(
     'Use this exact top-level shape: {"mainSummary":"","parentStorySummary":"","scopedPrdSection":"","confidenceReasons":[""],"selectedAcceptanceCriteriaReason":"","userStories":[{"id":"US-1","text":""}],"acceptanceCriteria":[{"id":"AC-1","text":""}]}',
   ].join('\n');
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const parsed = await requestProviderJson<Record<string, unknown>>(
+    provider,
+    'translation',
+    'scope translation',
+    '{"mainSummary":"","parentStorySummary":"","scopedPrdSection":"","confidenceReasons":[],"selectedAcceptanceCriteriaReason":"","userStories":[],"acceptanceCriteria":[]}',
     {
       model: provider.model,
       temperature: 0.1,
@@ -907,11 +1311,9 @@ async function translateScopeSnapshotWithProvider(
           ),
         },
       ],
-    }
+    },
+    (parsed) => (parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : missingShape('scope translation', '{"mainSummary":"","userStories":[],"acceptanceCriteria":[]}', parsed))
   );
-
-  const content = providerContent(response, 'duplicate review');
-  const parsed = extractJson(content) as Record<string, unknown>;
 
   return {
     provider: provider.name,
@@ -944,9 +1346,11 @@ async function recommendDuplicateCasesWithProvider(
     'Use this exact top-level shape: {"recommendations":[{"newCaseId":"","recommendation":"include|exclude|review","overlap":"already_covered|partial_overlap|new_coverage","matchedExistingCaseIds":[],"reason":""}]}',
   ].join('\n');
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const recommendations = await requestProviderJson(
+    provider,
+    'duplicate_review',
+    'duplicate recommendations',
+    '{"recommendations":[{"newCaseId":"","recommendation":"include|exclude|review","overlap":"already_covered|partial_overlap|new_coverage","matchedExistingCaseIds":[],"reason":""}]}',
     {
       model: provider.model,
       temperature: 0.1,
@@ -979,12 +1383,15 @@ async function recommendDuplicateCasesWithProvider(
           ),
         },
       ],
+    },
+    (parsed) => {
+      const recommendations = findDuplicateRecommendationArray(parsed);
+      if (!recommendations) {
+        return missingShape('duplicate recommendations', '{"recommendations":[...]}', parsed);
+      }
+      return recommendations;
     }
   );
-
-  const parsed = extractJson(providerContent(response, 'duplicate recommendations'));
-  const recommendations = findDuplicateRecommendationArray(parsed);
-  if (!recommendations) throw new Error('LLM duplicate review did not return recommendations.');
 
   return {
     provider: provider.name,
@@ -1027,7 +1434,7 @@ export async function recommendDuplicateCases(
   generatedCases: GeneratedTestCase[]
 ): Promise<DuplicateCaseRecommendation[]> {
   const deterministicRecommendations = buildDeterministicDuplicateRecommendations(existingCases, generatedCases);
-  const providers = config.providers.filter((provider) => provider.apiKey);
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) return buildDuplicateFallbackRecommendations(deterministicRecommendations, generatedCases);
 
   let lastError: Error | null = null;
@@ -1067,9 +1474,364 @@ export async function recommendDuplicateCases(
 }
 
 function getMissingAcceptanceCriteria(context: GenerateContext, testCases: GeneratedTestCase[]) {
-  const coverage = buildCoverage(testCases, context.acceptanceCriteria, { enforceAcceptanceCriteria: true });
+  const coverage = buildCoverage(testCases, context.acceptanceCriteria, {
+    enforceAcceptanceCriteria: true,
+    scopeType: context.constraints?.scopeType,
+    acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+  });
   const uncovered = new Set(coverage.uncoveredCriteria);
   return (context.acceptanceCriteria || []).filter((criterion) => uncovered.has(criterion.id));
+}
+
+function dedupeCriteriaLike<T extends { id: string }>(criteria: T[]): T[] {
+  const seen = new Set<string>();
+  const output: T[] = [];
+  for (const criterion of criteria) {
+    if (!criterion.id || seen.has(criterion.id)) continue;
+    seen.add(criterion.id);
+    output.push(criterion);
+  }
+  return output;
+}
+
+function targetMinimumCaseCount(context: GenerateContext, scenarioPlan: ScenarioPlanItem[]): number {
+  const criteriaCount = (context.acceptanceCriteria || []).length;
+  if (!criteriaCount) return 0;
+  const scenarioTarget = scenarioPlan.length ? Math.min(criteriaCount, scenarioPlan.length) : 0;
+  return Math.min(criteriaCount, 12, Math.max(4, Math.ceil(criteriaCount * 0.75), scenarioTarget));
+}
+
+export function getUnderGranularAcceptanceCriteria(
+  context: GenerateContext,
+  testCases: GeneratedTestCase[],
+  scenarioPlan: ScenarioPlanItem[]
+): Array<{ id: string; text: string }> {
+  const targetMin = targetMinimumCaseCount(context, scenarioPlan);
+  if (!targetMin || testCases.length >= targetMin) return [];
+
+  const criteria = context.acceptanceCriteria || [];
+  const broadCoverageThreshold = 2;
+  const broadCovered = criteria.filter((criterion) => {
+    const coveringCases = testCases.filter((testCase) => (testCase.coversAcceptanceCriteria || []).includes(criterion.id));
+    return coveringCases.length > 0 && coveringCases.every((testCase) => (testCase.coversAcceptanceCriteria || []).length > broadCoverageThreshold);
+  });
+  const needed = Math.max(0, targetMin - testCases.length);
+  return broadCovered.slice(0, needed);
+}
+
+function generationTextFromContext(context: GenerateContext): string {
+  return [
+    context.ticketKey,
+    context.epic,
+    context.mainIssue?.summary,
+    context.mainIssue?.description,
+    context.mainIssue?.renderedDescription,
+    ...(context.mainIssue?.comments || []),
+    context.scopeAuthority?.title,
+    context.scopeAuthority?.body,
+    context.scopeConfluenceSection?.title,
+    context.scopeConfluenceSection?.body,
+    ...(context.confluencePages || []).map((page) => [page.title, page.body, ...(page.comments || []).map((comment) => comment.body)].join('\n')),
+    ...(context.acceptanceCriteria || []).map((criterion) => criterion.text),
+  ]
+    .flat()
+    .filter(Boolean)
+    .join('\n');
+}
+
+function generatedCaseText(testCase: GeneratedTestCase): string {
+  return [
+    testCase.title,
+    testCase.preconditions,
+    testCase.bddScenario,
+    testCase.manualVerification?.target,
+    testCase.manualVerification?.expectedResult,
+    ...(testCase.manualVerification?.steps || []),
+    testCase.apiSpec?.samplePayload,
+    testCase.apiSpec?.expectedResponse,
+    ...(testCase.apiSpec?.assertions || []),
+    testCase.evidence?.coverageNote,
+    ...(testCase.sourceScope || []),
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+function contextContains(contextText: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(contextText));
+}
+
+function matchingCriterionIds(context: GenerateContext, specificPatterns: RegExp[], basePatterns: RegExp[]): string[] {
+  const criteria = context.acceptanceCriteria || [];
+  // Prefer the family's own (specific) pattern matches — those map the scenario to genuinely-related
+  // criteria. Only when nothing specific matches do we fall back to the broad base patterns, and then to
+  // a single criterion — so a scenario never inflates its coverage by claiming every AC that merely
+  // mentions a generic word like "method" or "output" (which is what the broad base patterns match). A
+  // family that matches neither returns [] and is dropped by addScenarioPlanItem (not force-mapped).
+  const specific = criteria.filter((criterion) => specificPatterns.some((pattern) => pattern.test(criterion.text))).map((criterion) => criterion.id);
+  if (specific.length) return specific;
+  return criteria.filter((criterion) => basePatterns.some((pattern) => pattern.test(criterion.text))).map((criterion) => criterion.id).slice(0, 1);
+}
+
+function firstEvidenceLine(contextText: string, patterns: RegExp[]): string {
+  const lines = contextText
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.find((line) => patterns.some((pattern) => pattern.test(line))) || lines[0] || '';
+}
+
+function addScenarioPlanItem(items: ScenarioPlanItem[], item: ScenarioPlanItem) {
+  if (!item.sourceCriterionIds.length) return;
+  if (items.some((existing) => existing.title.toLowerCase() === item.title.toLowerCase())) return;
+  items.push(item);
+}
+
+export function buildScenarioPlan(context: GenerateContext): ScenarioPlanItem[] {
+  const contextText = generationTextFromContext(context);
+  const hasCriteria = Boolean((context.acceptanceCriteria || []).length);
+  if (!hasCriteria || !contextText.trim()) return [];
+
+  const baseCriterionPatterns = [/\b(method|mode|option|output|analysis|result|stream|field|value|behavior)\b/i];
+  const items: ScenarioPlanItem[] = [];
+  const add = (
+    id: string,
+    title: string,
+    intent: string,
+    caseIntent: 'positive' | 'negative' | 'edge',
+    sourcePatterns: RegExp[],
+    criterionPatterns: RegExp[],
+    requiredTerms: string[],
+    priority: number,
+    executionHint: string
+  ) => {
+    if (!contextContains(contextText, sourcePatterns)) return;
+    addScenarioPlanItem(items, {
+      id,
+      title,
+      intent,
+      caseIntent,
+      sourceCriterionIds: matchingCriterionIds(context, criterionPatterns, baseCriterionPatterns),
+      sourceEvidence: firstEvidenceLine(contextText, sourcePatterns),
+      requiredTerms,
+      priority,
+      executionHint,
+    });
+  };
+
+  add(
+    'SP-DEFAULT',
+    'Submit analysis without optional method defaults to existing behavior',
+    'Verify omitted or empty optional method values preserve backward-compatible default behavior.',
+    'positive',
+    [/\b(default(?:s)?|omitt(?:ed|ing)?|empty|absent|without|backward compatible|existing callers?|today'?s behavior)\b[\s\S]{0,100}\b(existing|unchanged|unaffected|preserve)/i],
+    [/\b(default(?:s)?|omit|empty|backward|existing|unchanged|preserve)\b/i],
+    ['without', 'default'],
+    10,
+    'Use a request where the optional field is omitted or empty and assert the existing output behavior is preserved.'
+  );
+  add(
+    'SP-POSITIVE-OPT-IN',
+    'Submit analysis with explicit opt-in method',
+    'Verify the supported non-default method can be requested explicitly and changes output as specified.',
+    'positive',
+    [/\b(opt[-\s]?in|explicit|enabled|supported value|new value|non-default)\b/i],
+    [/\b(opt[-\s]?in|explicit|enabled|supported)\b/i],
+    ['explicit'],
+    20,
+    'Use the supported non-default method value and assert the specified non-default behavior is used.'
+  );
+  add(
+    'SP-CALCULATION',
+    'Calculated output uses the specified formula or weighting rule',
+    'Verify the core calculated value follows the formula or weighting rule from the source.',
+    'positive',
+    [/\b(formula|calculation|computed?|weight(?:ing)?|ratio|density|sum of|multiply|proportion)\b/i],
+    [/\b(formula|calculat|computed?|weight|ratio|density|proportion)\b/i],
+    ['weight'],
+    30,
+    'Use fixtures with known input values and assert the computed output value matches the specified rule.'
+  );
+  add(
+    'SP-MULTI-ENTITY',
+    'Output with multiple entities produces distinct rows per entity',
+    'Verify output remains correctly partitioned when one unit overlaps multiple entities.',
+    'edge',
+    [/\b(multiple|many)\b[\s\S]{0,80}\b(entities?|records?|items?|rows?)\b/i, /\bone row per\b/i],
+    [/\b(multiple|row|record|item|entity)\b/i],
+    ['multiple', 'row'],
+    40,
+    'Use one output unit with multiple related entities and assert each entity has its own result row.'
+  );
+  add(
+    'SP-ZERO-EMPTY',
+    'Known reference with no matching detail produces zero output',
+    'Verify a known reference entity with no matching detail produces the specified zero or empty result.',
+    'edge',
+    [/\bzero\b/i, /\bno matched\b/i, /\bno matching\b/i],
+    [/\bzero|matched|matching|empty\b/i],
+    ['zero'],
+    50,
+    'Use a known reference value with no matching detail rows and assert the result is zero, not fallback.'
+  );
+  add(
+    'SP-MISSING-REFERENCE',
+    'Missing reference data triggers fallback behavior',
+    'Verify missing reference data uses the documented fallback path.',
+    'edge',
+    [/\bmissing\b[\s\S]{0,80}\b(reference|admin|lookup|mapping)\b/i, /\bfallback\b/i],
+    [/\bmissing|reference|fallback|lookup\b/i],
+    ['missing', 'fallback'],
+    60,
+    'Use an input whose reference row is absent and assert the documented fallback calculation or behavior is used.'
+  );
+  add(
+    'SP-RERUN-REGRESSION',
+    'Re-running an existing analysis without the new field is unchanged',
+    'Verify existing saved or rerun flows remain unchanged when the new optional field is absent.',
+    'positive',
+    [/\b(re-?run|existing analysis|unchanged|same result|regression)\b/i],
+    [/\b(re-?run|existing|unchanged|preserve|regression)\b/i],
+    ['rerun', 'unchanged'],
+    70,
+    'Run the existing-flow equivalent without the new field and assert output/config remains unchanged.'
+  );
+  add(
+    'SP-SECONDARY-SURFACE',
+    'Secondary surface supports the same method behavior',
+    'Verify explicitly mentioned secondary surfaces support the method rather than only the primary surface.',
+    'positive',
+    [/\b(secondary surface|another surface|also applies|as well as|in addition to)\b/i],
+    [/\b(secondary|also applies|as well as|in addition to)\b/i],
+    ['secondary'],
+    80,
+    'Use the explicitly mentioned secondary surface and assert it supports the same method behavior.'
+  );
+  add(
+    'SP-INVALID-VALUE',
+    'Invalid method value is rejected',
+    'Verify unsupported values fail validation instead of silently defaulting.',
+    'negative',
+    [/\b(invalid|unsupported|unknown|enum|rejected|validation)\b[\s\S]{0,120}\b(values?|method|field|option)\b/i],
+    [/\b(invalid|unsupported|enum|reject|validation)\b/i],
+    ['invalid', 'reject'],
+    90,
+    'Submit an unsupported value and assert validation rejects it with an error.'
+  );
+  add(
+    'SP-UNAFFECTED-FIELDS',
+    'Unrelated or non-proportional attributes are unchanged',
+    'Verify fields outside the changed calculation remain unchanged.',
+    'positive',
+    [/\b(non[-\s]?proportional|unaffected|unchanged|raw|score|attribute)\b[\s\S]{0,120}\b(unaffected|unchanged|preserve|same)\b/i],
+    [/\b(non[-\s]?proportional|unaffected|unchanged|raw|score|attribute|preserve)\b/i],
+    ['unchanged'],
+    100,
+    'Assert unrelated fields or attributes are identical before and after the new behavior is enabled.'
+  );
+  add(
+    'SP-AGGREGATION',
+    'Coarser output level aggregates child values correctly',
+    'Verify parent or coarser output levels aggregate child-level values correctly.',
+    'edge',
+    [/\b(coarser|parent|aggregate|aggregation|child|output level|rollup|roll up)\b/i],
+    [/\b(coarser|parent|aggregate|child|output level|rollup)\b/i],
+    ['aggregate'],
+    110,
+    'Use child-level fixtures that roll up to a parent/coarser output and assert the aggregate is correct.'
+  );
+  add(
+    'SP-ALTERNATE-OUTPUT',
+    'Alternate output format supports the method',
+    'Verify explicitly mentioned alternate output formats support the same behavior.',
+    'positive',
+    [/\b(alternate output|output format|additional output|other output)\b/i],
+    [/\b(alternate output|output format|additional output|other output)\b/i],
+    ['output format'],
+    120,
+    'Use the explicitly mentioned alternate output format and assert it supports the method behavior.'
+  );
+
+  const byId = new Map<string, ScenarioPlanItem>();
+  for (const item of items.sort((a, b) => a.priority - b.priority)) byId.set(item.id, item);
+  return Array.from(byId.values()).slice(0, 14);
+}
+
+function scenarioPlanItemCovered(item: ScenarioPlanItem, testCases: GeneratedTestCase[]): boolean {
+  const terms = item.requiredTerms.map((term) => term.toLowerCase()).filter(Boolean);
+  if (!terms.length) return false;
+  return testCases.some((testCase) => {
+    const text = generatedCaseText(testCase).toLowerCase();
+    return terms.every((term) => text.includes(term));
+  });
+}
+
+export function getMissingScenarioPlanItems(plan: ScenarioPlanItem[], testCases: GeneratedTestCase[]): ScenarioPlanItem[] {
+  return plan.filter((item) => !scenarioPlanItemCovered(item, testCases));
+}
+
+// Identity-based selection: cases are keyed by object identity, not testCase.id, because normalizeCase
+// restarts fallback ids (TC-01, TC-02…) per provider batch and dedupeGeneratedCases keys on title|ref —
+// so merged initial+repair batches routinely share ids. Keying by identity means colliding ids can never
+// cause a distinct, coverage-bearing case to be dropped. Plan-matched cases seed the set; the rest fill.
+function selectPlannedCases(plan: ScenarioPlanItem[], testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  const selected: GeneratedTestCase[] = [];
+  const used = new Set<GeneratedTestCase>();
+  for (const item of plan) {
+    const match = testCases.find((testCase) => !used.has(testCase) && scenarioPlanItemCovered(item, [testCase]));
+    if (!match) continue;
+    used.add(match);
+    selected.push(match);
+  }
+  for (const testCase of testCases) {
+    if (!used.has(testCase) && selected.length < Math.max(plan.length, 12)) {
+      used.add(testCase);
+      selected.push(testCase);
+    }
+  }
+  return selected;
+}
+
+// Trim an over-large suite toward targetMax WITHOUT sacrificing coverage. The gap score weighs uncovered
+// ACs, single-polarity gaps (BUG-10), and missing scenario-plan items together, and the cap is soft: once
+// reached we keep adding back only cases that strictly close a remaining gap. So compaction can never drop
+// a case the missing-coverage or single-polarity repair pass just added (it would re-open a gap).
+function compactScenarioPlannedCases(context: GenerateContext, plan: ScenarioPlanItem[], testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  if (!plan.length) return testCases;
+  const targetMax = 14;
+  if (testCases.length <= targetMax) return testCases;
+
+  const gapScore = (cases: GeneratedTestCase[]): number => {
+    const coverage = buildCoverage(cases, context.acceptanceCriteria, {
+      enforceAcceptanceCriteria: true,
+      scopeType: context.constraints?.scopeType,
+      acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+    });
+    return (coverage.uncoveredCriteria || []).length * 100
+      + (coverage.singlePolarityCriteria || []).length * 10
+      + getMissingScenarioPlanItems(plan, cases).length;
+  };
+
+  const compacted = selectPlannedCases(plan, testCases).slice(0, targetMax);
+  const inSuite = new Set<GeneratedTestCase>(compacted);
+  const remaining = testCases.filter((testCase) => !inSuite.has(testCase));
+  // Add back any case that strictly reduces the gap — even past targetMax — so no repaired coverage is lost.
+  while (remaining.length) {
+    const currentGap = gapScore(compacted);
+    if (currentGap === 0) break;
+    let bestIndex = -1;
+    let bestImprovement = 0;
+    for (let index = 0; index < remaining.length; index += 1) {
+      const improvement = currentGap - gapScore([...compacted, remaining[index]]);
+      if (improvement > bestImprovement) {
+        bestImprovement = improvement;
+        bestIndex = index;
+      }
+    }
+    if (bestIndex < 0) break;
+    compacted.push(remaining.splice(bestIndex, 1)[0]);
+  }
+  return compacted;
 }
 
 // BUG-10: buildCoverage() already detects conditional criteria covered in only one polarity (e.g. a
@@ -1081,7 +1843,11 @@ export function getSinglePolarityGaps(
   context: GenerateContext,
   testCases: GeneratedTestCase[]
 ): Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> {
-  const coverage = buildCoverage(testCases, context.acceptanceCriteria, { enforceAcceptanceCriteria: true });
+  const coverage = buildCoverage(testCases, context.acceptanceCriteria, {
+    enforceAcceptanceCriteria: true,
+    scopeType: context.constraints?.scopeType,
+    acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+  });
   const byId = new Map((context.acceptanceCriteria || []).map((criterion) => [criterion.id, criterion]));
   const gaps: Array<{ id: string; text: string; missing: Array<'positive' | 'negative'> }> = [];
   for (const entry of coverage.singlePolarityCriteria || []) {
@@ -1095,6 +1861,7 @@ export function getSinglePolarityGaps(
 export function isFallbackError(error: Error & { statusCode?: number }): boolean {
   const message = String(error && error.message ? error.message : '').toLowerCase();
   return (
+    isRetryableLlmContentError(error) ||
     error.statusCode === 429 ||
     message.includes('quota') ||
     message.includes('rate limit') ||
@@ -1111,7 +1878,7 @@ export function isFallbackError(error: Error & { statusCode?: number }): boolean
 // previously repair silently lacked the apiSpec/traceability/provenance rules, so repaired cases were
 // lower quality and could fabricate endpoints. Generation-only expansion rules (per-endpoint happy/
 // negative, blocker-as-background) stay inline in generateWithProvider; repair must remain minimal.
-function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boolean }): string[] {
+function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boolean; providerBehavior?: ProviderBehavior }): string[] {
   const { apiMode, apiContractRelevant } = opts;
   return [
     apiMode
@@ -1121,14 +1888,17 @@ function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boo
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     apiMode
-      ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases and "manual_db" for database/migration/ETL verification cases. Do not put API, DB, or Web in the title — only [BE].'
+      ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases, "manual_db" for database/migration verification, "manual_code_review" for proto/generated-code/repository review, "manual_integration" for internal worker/runtime verification, and "manual_other" only when no better manual type applies. Do not put API, DB, or Web in the title — only [BE].'
       : 'Titles must follow [FE][{Epic}][{Ticket ID}] Title.',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
     apiMode
-      ? 'For every postman case, include apiSpec with method, path, samplePayload when the endpoint accepts a body, expectedResponse, and assertions. The bddScenario must also include the sample payload and expected response/assertions in triple-quoted blocks so it is executable from Postman guidance.'
+      ? 'MANDATORY for every "postman" case: a populated apiSpec object with a non-empty apiSpec.method (GET/POST/PUT/PATCH/DELETE) AND a non-empty apiSpec.path (e.g. /v1/analysis). A postman case without apiSpec.method and apiSpec.path is INVALID and will be rejected — if you cannot give an endpoint, use executionType "manual_db" instead. apiSpec.path MUST be a documented endpoint path and MUST use the placeholder for ids exactly as documented (e.g. /v1/analysis/{id}/stream) — never substitute a made-up concrete id into the path; put "id comes from the prior request" in preconditions instead. Also include samplePayload when the endpoint accepts a body, expectedResponse, and assertions, and mirror the payload + expected response/assertions in the bddScenario as triple-quoted blocks so it is executable from Postman guidance.'
       : '',
     apiMode
-      ? 'For migration, backfill, dataset_schema, SQL, or DB verification scope, include manual_db cases with manualVerification target, steps, and expectedResult. Make the BDD clear that the case is not Postman-testable.'
+      ? 'For migration, backfill, dataset_schema, SQL, or DB verification scope, include manual_db cases with manualVerification target, steps, and expectedResult. For proto/generated-code/repository checks, use manual_code_review. For worker/prefetch/runtime integration checks, use manual_integration. Make the BDD clear that these cases are not Postman-testable.'
+      : '',
+    apiMode
+      ? 'Follow context.acceptanceCriteriaExecutionPlan exactly: a postman case may cover only ACs whose executionType is "postman"; manual_db/manual_code_review/manual_integration/manual_other cases may cover only ACs with the same executionType. If one user journey depends on another endpoint, put the dependency in preconditions and assert only the observableSurface for the AC being covered.'
       : '',
     apiMode
       ? 'Use only endpoint paths present in context.apiContract.matchedEndpoints. If a case needs an endpoint not in that matched set, do not fabricate a confident path — note in preconditions that the path is assumed and must be verified against the API docs.'
@@ -1137,18 +1907,24 @@ function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boo
       ? 'Precise traceability: set coversAcceptanceCriteria to ONLY the acceptance criteria a case actually verifies through its When/Then steps. Never staple an unrelated AC onto a case (e.g. a dataset-list or dataset-data test must NOT claim an email-routing or login-restriction AC it does not exercise).'
       : '',
     apiMode && apiContractRelevant
+      ? 'One endpoint per case: each postman case must exercise EXACTLY the single endpoint in its apiSpec. When an effect is triggered by one endpoint but observed on another (e.g. submit via POST /v1/analysis, then read the result on GET /v1/analysis/{id}/stream), make the OBSERVATION its own focused case whose apiSpec is the endpoint that actually shows the effect, and record the triggering action as an already-completed precondition in prose (e.g. "an analysis was submitted with proportion_method DASYMETRIC and has completed; its id is known") WITHOUT writing a second HTTP method+path anywhere in the bddScenario. The When/Then steps must reference only the apiSpec endpoint, and every acceptance criterion the case claims must be verified on that single endpoint response via apiSpec.assertions — not merely narrated in prose. A case whose real assertions live on a different endpoint than its apiSpec produces false-green coverage and will be rejected.'
+      : '',
+    'Keep each case focused: map coversAcceptanceCriteria to at most 2 acceptance criteria. If a flow seems to satisfy more, split it into one focused case per behavior instead of one broad case. Only an explicit smoke or end-to-end case (say so in the title, e.g. "... end-to-end smoke") may map to more.',
+    apiMode && apiContractRelevant
       ? 'Write executable scenarios with concrete, reusable fixtures in the Given steps — name the actors and resources (e.g. a specific partner/org and an assigned vs a non-assigned resource) and reuse them consistently across scenarios — so every case has unambiguous preconditions rather than abstract phrasing.'
       : '',
     apiMode && !apiContractRelevant
       ? 'This backend ticket does NOT change the HTTP API contract (no endpoint references). Do not create Postman/API cases and do not invent endpoints. Produce manual_db cases (manualVerification with target, steps, expectedResult) for data/schema/DB work, or manual_other when DB is not involved.'
       : '',
+    ...(opts.providerBehavior?.caseDirectives || []),
   ];
 }
 
-async function generateWithProvider(provider: ProviderConfig, context: GenerateContext) {
+async function generateWithProvider(provider: ProviderConfig, context: GenerateContext, scenarioPlan: ScenarioPlanItem[]) {
   const enforceCoverage = Boolean(context.coverageEnforced);
   const scopeType = context.constraints?.scopeType || 'web';
   const apiMode = scopeType === 'api';
+  const behavior = providerBehavior(provider);
   // A backend ticket that doesn't change the HTTP API contract (migration/backfill/DB) should
   // produce manual verification cases, not Postman/API cases. Default true for back-compat.
   const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
@@ -1170,7 +1946,7 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       : 'The main Jira ticket description is empty or too thin. Treat the main Jira ticket acceptance criteria as the primary coverage authority. Parent Story and PRD are supporting context only.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
-    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
     apiMode && apiContractRelevant
       ? 'Give each distinct behavioral rule its own dedicated case that truly verifies it: for an email-routing AC, the Then step must assert the email CTA/body link contains the partner URL (not merely call an endpoint); for an AC that restricts a specific action (e.g. login) to the partner URL, include a case performing that literal action via the general LI URL and asserting the error. Do not consider such an AC covered by tangential endpoint calls.'
       : '',
@@ -1190,6 +1966,12 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
       ? 'Every acceptance criterion in context.acceptanceCriteria must be covered by at least one test case across the generated set. Generate at least one explicit case for each acceptance criterion before adding extra happy-path, negative, or edge coverage.'
       : 'When coverage is not enforced, focus on scoped FE behavior and keep coversAcceptanceCriteria empty unless the mapping is obvious.',
     enforceCoverage
+      ? 'Do not compress many acceptance criteria into a tiny suite. Prefer focused cases that cover one acceptance criterion, or two tightly-coupled criteria at most. A case must not list an AC id unless its When/Then steps directly verify that AC.'
+      : '',
+    enforceCoverage && scenarioPlan.length
+      ? 'Generate exactly one test case for each scenarioPlan item unless two adjacent items are truly inseparable. Each case must clearly exercise that item intent, include its requiredTerms in the title or BDD, and map only to relevant sourceCriterionIds. Do not add implementation-detail cases outside scenarioPlan unless an acceptance criterion would otherwise be uncovered.'
+      : '',
+    enforceCoverage
       ? 'Every test case must list at least one coversAcceptanceCriteria id.'
       : 'Every test case must still include sourceScope referencing the Jira issues or scoped Story source used.',
     enforceCoverage
@@ -1205,17 +1987,22 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
 
   const userPrompt = JSON.stringify(
     {
-      instruction: 'Generate happy path, negative, and edge-case BDD test cases.',
+      instruction: scenarioPlan.length
+        ? 'Generate the compact BDD suite from scenarioPlan in order, one case per item.'
+        : 'Generate happy path, negative, and edge-case BDD test cases.',
       scopePriority,
+      scenarioPlan,
       context: buildGenerationPromptContext(context),
     },
     null,
     2
   );
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const cases = await requestProviderJson(
+    provider,
+    'generation',
+    'generation',
+    '{"testCases":[...]}',
     {
       model: provider.model,
       temperature: 0.2,
@@ -1224,15 +2011,14 @@ async function generateWithProvider(provider: ProviderConfig, context: GenerateC
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
+    },
+    (parsed) => {
+      const cases = findCaseArray(parsed);
+      if (!Array.isArray(cases)) return missingShape('generation', '{"testCases":[...]}', parsed);
+      return cases;
     }
   );
 
-  const content = providerContent(response, 'generation');
-  const parsed = extractJson(content);
-  const cases = findCaseArray(parsed);
-  if (!Array.isArray(cases)) {
-    throw new Error('LLM response JSON must contain a testCases array.');
-  }
   return {
     provider: provider.name,
     model: provider.model,
@@ -1250,6 +2036,7 @@ async function repairMissingCoverageWithProvider(
   const scopeType = context.constraints?.scopeType || 'web';
   const apiMode = scopeType === 'api';
   const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const behavior = providerBehavior(provider);
   const prdScopedThinTicket =
     scopePriority.primaryAuthority === 'matched_prd_subsection' || scopePriority.primaryAuthority === 'broad_prd_section';
   const systemPrompt = [
@@ -1267,11 +2054,12 @@ async function repairMissingCoverageWithProvider(
     'Return only additional test cases needed to cover the missing acceptance criteria.',
     'Do not rewrite or repeat existing cases unless necessary for one of the missing criteria.',
     'Generate repair cases from the same selected scope authority and final acceptance criteria only.',
-    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
     apiMode && apiContractRelevant
       ? 'Reuse the same named actors/resources (assigned vs non-assigned) already established by the existing cases as executable preconditions, so repair cases read consistently with the set.'
       : '',
     'Each returned case must map to at least one missing acceptance criterion id.',
+    'Keep each returned case focused: cover one missing acceptance criterion, or two tightly-coupled criteria at most. Do not staple unrelated AC ids onto a broad scenario.',
     'Keep the set minimal but sufficient.',
   ].filter(Boolean).join('\n');
 
@@ -1293,9 +2081,11 @@ async function repairMissingCoverageWithProvider(
     2
   );
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const cases = await requestProviderJson(
+    provider,
+    'coverage_repair',
+    'coverage repair',
+    '{"testCases":[...]}',
     {
       model: provider.model,
       temperature: 0.2,
@@ -1304,15 +2094,154 @@ async function repairMissingCoverageWithProvider(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
+    },
+    (parsed) => {
+      const cases = findCaseArray(parsed);
+      if (!Array.isArray(cases)) return missingShape('coverage repair', '{"testCases":[...]}', parsed);
+      return cases;
     }
   );
 
-  const content = providerContent(response, 'coverage repair');
-  const parsed = extractJson(content);
-  const cases = findCaseArray(parsed);
-  if (!Array.isArray(cases)) {
-    throw new Error('LLM repair response JSON must contain a testCases array.');
+  return {
+    provider: provider.name,
+    model: provider.model,
+    testCases: cases.map((testCase, index) => normalizeCase(testCase as Record<string, unknown>, index)),
+  };
+}
+
+// Replace each original case with its repaired version (matched by id); cases the repair pass didn't
+// return are kept as-is. Used by the validation-repair pass so a re-prompt fixes invalid cases IN PLACE
+// rather than appending duplicates. Pure/exported so the merge logic is directly unit-testable.
+export function mergeRepairedCases(original: GeneratedTestCase[], repaired: GeneratedTestCase[]): GeneratedTestCase[] {
+  const byId = new Map<string, GeneratedTestCase>();
+  for (const testCase of repaired) {
+    if (testCase.id) byId.set(testCase.id, testCase);
   }
+  return original.map((testCase) => byId.get(testCase.id) ?? testCase);
+}
+
+// Validation-repair: re-prompt the provider to FIX cases that failed structural validation (most often a
+// postman/API case missing its apiSpec). Weaker models (e.g. DeepSeek) don't reliably emit the required
+// shape, and nothing else in the pipeline corrects it — so this pass turns an unpushable suite into a
+// valid one. Mirrors the other repair passes; corrected cases keep their id so mergeRepairedCases can
+// swap them in place.
+async function repairInvalidCasesWithProvider(
+  provider: ProviderConfig,
+  context: GenerateContext,
+  invalidCases: Array<{ testCase: GeneratedTestCase; errors: string[] }>
+): Promise<ProviderGenerationResult> {
+  const scopePriority = buildScopePriorityContext(context);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api';
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const behavior = providerBehavior(provider);
+  const systemPrompt = [
+    'You are a senior QA engineer FIXING test cases that failed validation.',
+    'Return strict JSON only. No markdown and no explanation.',
+    'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
+    'For every case in casesToFix, return a corrected full case that resolves EVERY listed validationError while keeping the same id, the same scenario meaning, and the same coversAcceptanceCriteria. Do not drop cases, do not renumber ids, and do not add new cases.',
+    'The most common fix: a postman/API case is missing its apiSpec. Add a populated apiSpec with a concrete method (e.g. POST) and path (e.g. /v1/analysis), plus samplePayload/expectedResponse/assertions, and mirror the payload + expected response in the bddScenario as triple-quoted blocks.',
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
+  ].filter(Boolean).join('\n');
+
+  const userPrompt = JSON.stringify(
+    {
+      instruction: 'Return corrected versions of every case in casesToFix that resolve their validationErrors. Keep the same id for each.',
+      scopePriority,
+      casesToFix: invalidCases.map(({ testCase, errors }) => ({ testCase, validationErrors: errors })),
+      context: buildGenerationPromptContext(context),
+    },
+    null,
+    2
+  );
+
+  const cases = await requestProviderJson(
+    provider,
+    'coverage_repair',
+    'validation repair',
+    '{"testCases":[...]}',
+    {
+      model: provider.model,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    },
+    (parsed) => {
+      const found = findCaseArray(parsed);
+      if (!Array.isArray(found)) return missingShape('validation repair', '{"testCases":[...]}', parsed);
+      return found;
+    }
+  );
+
+  return {
+    provider: provider.name,
+    model: provider.model,
+    testCases: cases.map((testCase, index) => normalizeCase(testCase as Record<string, unknown>, index)),
+  };
+}
+
+async function repairScenarioPlanWithProvider(
+  provider: ProviderConfig,
+  context: GenerateContext,
+  existingCases: GeneratedTestCase[],
+  missingPlanItems: ScenarioPlanItem[]
+): Promise<ProviderGenerationResult> {
+  const scopePriority = buildScopePriorityContext(context);
+  const scopeType = context.constraints?.scopeType || 'web';
+  const apiMode = scopeType === 'api';
+  const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const behavior = providerBehavior(provider);
+  const systemPrompt = [
+    'You are a senior QA engineer repairing missing scenario-plan coverage.',
+    'Return strict JSON only. No markdown and no explanation.',
+    'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
+    'Return exactly one additional test case for each missingScenarioPlan item.',
+    'Each returned case must clearly exercise that scenario item, include its requiredTerms in the title or BDD, and map coversAcceptanceCriteria to the item sourceCriterionIds.',
+    'Do not repeat existing cases and do not add implementation-detail cases outside the missingScenarioPlan.',
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
+  ].filter(Boolean).join('\n');
+
+  const userPrompt = JSON.stringify(
+    {
+      instruction: 'Generate only the missing scenario-plan cases.',
+      scopePriority,
+      missingScenarioPlan: missingPlanItems,
+      existingCases: existingCases.map((testCase) => ({
+        id: testCase.id,
+        title: testCase.title,
+        caseIntent: testCase.caseIntent,
+        coversAcceptanceCriteria: testCase.coversAcceptanceCriteria,
+      })),
+      context: buildGenerationPromptContext(context),
+    },
+    null,
+    2
+  );
+
+  const cases = await requestProviderJson(
+    provider,
+    'scenario_plan_repair',
+    'scenario-plan repair',
+    '{"testCases":[...]}',
+    {
+      model: provider.model,
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    },
+    (parsed) => {
+      const cases = findCaseArray(parsed);
+      if (!Array.isArray(cases)) return missingShape('scenario-plan repair', '{"testCases":[...]}', parsed);
+      return cases;
+    }
+  );
+
   return {
     provider: provider.name,
     model: provider.model,
@@ -1333,6 +2262,7 @@ async function repairSinglePolarityWithProvider(
   const scopeType = context.constraints?.scopeType || 'web';
   const apiMode = scopeType === 'api';
   const apiContractRelevant = context.constraints?.apiContractRelevant !== false;
+  const behavior = providerBehavior(provider);
   const systemPrompt = [
     'You are a senior QA engineer repairing one-sided acceptance-criteria coverage.',
     'Each listed criterion already has at least one test case, but every existing case shares the same polarity, leaving a conditional branch of the criterion unexercised (e.g. only the accepted/enabled path is tested, never the rejected/disabled path, or vice versa).',
@@ -1340,7 +2270,7 @@ async function repairSinglePolarityWithProvider(
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
     'Return only the test cases needed to add the missing polarity listed for each criterion. Do not add cases for a polarity that is not listed as missing for that criterion.',
     'Each returned case must set caseIntent to exactly one of the missing polarities requested for that criterion (positive or negative), and must include that criterion id in coversAcceptanceCriteria.',
-    ...sharedCaseDirectives({ apiMode, apiContractRelevant }),
+    ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
     'Reuse the same named actors/resources/fixtures already established by the existing cases so repair cases read consistently with the set, rather than introducing new unrelated fixtures.',
     'Keep the set minimal but sufficient: one case per missing polarity per criterion is normally enough unless the criterion bundles multiple distinct branches for that polarity.',
   ].filter(Boolean).join('\n');
@@ -1363,9 +2293,11 @@ async function repairSinglePolarityWithProvider(
     2
   );
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const cases = await requestProviderJson(
+    provider,
+    'polarity_repair',
+    'polarity repair',
+    '{"testCases":[...]}',
     {
       model: provider.model,
       temperature: 0.2,
@@ -1374,15 +2306,14 @@ async function repairSinglePolarityWithProvider(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ],
+    },
+    (parsed) => {
+      const cases = findCaseArray(parsed);
+      if (!Array.isArray(cases)) return missingShape('polarity repair', '{"testCases":[...]}', parsed);
+      return cases;
     }
   );
 
-  const content = providerContent(response, 'polarity repair');
-  const parsed = extractJson(content);
-  const cases = findCaseArray(parsed);
-  if (!Array.isArray(cases)) {
-    throw new Error('LLM polarity repair response JSON must contain a testCases array.');
-  }
   return {
     provider: provider.name,
     model: provider.model,
@@ -1390,8 +2321,46 @@ async function repairSinglePolarityWithProvider(
   };
 }
 
+// Snap an apiSpec.path that structurally matches a documented endpoint onto that endpoint's template, so a
+// model that fabricated a concrete id (e.g. /v1/analysis/AC3PosAnalysis/stream) is corrected back to the
+// documented /v1/analysis/{id}/stream. Matching is segment-by-segment: a template placeholder ({id} or
+// :id) accepts any concrete segment, literal segments must match case-insensitively, and the method must
+// agree. Only paths that match a documented endpoint are rewritten — so this can only make a path MORE
+// correct (never invents or breaks one), and it works even when the model ignores the prompt directive.
+// Pure/exported for direct unit testing.
+export function canonicalizeApiSpecPaths(
+  cases: GeneratedTestCase[],
+  matchedEndpoints: Array<{ method?: string; path?: string }>
+): GeneratedTestCase[] {
+  if (!matchedEndpoints?.length) return cases;
+  const segmentsOf = (path: string): string[] =>
+    String(path || '').split(/[?#]/)[0].replace(/\/+$/, '').split('/');
+  const matchesTemplate = (generated: string, template: string): boolean => {
+    const g = segmentsOf(generated);
+    const t = segmentsOf(template);
+    if (g.length !== t.length) return false;
+    return t.every((segment, index) => {
+      if (/^\{.*\}$/.test(segment) || segment.startsWith(':')) return true; // placeholder accepts any value
+      return segment.toLowerCase() === String(g[index] || '').toLowerCase();
+    });
+  };
+  return cases.map((testCase) => {
+    const spec = testCase.apiSpec;
+    if (!spec || !spec.path) return testCase;
+    const match = matchedEndpoints.find((endpoint) => {
+      const template = String(endpoint.path || '');
+      if (!template || template === spec.path || !matchesTemplate(spec.path, template)) return false;
+      const specMethod = String(spec.method || '').toUpperCase();
+      const endpointMethod = String(endpoint.method || '').toUpperCase();
+      return !specMethod || !endpointMethod || specMethod === endpointMethod;
+    });
+    if (!match) return testCase;
+    return { ...testCase, apiSpec: { ...spec, path: String(match.path) } };
+  });
+}
+
 export async function generateTestCases(config: LlmConfig, context: GenerateContext) {
-  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) {
     throw new Error('No LLM provider API key is configured.');
   }
@@ -1400,31 +2369,157 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
   for (let index = 0; index < providers.length; index += 1) {
     const provider = providers[index];
     try {
-      const initial = await generateWithProvider(provider, context);
+      const stepTimings: GenerationStepTiming[] = [];
+      const recordStep = (
+        step: GenerationStepName,
+        startedAt: number,
+        attempted: boolean,
+        beforeCount?: number,
+        afterCount?: number,
+        error?: unknown
+      ) => {
+        stepTimings.push({
+          step,
+          provider: provider.name,
+          model: provider.model,
+          durationMs: Date.now() - startedAt,
+          attempted,
+          ...(typeof beforeCount === 'number' && typeof afterCount === 'number' ? { changedCaseCount: afterCount - beforeCount } : {}),
+          ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+        });
+      };
+      const behavior = providerBehavior(provider);
+      const scenarioPlan = context.coverageEnforced ? buildScenarioPlan(context) : [];
+      const initialStartedAt = Date.now();
+      const initial = await generateWithProvider(provider, context, scenarioPlan);
+      recordStep('initial_generation', initialStartedAt, true, 0, initial.testCases.length);
       if (!context.coverageEnforced) {
-        return initial;
+        return { ...initial, stepTimings };
       }
 
-      let mergedCases = dedupeGeneratedCases(initial.testCases);
-      const missingCriteria = getMissingAcceptanceCriteria(context, mergedCases);
-      if (missingCriteria.length) {
-        const repair = await repairMissingCoverageWithProvider(provider, context, mergedCases, missingCriteria);
-        mergedCases = dedupeGeneratedCases([...mergedCases, ...repair.testCases]);
+      let mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(initial.testCases));
+      const scenarioStartedAt = Date.now();
+      const scenarioBeforeCount = mergedCases.length;
+      let scenarioAttempted = false;
+      if (scenarioPlan.length && behavior.scenarioPlanRepairMaxAttempts > 0) {
+        // Fail-soft: a malformed scenario-plan repair response must not discard a good initial suite.
+        // A genuine provider/quota error still rethrows so the provider-fallback loop can take over.
+        try {
+          for (let repairAttempt = 0; repairAttempt < behavior.scenarioPlanRepairMaxAttempts; repairAttempt += 1) {
+            const missingPlanItems = getMissingScenarioPlanItems(scenarioPlan, mergedCases);
+            if (!missingPlanItems.length) break;
+            scenarioAttempted = true;
+            const repair = await repairScenarioPlanWithProvider(provider, context, mergedCases, missingPlanItems);
+            mergedCases = mergeGeneratedCasesWithQualityGate(context, scenarioPlan, mergedCases, repair.testCases);
+          }
+        } catch (error) {
+          recordStep('scenario_plan_repair', scenarioStartedAt, scenarioAttempted, scenarioBeforeCount, mergedCases.length, error);
+          if (isFallbackError(error as Error & { statusCode?: number })) throw error;
+        }
       }
+      if (!stepTimings.some((entry) => entry.step === 'scenario_plan_repair')) {
+        recordStep('scenario_plan_repair', scenarioStartedAt, scenarioAttempted, scenarioBeforeCount, mergedCases.length);
+      }
+      // Capping/compaction runs once at the end, AFTER the coverage + polarity repairs below, so those
+      // passes see the full case set and compaction can't discard the coverage they add (no pre-repair cap).
+      const coverageStartedAt = Date.now();
+      const coverageBeforeCount = mergedCases.length;
+      let coverageAttempted = false;
+      try {
+        for (let repairAttempt = 0; repairAttempt < behavior.coverageRepairMaxAttempts; repairAttempt += 1) {
+          const missingCriteria = getMissingAcceptanceCriteria(context, mergedCases);
+          const underGranularCriteria = getUnderGranularAcceptanceCriteria(context, mergedCases, scenarioPlan);
+          const repairTargets = dedupeCriteriaLike([...missingCriteria, ...underGranularCriteria]);
+          if (!repairTargets.length) break;
+          coverageAttempted = true;
+          const beforeCount = mergedCases.length;
+          const repair = await repairMissingCoverageWithProvider(provider, context, mergedCases, repairTargets);
+          mergedCases = mergeGeneratedCasesWithQualityGate(context, scenarioPlan, mergedCases, repair.testCases);
+          if (mergedCases.length === beforeCount) break;
+        }
+      } catch (error) {
+        recordStep('coverage_repair', coverageStartedAt, coverageAttempted, coverageBeforeCount, mergedCases.length, error);
+        throw error;
+      }
+      recordStep('coverage_repair', coverageStartedAt, coverageAttempted, coverageBeforeCount, mergedCases.length);
 
-      // BUG-10: after full-coverage repair, close single-polarity gaps the same way. Runs after the
-      // missing-coverage pass, so it only ever sees criteria that are already covered at all — a
-      // criterion still fully uncovered is handled above, not here. No-op when polarityGaps is empty.
+      // BUG-10: after full-coverage repair, close single-polarity gaps the same way. This runs by default;
+      // it is only skipped under the opt-in DeepSeek fast path (LLM_DEEPSEEK_FAST_GENERATION=true), which
+      // trades this and the scenario-plan repair away to avoid multi-minute DeepSeek runs.
+      const polarityStartedAt = Date.now();
+      const polarityBeforeCount = mergedCases.length;
       const polarityGaps = getSinglePolarityGaps(context, mergedCases);
-      if (polarityGaps.length) {
-        const polarityRepair = await repairSinglePolarityWithProvider(provider, context, mergedCases, polarityGaps);
-        mergedCases = dedupeGeneratedCases([...mergedCases, ...polarityRepair.testCases]);
+      let polarityAttempted = false;
+      try {
+        if (polarityGaps.length && behavior.polarityRepairEnabled) {
+          polarityAttempted = true;
+          const polarityRepair = await repairSinglePolarityWithProvider(provider, context, mergedCases, polarityGaps);
+          mergedCases = mergeGeneratedCasesWithQualityGate(context, scenarioPlan, mergedCases, polarityRepair.testCases);
+        }
+      } catch (error) {
+        recordStep('polarity_repair', polarityStartedAt, polarityAttempted, polarityBeforeCount, mergedCases.length, error);
+        throw error;
       }
+      recordStep('polarity_repair', polarityStartedAt, polarityAttempted, polarityBeforeCount, mergedCases.length);
+
+      // Validation-repair: re-prompt to fix structurally-invalid cases (e.g. a postman case with no
+      // apiSpec) so the suite is actually pushable. Scoped to case shape (enforceAcceptanceCriteria off —
+      // AC coverage is handled by the passes above). Fail-soft, and it stops as soon as a round makes no
+      // progress so a model that can't produce a valid shape can't spin the loop.
+      const structuralValidationOptions = {
+        jiraKey: context.ticketKey,
+        epic: context.epic,
+        feOnly: context.constraints?.feOnly,
+        scopeType: context.constraints?.scopeType,
+        allowNonMainRefs: true,
+        enforceAcceptanceCriteria: false,
+        matchedEndpoints: context.apiContract?.matchedEndpoints,
+      };
+      let lastInvalidSignature = '';
+      const validationStartedAt = Date.now();
+      const validationBeforeCount = mergedCases.length;
+      let validationAttempted = false;
+      for (let repairAttempt = 0; repairAttempt < behavior.validationRepairMaxAttempts; repairAttempt += 1) {
+        const invalid = validateCases(mergedCases, structuralValidationOptions).filter((entry) => !entry.valid);
+        if (!invalid.length) break;
+        const signature = invalid.map((entry) => entry.id).sort().join('|');
+        if (signature === lastInvalidSignature) break; // previous repair round didn't fix these — stop
+        lastInvalidSignature = signature;
+        const invalidCases = invalid.map((entry) => ({ testCase: mergedCases[entry.index], errors: entry.errors }));
+        try {
+          validationAttempted = true;
+          const repair = await repairInvalidCasesWithProvider(provider, context, invalidCases);
+          mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(mergeRepairedCases(mergedCases, repair.testCases)));
+        } catch (error) {
+          recordStep('validation_repair', validationStartedAt, validationAttempted, validationBeforeCount, mergedCases.length, error);
+          if (isFallbackError(error as Error & { statusCode?: number })) throw error;
+          break; // fail-soft: a malformed repair response must not discard the suite
+        }
+      }
+      if (!stepTimings.some((entry) => entry.step === 'validation_repair')) {
+        recordStep('validation_repair', validationStartedAt, validationAttempted, validationBeforeCount, mergedCases.length);
+      }
+
+      const compactionStartedAt = Date.now();
+      const compactionBeforeCount = mergedCases.length;
+      let compactionAttempted = false;
+      if (scenarioPlan.length) {
+        compactionAttempted = true;
+        mergedCases = compactScenarioPlannedCases(context, scenarioPlan, mergedCases);
+      }
+      mergedCases = pruneSemanticDuplicateCases(mergedCases);
+
+      // Snap any fabricated concrete id in an apiSpec path back to the documented template
+      // (e.g. /v1/analysis/AC3PosAnalysis/stream -> /v1/analysis/{id}/stream). Deterministic + provider-safe.
+      mergedCases = canonicalizeApiSpecPaths(mergedCases, context.apiContract?.matchedEndpoints || []);
+      mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(mergedCases));
+      recordStep('compaction', compactionStartedAt, compactionAttempted, compactionBeforeCount, mergedCases.length);
 
       return {
         provider: initial.provider,
         model: initial.model,
         testCases: mergedCases,
+        stepTimings,
       };
     } catch (error) {
       lastError = error as Error;
@@ -1438,27 +2533,92 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
   throw lastError || new Error('LLM generation failed.');
 }
 
-export async function synthesizeAcceptanceCriteria(config: LlmConfig, input: AcceptanceCriteriaSynthesisInput): Promise<AcceptanceCriteriaSynthesisResult> {
-  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+export async function synthesizeAcceptanceCriteria(
+  config: LlmConfig,
+  input: AcceptanceCriteriaSynthesisInput,
+  logger?: Logger
+): Promise<AcceptanceCriteriaSynthesisResult> {
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) {
     throw new Error('No LLM provider API key is configured.');
   }
 
+  // A transient synthesis failure (timeout, 429, 5xx) must not silently collapse the AC set — especially
+  // when only one provider is configured (e.g. OpenAI key empty, DeepSeek sole), where there is no
+  // fallback to absorb the blip. Retry the same provider a bounded number of times on transient errors
+  // before falling back or giving up. (requestProviderJson already retries malformed/empty-JSON content.)
+  const SYNTHESIS_TRANSIENT_RETRIES = 2;
   let lastError: Error | undefined;
   for (let index = 0; index < providers.length; index += 1) {
     const provider = providers[index];
-    try {
-      const result = await synthesizeWithProvider(provider, input);
-      return {
-        acceptanceCriteria: result.acceptanceCriteria,
-        provider: result.provider,
-        model: result.model,
-      };
-    } catch (error) {
-      lastError = error as Error;
-      const hasFallback = index < providers.length - 1;
-      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) {
-        throw error;
+    const hasFallback = index < providers.length - 1;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        logger?.info('llm.ac_synthesis.start', {
+          ticketKey: input.ticketKey,
+          provider: provider.name,
+          model: provider.model,
+          attempt,
+        });
+        const result = await synthesizeWithProvider(provider, input);
+        // An empty/unusable synthesis is as damaging as a thrown failure — it silently collapses the run to
+        // the weak deterministic fallback. Treat it like a transient failure: retry the same provider, then
+        // fall back, before returning empty (finalize logs + marks not-production-ready).
+        if (!result.acceptanceCriteria?.length) {
+          logger?.warn('llm.ac_synthesis.empty_or_unusable', {
+            ticketKey: input.ticketKey,
+            provider: provider.name,
+            model: provider.model,
+            attempt,
+          });
+          if (attempt < SYNTHESIS_TRANSIENT_RETRIES) {
+            logger?.info('llm.ac_synthesis.retry', {
+              ticketKey: input.ticketKey,
+              provider: provider.name,
+              model: provider.model,
+              nextAttempt: attempt + 1,
+              reason: 'empty_or_unusable',
+            });
+            continue; // retry same provider
+          }
+          if (hasFallback) break; // retries exhausted — let the next provider try
+          return { acceptanceCriteria: [], provider: result.provider, model: result.model };
+        }
+        logger?.info('llm.ac_synthesis.success', {
+          ticketKey: input.ticketKey,
+          provider: result.provider,
+          model: result.model,
+          attempt,
+          acceptanceCriteriaCount: result.acceptanceCriteria.length,
+        });
+        return {
+          acceptanceCriteria: result.acceptanceCriteria,
+          provider: result.provider,
+          model: result.model,
+        };
+      } catch (error) {
+        lastError = error as Error;
+        const transient = isFallbackError(lastError as Error & { statusCode?: number });
+        logger?.warn('llm.ac_synthesis.failed', {
+          ticketKey: input.ticketKey,
+          provider: provider.name,
+          model: provider.model,
+          attempt,
+          transient,
+          errorMessage: lastError.message,
+        });
+        if (transient && attempt < SYNTHESIS_TRANSIENT_RETRIES) {
+          logger?.info('llm.ac_synthesis.retry', {
+            ticketKey: input.ticketKey,
+            provider: provider.name,
+            model: provider.model,
+            nextAttempt: attempt + 1,
+            reason: 'failed',
+          });
+          continue; // retry same provider
+        }
+        if (transient && hasFallback) break; // retries exhausted — let the next provider try
+        throw error; // non-transient, or no fallback left after retries
       }
     }
   }
@@ -1478,7 +2638,7 @@ export interface ExcerptRelevanceInput {
 const excerptRelevanceCache = new TtlCache<boolean>(Number(process.env.EXCERPT_RELEVANCE_CACHE_TTL_MS || 1_800_000), 512);
 
 function excerptRelevanceCacheKey(input: ExcerptRelevanceInput): string {
-  return `${input.criterion} ${input.excerpt}`;
+  return `${input.criterion}\u0000${input.excerpt}`;
 }
 
 async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input: ExcerptRelevanceInput): Promise<boolean> {
@@ -1503,9 +2663,11 @@ async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input
     'Think briefly in "reason", then decide. Return strict JSON only, no markdown: {"reason":"<one short sentence>","sameRequirement":true} or {"reason":"...","sameRequirement":false}.',
   ].join('\n');
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const parsed = await requestProviderJson<{ sameRequirement?: unknown }>(
+    provider,
+    'excerpt_relevance',
+    'excerpt relevance',
+    '{"reason":"...","sameRequirement":true}',
     {
       model: provider.model,
       temperature: 0, // deterministic relevance verdict: same pair → stable yes/no run-to-run
@@ -1517,11 +2679,10 @@ async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input
           content: JSON.stringify({ acceptanceCriterion: input.criterion, candidateSourceLine: input.excerpt }, null, 2),
         },
       ],
-    }
+    },
+    (parsed) => (parsed && typeof parsed === 'object' ? (parsed as { sameRequirement?: unknown }) : missingShape('excerpt relevance', '{"sameRequirement":true}', parsed))
   );
 
-  const content = providerContent(response, 'excerpt relevance');
-  const parsed = extractJson(content) as { sameRequirement?: unknown } | null;
   return parsed?.sameRequirement === true;
 }
 
@@ -1534,7 +2695,7 @@ async function checkExcerptRelevanceWithProvider(provider: ProviderConfig, input
  * per (criterion, excerpt).
  */
 export async function isExcerptRelevant(config: LlmConfig, input: ExcerptRelevanceInput, logger?: Logger): Promise<boolean> {
-  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) return true; // can't check → keep (deterministic fallback)
 
   const cacheKey = excerptRelevanceCacheKey(input);
@@ -1562,7 +2723,7 @@ export async function isExcerptRelevant(config: LlmConfig, input: ExcerptRelevan
 }
 
 export async function translateScopeSnapshot(config: LlmConfig, context: QaContext, targetLanguage: 'id'): Promise<ScopeSnapshotTranslation> {
-  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) {
     throw new Error('No LLM provider API key is configured.');
   }
@@ -1599,9 +2760,11 @@ async function selectApiEndpointsWithProvider(
     'Return strict JSON only with this exact shape: {"endpoints":[{"method":"GET","path":"/v1/...","label":"","summary":""}]}',
   ].join('\n');
 
-  const response = await requestJson<any>(
-    `${provider.baseUrl.replace(/\/$/, '')}/chat/completions`,
-    { Authorization: `Bearer ${provider.apiKey}` },
+  const parsed = await requestProviderJson<unknown>(
+    provider,
+    'endpoint_selection',
+    'endpoint selection',
+    '{"endpoints":[{"method":"GET","path":"/v1/...","label":"","summary":""}]}',
     {
       model: provider.model,
       temperature: 0,
@@ -1622,10 +2785,13 @@ async function selectApiEndpointsWithProvider(
           ),
         },
       ],
+    },
+    (parsed) => {
+      if (!parsed || typeof parsed !== 'object') return missingShape('endpoint selection', '{"endpoints":[...]}', parsed);
+      return parsed;
     }
   );
 
-  const parsed = extractJson(providerContent(response, 'endpoint selection'));
   return normalizeSelectedEndpoints(parsed, input.documentedEndpoints);
 }
 
@@ -1633,7 +2799,7 @@ export async function selectScopedApiEndpoints(
   config: LlmConfig,
   input: { scopeText: string; documentedEndpoints: ApiContractEndpoint[] }
 ): Promise<ApiContractEndpoint[]> {
-  const providers = (config.providers || []).filter((provider) => provider.apiKey);
+  const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) {
     throw new Error('No LLM provider API key is configured.');
   }

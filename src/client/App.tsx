@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   analyzeContext,
   generateCases,
+  GenerationBlockedError,
   loadConfig,
   loadDiagnostics,
   loadHistoryRun,
@@ -10,9 +11,11 @@ import {
   logout,
   preflightPush,
   pushCases,
+  PushQualityGateBlockedError,
   translateScopeSnapshot,
   validateCases,
 } from './api';
+import { qualityGateReasons } from './quality';
 import { AnalyzePanel } from './components/AnalyzePanel';
 import { ApprovalPanel } from './components/ApprovalPanel';
 import { AddToRunCard } from './components/AddToRunCard';
@@ -36,6 +39,7 @@ import type {
   DuplicateCaseRecommendation,
   ExistingTestRailCase,
   DiagnosticsResponse,
+  GenerateQualityEvaluation,
   GenerateResponse,
   GeneratedTestCase,
   PushRequest,
@@ -123,6 +127,7 @@ export default function App() {
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | null>(null);
   const [generatedRunId, setGeneratedRunId] = useState<string>('');
   const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration | null>(null);
+  const [qualityEvaluation, setQualityEvaluation] = useState<GenerateQualityEvaluation | null>(null);
   const [ticketSuggestions, setTicketSuggestions] = useState<SuggestedTicket[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
@@ -301,7 +306,8 @@ export default function App() {
     casesToPush: GeneratedTestCase[] = testCases,
     weakAckOverride?: boolean,
     singlePolarityAckOverride?: boolean,
-    conflictAckOverride?: boolean
+    conflictAckOverride?: boolean,
+    qualityGateAckOverride?: boolean
   ): PushRequest | null {
     // Push and preflight must receive identical payloads so the duplicate review reflects the final write.
     if (!context) return null;
@@ -316,6 +322,9 @@ export default function App() {
       acceptanceCriteria: context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
       testCases: casesToPush,
+      // The analyzed context carries the AC diagnostics (raw quality / synthesisUsed) the backup quality
+      // gate needs; without it the server guard cannot fire, so send it explicitly.
+      context,
       // Lean endpoint list lets the push gate flag invented apiSpec paths (BUG-05).
       matchedEndpoints: context.apiContract?.matchedEndpoints,
       weakCoverageAcknowledged: weakAckOverride ?? weakCoverageAck,
@@ -323,6 +332,8 @@ export default function App() {
       // Conflicts are computed at analyze and live on the context; echo them so the push gate can enforce ack.
       crossSourceConflicts: context.acceptanceCriteriaDiagnostics?.crossSourceConflicts,
       crossSourceConflictsAcknowledged: conflictAckOverride ?? crossSourceConflictAck,
+      qualityGateAcknowledged: qualityGateAckOverride ?? false,
+      qualityGateAcknowledgedReason: qualityGateAckOverride ? 'Acknowledged from the review workbench.' : undefined,
     };
   }
 
@@ -330,11 +341,35 @@ export default function App() {
     casesToPush: GeneratedTestCase[],
     weakAckOverride?: boolean,
     singlePolarityAckOverride?: boolean,
-    conflictAckOverride?: boolean
+    conflictAckOverride?: boolean,
+    qualityGateAckOverride?: boolean
   ) {
-    const payload = buildPushPayload(casesToPush, weakAckOverride, singlePolarityAckOverride, conflictAckOverride);
+    const payload = buildPushPayload(
+      casesToPush,
+      weakAckOverride,
+      singlePolarityAckOverride,
+      conflictAckOverride,
+      qualityGateAckOverride
+    );
     if (!payload) return;
-    const response = await pushCases(payload);
+    let response;
+    try {
+      response = await pushCases(payload);
+    } catch (pushError) {
+      // Backup quality-gate block: acknowledge-to-override, mirroring the weak-coverage / single-polarity
+      // confirms. Retry once with the acknowledgement instead of surfacing a dead-end error.
+      if (pushError instanceof PushQualityGateBlockedError && !qualityGateAckOverride) {
+        const proceed = window.confirm(`${pushError.message}\n\nPush to TestRail anyway?`);
+        if (!proceed) {
+          setPushResults(pushError.message);
+          pushToast('info', toastText.pushErrorTitle, pushError.message);
+          return;
+        }
+        await submitPush(casesToPush, weakAckOverride, singlePolarityAckOverride, conflictAckOverride, true);
+        return;
+      }
+      throw pushError;
+    }
     setPushResults(formatPushResults(response, lang));
     const ids = response.results
       .filter((entry) => entry.ok && entry.caseId !== undefined && entry.caseId !== null)
@@ -363,6 +398,7 @@ export default function App() {
       setValidation([]);
       setCoverage(null);
       setCoverageEnforced(false);
+      setQualityEvaluation(null);
       setManualScopeOverride(false);
       setConfidenceApproved(false);
       setOverrideReason('');
@@ -422,7 +458,25 @@ export default function App() {
     setCrossSourceConflictAck(false);
     setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
+    setQualityEvaluation(response.qualityEvaluation || null);
     setDuplicateReview(null);
+  }
+
+  async function runGeneration(acceptanceCriteriaOverrideApproved: boolean) {
+    const response = await generateCases({
+      context: context!,
+      confidencePermissionApproved: confidenceApproved,
+      manualScopeOverrideReason: overrideReason,
+      acceptanceCriteriaOverrideApproved,
+    });
+    if (testCases.length > 0) {
+      setPendingGeneration(response);
+      setPushResults(t.runStatus.candidateGenerated(response.provider, response.model));
+      pushToast('info', toastText.generateCandidateTitle, toastText.generateCandidateMessage);
+    } else {
+      applyGeneration(response);
+      pushToast('success', toastText.generateSuccessTitle, toastText.generateSuccessMessage(response.testCases.length));
+    }
   }
 
   async function handleGenerate() {
@@ -430,18 +484,22 @@ export default function App() {
     setGenerating(true);
     setError('');
     try {
-      const response = await generateCases({
-        context,
-        confidencePermissionApproved: confidenceApproved,
-        manualScopeOverrideReason: overrideReason,
-      });
-      if (testCases.length > 0) {
-        setPendingGeneration(response);
-        setPushResults(t.runStatus.candidateGenerated(response.provider, response.model));
-        pushToast('info', toastText.generateCandidateTitle, toastText.generateCandidateMessage);
-      } else {
-        applyGeneration(response);
-        pushToast('success', toastText.generateSuccessTitle, toastText.generateSuccessMessage(response.testCases.length));
+      try {
+        await runGeneration(false);
+      } catch (blockError) {
+        // Not-production-ready block: weak raw ACs + failed synthesis. Offer an explicit override rather
+        // than a dead-end, mirroring the acknowledge-to-override gates on push.
+        if (blockError instanceof GenerationBlockedError) {
+          const proceed = window.confirm(`${blockError.message}\n\nGenerate anyway against the reduced acceptance criteria?`);
+          if (!proceed) {
+            setError(blockError.message);
+            pushToast('info', toastText.generateErrorTitle, blockError.message);
+            return;
+          }
+          await runGeneration(true);
+        } else {
+          throw blockError;
+        }
       }
       await refreshAuxiliaryData();
     } catch (generateError) {
@@ -940,6 +998,51 @@ export default function App() {
                 }}
                 onCancel={() => setPendingGeneration(null)}
               />
+            ) : null}
+
+            {qualityEvaluation ? (
+              <section className="workbench-anchor">
+                <div
+                  role="status"
+                  data-testid="quality-gate-banner"
+                  style={{
+                    border: '1px solid',
+                    borderColor:
+                      qualityEvaluation.qualityGate === 'fail'
+                        ? '#dc2626'
+                        : qualityEvaluation.qualityGate === 'warn'
+                        ? '#d97706'
+                        : '#16a34a',
+                    background:
+                      qualityEvaluation.qualityGate === 'fail'
+                        ? '#fef2f2'
+                        : qualityEvaluation.qualityGate === 'warn'
+                        ? '#fffbeb'
+                        : '#f0fdf4',
+                    color: '#1f2937',
+                    borderRadius: 8,
+                    padding: '12px 16px',
+                    marginBottom: 12,
+                  }}
+                >
+                  <div style={{ fontWeight: 600 }} data-testid="quality-gate-status">
+                    Quality gate: {qualityEvaluation.qualityGate.toUpperCase()} — {qualityEvaluation.provider}/
+                    {qualityEvaluation.model} · {qualityEvaluation.testCaseCount} cases ·{' '}
+                    {qualityEvaluation.coveredCriteria}/{qualityEvaluation.totalCriteria} ACs covered
+                  </div>
+                  {qualityGateReasons(qualityEvaluation).length ? (
+                    <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                      {qualityGateReasons(qualityEvaluation).map((reason, index) => (
+                        <li key={index} style={{ fontSize: 13 }}>
+                          {reason}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div style={{ fontSize: 13, marginTop: 4 }}>No quality issues detected.</div>
+                  )}
+                </div>
+              </section>
             ) : null}
 
             <section ref={reviewSectionRef} className="workbench-anchor">

@@ -1,3 +1,5 @@
+import type { AcceptanceCriteriaExecutionPlanItem, TestExecutionType } from '../../shared/contracts';
+
 interface ValidationOptions {
   jiraKey?: string;
   epic?: string;
@@ -9,13 +11,25 @@ interface ValidationOptions {
   // Endpoints the API contract actually matched. When provided, postman cases are checked so an
   // apiSpec path that isn't in the contract is flagged as possibly invented (warning, not error).
   matchedEndpoints?: Array<{ method?: string; path?: string }>;
+  acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
+}
+
+interface CoverageOptions {
+  enforceAcceptanceCriteria?: boolean;
+  scopeType?: 'web' | 'api';
+  acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
+}
+
+interface HttpReference {
+  method: string;
+  path: string;
 }
 
 interface GeneratedLikeCase {
   id?: string;
   title?: string;
   type?: string;
-  executionType?: 'postman' | 'manual_db' | 'manual_other';
+  executionType?: TestExecutionType;
   caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference?: string;
   refs?: string;
@@ -41,8 +55,38 @@ interface GeneratedLikeCase {
   };
 }
 
+function normalizeExecutionType(value: unknown): TestExecutionType | undefined {
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === 'postman' || normalized === 'api') return 'postman';
+  if (normalized === 'manual_db' || normalized === 'db' || normalized === 'database') return 'manual_db';
+  if (normalized === 'manual_code_review' || normalized === 'code_review' || normalized === 'manual_code' || normalized === 'code') return 'manual_code_review';
+  if (normalized === 'manual_integration' || normalized === 'integration' || normalized === 'manual_runtime') return 'manual_integration';
+  if (normalized === 'manual_other' || normalized === 'manual') return 'manual_other';
+  return undefined;
+}
+
+function inferExecutionType(testCase: GeneratedLikeCase, scopeType: 'web' | 'api'): TestExecutionType | undefined {
+  const explicit = normalizeExecutionType(testCase.executionType);
+  if (explicit) return explicit;
+  if (normalizeText(testCase.apiSpec?.method) || normalizeText(testCase.apiSpec?.path)) return 'postman';
+  if (testCase.manualVerification) return 'manual_other';
+  return scopeType === 'api' ? 'postman' : undefined;
+}
+
 function normalizeText(value: unknown): string {
   return String(value || '').trim();
+}
+
+function uniqueValues<T>(items: T[], keyFor: (item: T) => string): T[] {
+  const seen = new Set<string>();
+  const output: T[] = [];
+  for (const item of items) {
+    const key = keyFor(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    output.push(item);
+  }
+  return output;
 }
 
 export function normalizeAcceptanceCriteriaId(value: unknown): string {
@@ -90,6 +134,98 @@ function caseEvidenceText(testCase: GeneratedLikeCase): string {
   const mv = testCase.manualVerification;
   if (mv) parts.push(mv.target, mv.expectedResult, ...(Array.isArray(mv.steps) ? mv.steps : []));
   return parts.filter(Boolean).join(' ');
+}
+
+function isSmokeOrEndToEndCase(testCase: GeneratedLikeCase): boolean {
+  return /\b(smoke|e2e|end[-\s]?to[-\s]?end|full workflow|full flow|happy path suite|regression suite)\b/i.test(
+    [testCase.title, testCase.type, testCase.bddScenario].filter(Boolean).join(' ')
+  );
+}
+
+function extractHttpReferences(value: string): HttpReference[] {
+  const refs: HttpReference[] = [];
+  const re = /\b(GET|POST|PUT|PATCH|DELETE)\s+["'`]?((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(value))) {
+    refs.push({
+      method: match[1].toUpperCase(),
+      path: match[2].replace(/[.,;:)\]}]+$/, ''),
+    });
+  }
+  return uniqueValues(refs, (ref) => `${ref.method} ${normalizeEndpointPath(ref.path)}`);
+}
+
+function sameHttpReference(a: HttpReference, b: HttpReference): boolean {
+  if (a.method !== b.method) return false;
+  // Compare structurally, not by string equality: a placeholder segment ({param}, after normalization) on
+  // EITHER side matches any concrete segment on the other. So a documented template like
+  // /v1/analysis/{id}/stream and a BDD reference that substituted a real id (/v1/analysis/abc123/stream)
+  // count as the same endpoint — avoiding a false "additional endpoint" alignment warning. Literal segments
+  // must still match, and differing segment counts never match, so a genuinely different endpoint (or a
+  // second endpoint in a multi-step BDD) is still flagged.
+  const segsA = normalizeEndpointPath(a.path).split('/');
+  const segsB = normalizeEndpointPath(b.path).split('/');
+  if (segsA.length !== segsB.length) return false;
+  return segsA.every((segA, index) => {
+    const segB = segsB[index];
+    return segA === '{param}' || segB === '{param}' || segA === segB;
+  });
+}
+
+const DUPLICATE_STOPWORDS = new Set([
+  'feature', 'scenario', 'given', 'when', 'then', 'and', 'with', 'without', 'using', 'should', 'must', 'case', 'test',
+  'spatial', 'analysis', 'user', 'request', 'response', 'result', 'results', 'data', 'dataset', 'output', 'method',
+  'field', 'value', 'values', 'valid', 'same', 'existing', 'new', 'the', 'this', 'that', 'from', 'into',
+]);
+
+function duplicateTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/\[[^\]]+\]/g, ' ')
+      .replace(/\b[A-Z]+-\d+\b/gi, ' ')
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 3 && !DUPLICATE_STOPWORDS.has(token))
+  );
+}
+
+function overlapCoefficient(a: Set<string>, b: Set<string>): number {
+  const minSize = Math.min(a.size, b.size);
+  if (!minSize) return 0;
+  let intersection = 0;
+  for (const token of a) {
+    if (b.has(token)) intersection += 1;
+  }
+  return intersection / minSize;
+}
+
+function normalizedCoverageSet(testCase: GeneratedLikeCase): Set<string> {
+  return new Set(normalizeList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item)));
+}
+
+function hasCoverageOverlap(a: GeneratedLikeCase, b: GeneratedLikeCase): boolean {
+  const aSet = normalizedCoverageSet(a);
+  const bSet = normalizedCoverageSet(b);
+  if (!aSet.size || !bSet.size) return false;
+  let intersection = 0;
+  for (const id of aSet) {
+    if (bSet.has(id)) intersection += 1;
+  }
+  return intersection / Math.min(aSet.size, bSet.size) >= 0.5;
+}
+
+export function casesLookDuplicative(a: GeneratedLikeCase, b: GeneratedLikeCase): boolean {
+  if (!hasCoverageOverlap(a, b)) return false;
+  const aEndpoint = `${a.apiSpec?.method || ''} ${normalizeEndpointPath(a.apiSpec?.path || '')}`.trim();
+  const bEndpoint = `${b.apiSpec?.method || ''} ${normalizeEndpointPath(b.apiSpec?.path || '')}`.trim();
+  if (aEndpoint && bEndpoint && aEndpoint !== bEndpoint) return false;
+
+  const titleOverlap = overlapCoefficient(duplicateTokens(a.title || ''), duplicateTokens(b.title || ''));
+  const bodyOverlap = overlapCoefficient(
+    duplicateTokens([a.title, a.bddScenario].filter(Boolean).join(' ')),
+    duplicateTokens([b.title, b.bddScenario].filter(Boolean).join(' '))
+  );
+  return titleOverlap >= 0.7 || bodyOverlap >= 0.82;
 }
 
 // Endpoint provenance: a postman case should reference an endpoint that exists in the matched API
@@ -164,8 +300,11 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   const coversAcceptanceCriteria = normalizeList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
   const sourceScope = normalizeList(testCase.sourceScope);
   const coverageNote = normalizeText(testCase.evidence?.coverageNote);
-  const executionType = testCase.executionType || (scopeType === 'api' ? 'postman' : undefined);
+  const executionType = inferExecutionType(testCase, scopeType);
   const matchedEndpoints = Array.isArray(options.matchedEndpoints) ? options.matchedEndpoints : [];
+  const executionPlanById = new Map(
+    (options.acceptanceCriteriaExecutionPlan || []).map((item) => [normalizeAcceptanceCriteriaId(item.criterionId), item])
+  );
 
   if (!title) errors.push('Title is required.');
   if (!refs) errors.push('Jira reference is required.');
@@ -173,6 +312,11 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   if (!type) errors.push('Type is required.');
   if (enforceAcceptanceCriteria && hasDetectedAcceptanceCriteria && !coversAcceptanceCriteria.length) {
     errors.push('Test case must map to at least one acceptance criterion.');
+  }
+  if (enforceAcceptanceCriteria && coversAcceptanceCriteria.length > 2 && !isSmokeOrEndToEndCase(testCase)) {
+    warnings.push(
+      `Test case maps to ${coversAcceptanceCriteria.length} acceptance criteria; split into focused cases or mark it as an explicit smoke/end-to-end case.`
+    );
   }
 
   if (title) {
@@ -220,6 +364,12 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
         continue;
       }
       const criterionText = criterionTextById.get(criterionId);
+      const plannedExecution = executionPlanById.get(criterionId);
+      if (scopeType === 'api' && plannedExecution && executionType && plannedExecution.executionType !== executionType) {
+        warnings.push(
+          `Acceptance criterion ${criterionId} is classified as ${plannedExecution.executionType} (${plannedExecution.observableSurface}) but this case is ${executionType}.`
+        );
+      }
       if (criterionText && !isAcceptanceCriterionSubstantiated(criterionText, evidenceText)) {
         warnings.push(`Acceptance criterion ${criterionId} is claimed but not substantiated by the case steps/assertions.`);
       }
@@ -244,6 +394,16 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
         `apiSpec endpoint ${method} ${path} is not in the matched API contract; verify it against the API docs or note it as assumed in preconditions.`
       );
     }
+    if (method && path) {
+      const apiSpecRef = { method, path };
+      const bddRefs = extractHttpReferences(bdd);
+      const unmatchedRefs = bddRefs.filter((ref) => !sameHttpReference(ref, apiSpecRef));
+      if (unmatchedRefs.length) {
+        warnings.push(
+          `BDD scenario exercises additional endpoint(s) ${unmatchedRefs.map((ref) => `${ref.method} ${ref.path}`).join(', ')} not represented by apiSpec; split the case or add multi-step API metadata before push.`
+        );
+      }
+    }
     if (/^(POST|PUT|PATCH)$/.test(method)) {
       const payload = normalizeText(testCase.apiSpec?.samplePayload);
       if (!payload && !/payload|request body|with body/i.test(bdd)) {
@@ -256,15 +416,17 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     }
   }
 
-  if (scopeType === 'api' && executionType === 'manual_db') {
+  if (scopeType === 'api' && (executionType === 'manual_db' || executionType === 'manual_code_review' || executionType === 'manual_integration')) {
     const target = normalizeText(testCase.manualVerification?.target);
     const steps = Array.isArray(testCase.manualVerification?.steps) ? testCase.manualVerification?.steps || [] : [];
     const expectedResult = normalizeText(testCase.manualVerification?.expectedResult);
-    if (!target) errors.push('Manual DB case must include manualVerification.target.');
-    if (!steps.length && !/\b(select|sql|database|dataset_schema|db)\b/i.test(bdd)) {
-      errors.push('Manual DB case must include DB verification steps.');
+    const label =
+      executionType === 'manual_db' ? 'Manual DB' : executionType === 'manual_code_review' ? 'Manual code review' : 'Manual integration';
+    if (!target) errors.push(`${label} case must include manualVerification.target.`);
+    if (!steps.length) {
+      errors.push(`${label} case must include manualVerification.steps.`);
     }
-    if (!expectedResult) errors.push('Manual DB case must include manualVerification.expectedResult.');
+    if (!expectedResult) errors.push(`${label} case must include manualVerification.expectedResult.`);
   }
 
   // Cross-field integrity: the structured payload should agree with the claimed executionType, so a
@@ -290,11 +452,20 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
 }
 
 export function validateCases(testCases: GeneratedLikeCase[], options: ValidationOptions = {}) {
-  return (Array.isArray(testCases) ? testCases : []).map((testCase, index) => ({
+  const caseList = Array.isArray(testCases) ? testCases : [];
+  const entries = caseList.map((testCase, index) => ({
     index,
     id: testCase.id || `TC-${String(index + 1).padStart(2, '0')}`,
     ...validateCase(testCase, options),
   }));
+  for (let right = 0; right < caseList.length; right += 1) {
+    for (let left = 0; left < right; left += 1) {
+      if (!casesLookDuplicative(caseList[left], caseList[right])) continue;
+      entries[right].warnings.push(`Potential duplicate of ${entries[left].id}; merge the cases or make the setup/assertions materially different.`);
+      break;
+    }
+  }
+  return entries;
 }
 
 /**
@@ -311,21 +482,43 @@ export function trulyUncoveredCriteria(coverage: {
   return (coverage.uncoveredCriteria || []).filter((id) => !weakClaimed.has(id));
 }
 
-// A conditional AC describes behavior that flips on a condition — a control enables/disables, a value is
-// accepted/rejected. Such an AC needs BOTH branches exercised: the condition-holds case (typically a
-// negative: the blocked/disabled/rejected path) and the condition-fails case (typically a positive: the
-// happy/enabled/accepted path). Detected lexically. Bare "0"/"zero" is included because radius=0 style
-// boundary guards are common and are exactly where the missing happy-path branch tends to hide.
-const CONDITIONAL_AC_RE = /\b(?:when|if|unless|only|disabled|enabled|missing|empty|invalid|blank|rejected|allowed|zero|0)\b/i;
+// A polarity gap is only meaningful for observable behavior with an actual branch: disabled/enabled,
+// valid/invalid, success/failure, fallback/no-data, etc. "When X happens, return Y" is not enough on its
+// own; many ACs are single-direction requirements. Manual DB/code/internal verification items are also not
+// branch matrices, so execution-plan metadata is used to avoid false polarity failures.
+const CONDITIONAL_TRIGGER_RE = /\b(?:when|if|unless|otherwise|else|disabled|enabled|missing|empty|invalid|blank|rejected|allowed|zero|null|none|fallback|fail(?:s|ed)?|error)\b/i;
+const ADVERSE_BRANCH_RE =
+  /\b(?:disabled|missing|empty|invalid|blank|reject(?:ed|s)?|fail(?:s|ed|ure)?|error|denied|unauthori[sz]ed|forbidden|not\s+found|not\s+accessible|inaccessible|zero|null|none|fallback|without)\b|\b0\b/i;
+const NO_DATA_BRANCH_RE = /\bno\s+(?:cell|cells|record|records|result|results|data|match|matches|row|rows|item|items|module|modules|access|token|payload|body|value|values|area|artifact|artifacts)\b/i;
+const EXPLICIT_TWO_SIDED_BRANCH_RE =
+  /\b(?:otherwise|else)\b|(?:\bvalid\b[\s\S]{0,120}\binvalid\b)|(?:\binvalid\b[\s\S]{0,120}\bvalid\b)|(?:\bsuccess(?:ful)?\b[\s\S]{0,120}\bfail(?:s|ed|ure)?\b)|(?:\bfail(?:s|ed|ure)?\b[\s\S]{0,120}\bsuccess(?:ful)?\b)|(?:\benabled\b[\s\S]{0,120}\bdisabled\b)|(?:\bdisabled\b[\s\S]{0,120}\benabled\b)|(?:\bmatch(?:es|ed)?\b[\s\S]{0,120}\bmismatch(?:es|ed)?\b)|(?:\bmismatch(?:es|ed)?\b[\s\S]{0,120}\bmatch(?:es|ed)?\b)|(?:\bpresent\b[\s\S]{0,120}\babsent\b)|(?:\babsent\b[\s\S]{0,120}\bpresent\b)|(?:\bwith\b[\s\S]{0,120}\bwithout\b)|(?:\bwithout\b[\s\S]{0,120}\bwith\b)/i;
+
+function hasPolaritySensitiveSemantics(text: string): boolean {
+  if (!CONDITIONAL_TRIGGER_RE.test(text)) return false;
+  return ADVERSE_BRANCH_RE.test(text) || NO_DATA_BRANCH_RE.test(text) || EXPLICIT_TWO_SIDED_BRANCH_RE.test(text);
+}
+
+function requiresSinglePolarityCoverage(entry: { text: string }, plannedExecution?: AcceptanceCriteriaExecutionPlanItem): boolean {
+  const text = normalizeText(entry.text);
+  if (!text || !hasPolaritySensitiveSemantics(text)) return false;
+
+  if (!plannedExecution) return true;
+  if (plannedExecution.executionType === 'postman') return true;
+
+  // Manual cases verify artifacts or internal behavior. Requiring synthetic positive/negative pairs here
+  // makes the model fabricate extra cases without improving executable API coverage.
+  return false;
+}
 
 export function buildCoverage(
   testCases: GeneratedLikeCase[],
   acceptanceCriteria: Array<{ id: string; text: string; source?: string }>,
-  options: { enforceAcceptanceCriteria?: boolean } = {}
+  options: CoverageOptions = {}
 ) {
   // Coverage maps generated cases back to AC ids; generation/push uses this to block incomplete scope coverage.
   const criteria = Array.isArray(acceptanceCriteria) ? acceptanceCriteria : [];
   const enforceAcceptanceCriteria = options.enforceAcceptanceCriteria !== false;
+  const scopeType = options.scopeType || 'web';
   const caseList = Array.isArray(testCases) ? testCases : [];
   const entries = criteria.map((criterion) => ({
     id: criterion.id,
@@ -334,6 +527,9 @@ export function buildCoverage(
     coveredBy: [] as string[],
   }));
   const entryById = new Map(entries.map((entry) => [entry.id, entry]));
+  const executionPlanById = new Map(
+    (options.acceptanceCriteriaExecutionPlan || []).map((item) => [normalizeAcceptanceCriteriaId(item.criterionId), item])
+  );
   const unmappedCases: string[] = [];
   // Claimed (case, AC) pairs whose case content doesn't substantiate the AC — surfaced so coverage
   // isn't silently inflated (e.g. an email-routing AC "covered" by dataset tests that never assert email).
@@ -353,9 +549,15 @@ export function buildCoverage(
     }
     const evidenceText = caseEvidenceText(testCase);
     const intent = testCase.caseIntent;
+    const executionType = inferExecutionType(testCase, scopeType);
     for (const criterionId of mappedCriteria) {
       const entry = entryById.get(criterionId);
       if (!entry) continue;
+      const plannedExecution = executionPlanById.get(criterionId);
+      if (scopeType === 'api' && plannedExecution && executionType && plannedExecution.executionType !== executionType) {
+        unsubstantiatedClaims.push({ caseId, criterionId });
+        continue;
+      }
       if (entry.text && !isAcceptanceCriterionSubstantiated(entry.text, evidenceText)) {
         unsubstantiatedClaims.push({ caseId, criterionId });
         continue;
@@ -380,9 +582,17 @@ export function buildCoverage(
     missing: Array<'positive' | 'negative'>;
   }> = [];
   for (const entry of entries) {
-    if (!entry.coveredBy.length || !CONDITIONAL_AC_RE.test(entry.text || '')) continue;
+    const plannedExecution = executionPlanById.get(normalizeAcceptanceCriteriaId(entry.id));
+    if (!entry.coveredBy.length || !requiresSinglePolarityCoverage(entry, plannedExecution)) continue;
     const have = Array.from(intentsByCriterion.get(entry.id) || []);
-    const missing = (['positive', 'negative'] as const).filter((polarity) => !have.includes(polarity));
+    // Two dimensions must both be exercised: an affirming (happy-path) case and an opposing (off-nominal)
+    // case. 'positive' fills affirming; 'negative' OR 'edge' fills opposing (an edge case tests the
+    // boundary/three-state branch, which is the opposing behavior the check exists to guarantee). So a
+    // positive+edge suite passes, while positive-only (missing opposing) and negative/edge-only (missing
+    // affirming) are still correctly flagged. 'missing' keeps its positive/negative shape for callers.
+    const missing: Array<'positive' | 'negative'> = [];
+    if (!have.includes('positive')) missing.push('positive');
+    if (!have.includes('negative') && !have.includes('edge')) missing.push('negative');
     if (missing.length) singlePolarityCriteria.push({ criterionId: entry.id, have, missing });
   }
 

@@ -117,6 +117,17 @@ test('stored token decryption failures return an invalid token marker instead of
   }
 });
 
+test('generated run quality migration persists quality, duration, and step timings columns', async () => {
+  const migration = await fs.readFile(
+    path.join(process.cwd(), 'src/server/migrations/006_generated_run_quality.sql'),
+    'utf8'
+  );
+
+  assert.match(migration, /quality_json\s+JSONB/i);
+  assert.match(migration, /step_timings_json\s+JSONB/i);
+  assert.match(migration, /duration_ms\s+INTEGER/i);
+});
+
 test('file-backed persistence reports due personal-data accounts and tracks reporting status', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-agent-web-'));
   const auditFile = path.join(tempDir, 'audit-log.jsonl');

@@ -230,11 +230,33 @@ export function analyzeContext(payload: AnalyzeRequest): Promise<AnalyzeResponse
   });
 }
 
-export function generateCases(payload: GenerateRequest): Promise<GenerateResponse> {
-  return requestJson<GenerateResponse>('/api/generate', {
+// Thrown when /api/generate refuses because the acceptance criteria are not production-ready (weak raw
+// ACs + failed/empty synthesis). Carries the reason so the UI can offer an explicit override instead of
+// showing an opaque error.
+export class GenerationBlockedError extends Error {
+  reason: string;
+  constructor(message: string, reason: string) {
+    super(message);
+    this.name = 'GenerationBlockedError';
+    this.reason = reason;
+  }
+}
+
+export async function generateCases(payload: GenerateRequest): Promise<GenerateResponse> {
+  const response = await fetch('/api/generate', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  const body = await response.json().catch(() => ({}));
+  const blocked = body as { blocked?: boolean; reason?: string; message?: string };
+  if (response.status === 422 && blocked.blocked) {
+    throw new GenerationBlockedError(blocked.message || 'Generation was blocked.', blocked.reason || 'blocked');
+  }
+  if (!response.ok) {
+    throw new Error((body as { error?: string }).error || `HTTP ${response.status}`);
+  }
+  return body as GenerateResponse;
 }
 
 export function validateCases(payload: ValidateRequest): Promise<ValidateResponse> {
@@ -244,11 +266,31 @@ export function validateCases(payload: ValidateRequest): Promise<ValidateRespons
   });
 }
 
-export function pushCases(payload: PushRequest): Promise<PushResponse> {
-  return requestJson<PushResponse>('/api/push', {
+// Thrown when /api/push blocks on the backup quality gate (residual quality issues). Carries the message
+// so the UI can offer an explicit acknowledge-to-override, mirroring the weak-coverage / single-polarity
+// acknowledgements rather than surfacing an opaque error.
+export class PushQualityGateBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PushQualityGateBlockedError';
+  }
+}
+
+export async function pushCases(payload: PushRequest): Promise<PushResponse> {
+  const response = await fetch('/api/push', {
     method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  const body = await response.json().catch(() => ({}));
+  const blocked = body as { requiresQualityGateAck?: boolean; error?: string };
+  if (response.status === 400 && blocked.requiresQualityGateAck) {
+    throw new PushQualityGateBlockedError(blocked.error || 'This run has unresolved quality issues.');
+  }
+  if (!response.ok) {
+    throw new Error(blocked.error || `HTTP ${response.status}`);
+  }
+  return body as PushResponse;
 }
 
 export function preflightPush(payload: PushPreflightRequest): Promise<PushPreflightResponse> {

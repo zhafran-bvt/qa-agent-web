@@ -69,7 +69,9 @@ export const POLARITY_AXES = [
   {
     axis: 'visibility',
     positive: ['visible', 'shown', 'show', 'shows', 'displayed', 'display', 'displays', 'appears', 'appear', 'present'],
-    negative: ['hidden', 'hide', 'hides', 'removed', 'remove', 'absent', 'invisible'],
+    // NB: 'absent' deliberately excluded — in specs it usually means "field not present" (e.g. "AREA or
+    // absent"), not "hidden from view", and treating it as a visibility signal produced false conflicts.
+    negative: ['hidden', 'hide', 'hides', 'removed', 'remove', 'invisible'],
   },
   {
     axis: 'requirement',
