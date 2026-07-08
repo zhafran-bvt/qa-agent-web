@@ -264,6 +264,16 @@ export interface AcceptanceCriteriaDiagnostics {
   // Opposite-polarity contradictions between the synthesized criteria and their source corpora (F1).
   crossSourceConflicts?: CrossSourceConflict[];
   acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
+  cache?: {
+    analysisSourceHash?: string;
+    finalizedAcHash?: string;
+    executionPlanHash?: string;
+    apiContractHash?: string;
+    acProvider?: string;
+    acModel?: string;
+    cacheHit?: boolean;
+    cachedFromAnalysisRunId?: string;
+  };
 }
 
 export interface QaContext {

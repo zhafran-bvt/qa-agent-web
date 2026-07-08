@@ -460,6 +460,71 @@ function shouldEnforceAcceptanceCriteria(context: QaContext | null, _confidenceP
   return Array.isArray(context.acceptanceCriteria) && context.acceptanceCriteria.length > 0;
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson((value as Record<string, unknown>)[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function sha256(value: unknown): string {
+  return crypto.createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function analysisSourceFingerprint(context: QaContext): string {
+  return sha256({
+    version: 1,
+    ticketKey: context.ticketKey,
+    mainIssue: context.mainIssue,
+    linkedIssues: context.linkedIssues,
+    confluencePages: context.confluencePages,
+    scopeParentIssue: context.scopeParentIssue,
+    scopeConfluenceSection: context.scopeConfluenceSection,
+    scopeAuthority: context.scopeAuthority,
+    acceptanceCriteria: context.acceptanceCriteria,
+    userStories: context.userStories,
+    acceptanceCriteriaSource: context.acceptanceCriteriaSource,
+    constraints: context.constraints,
+    apiDocsUrl: context.apiDocsUrl || '',
+    actualDevScopeGuidance: context.actualDevScopeGuidance || '',
+  });
+}
+
+function finalizedAcceptanceCriteriaHash(context: QaContext): string {
+  return sha256({
+    version: 1,
+    acceptanceCriteria: context.acceptanceCriteria.map((item) => ({ id: item.id, text: item.text, source: item.source })),
+    source: context.acceptanceCriteriaSource,
+    rawQuality: context.acceptanceCriteriaDiagnostics?.rawAcceptanceCriteriaQuality || '',
+    synthesisUsed: Boolean(context.acceptanceCriteriaDiagnostics?.synthesisUsed),
+  });
+}
+
+function executionPlanHash(context: QaContext): string {
+  return sha256({
+    version: 1,
+    executionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [],
+  });
+}
+
+function apiContractHash(context: QaContext): string {
+  return sha256({
+    version: 1,
+    relevant: context.constraints?.apiContractRelevant ?? null,
+    reason: context.constraints?.apiContractRelevanceReason || '',
+    endpoints: context.apiContract?.matchedEndpoints || [],
+    warnings: context.apiContract?.warnings || [],
+  });
+}
+
+function cacheMetadata(context: QaContext) {
+  return context.acceptanceCriteriaDiagnostics.cache || {};
+}
+
 function buildGenerationQualityEvaluation(input: {
   provider: string;
   model: string;
@@ -1235,41 +1300,93 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       includeComments: body.includeComments !== false,
       logger: log,
     });
-    const finalizedContext = await finalizeAcceptanceCriteria(context, {
-      synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input, log),
-      logger: log,
-      skipStrongLlmSynthesis: usesFastAcceptanceCriteriaPath(config.llm),
-      // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
-      llm: config.llm,
-    });
-    if (finalizedContext.constraints.scopeType === 'api') {
-      // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
-      // actually API-contract work; internal backend work (migration/backfill/DB) skips the crawl.
-      const relevance = assessApiContractRelevance(finalizedContext);
-      finalizedContext.constraints.apiContractRelevant = relevance.relevant;
-      finalizedContext.constraints.apiContractRelevanceReason = relevance.reason;
-      if (relevance.relevant) {
-        try {
-          finalizedContext.apiContract = await buildApiContract(
-            finalizedContext,
-            finalizedContext.apiDocsUrl || config.apiDocsUrl,
-            (input) => selectScopedApiEndpoints(config.llm, input)
-          );
-        } catch (error) {
-          finalizedContext.apiContract = {
-            sourceUrl: finalizedContext.apiDocsUrl || config.apiDocsUrl,
-            matchedEndpoints: [],
-            warnings: [`API docs enrichment failed: ${(error as Error).message}`],
-          };
-        }
+    const acProvider = configuredLlmProviders(config.llm.providers)[0];
+    const analysisSourceHash = analysisSourceFingerprint(context);
+    let finalizedContext: QaContext | null = null;
+    if (acProvider) {
+      const cached = await persistence.findCachedAnalysisContext({
+        jiraKey,
+        analysisSourceHash,
+        acProvider: acProvider.name,
+        acModel: acProvider.model,
+      });
+      if (cached) {
+        finalizedContext = {
+          ...cached.context,
+          analysisRunId: undefined,
+          acceptanceCriteriaDiagnostics: {
+            ...cached.context.acceptanceCriteriaDiagnostics,
+            cache: {
+              ...(cached.context.acceptanceCriteriaDiagnostics.cache || {}),
+              cacheHit: true,
+              cachedFromAnalysisRunId: cached.analysisRunId,
+            },
+          },
+        };
+        log.info('api.analyze.cache_hit', {
+          jiraKey,
+          cachedFromAnalysisRunId: cached.analysisRunId,
+          provider: acProvider.name,
+          model: acProvider.model,
+          acceptanceCriteriaCount: finalizedContext.acceptanceCriteria.length,
+        });
       } else {
-        log.info('context.api_docs_skipped', { jiraKey, reason: relevance.reason });
+        log.info('api.analyze.cache_miss', {
+          jiraKey,
+          provider: acProvider.name,
+          model: acProvider.model,
+          analysisSourceHash,
+        });
       }
     }
-    finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan = classifyAcceptanceCriteriaExecution(finalizedContext);
+
+    if (!finalizedContext) {
+      finalizedContext = await finalizeAcceptanceCriteria(context, {
+        synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input, log),
+        logger: log,
+        skipStrongLlmSynthesis: usesFastAcceptanceCriteriaPath(config.llm),
+        // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
+        llm: config.llm,
+      });
+      if (finalizedContext.constraints.scopeType === 'api') {
+        // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
+        // actually API-contract work; internal backend work (migration/backfill/DB) skips the crawl.
+        const relevance = assessApiContractRelevance(finalizedContext);
+        finalizedContext.constraints.apiContractRelevant = relevance.relevant;
+        finalizedContext.constraints.apiContractRelevanceReason = relevance.reason;
+        if (relevance.relevant) {
+          try {
+            finalizedContext.apiContract = await buildApiContract(
+              finalizedContext,
+              finalizedContext.apiDocsUrl || config.apiDocsUrl,
+              (input) => selectScopedApiEndpoints(config.llm, input)
+            );
+          } catch (error) {
+            finalizedContext.apiContract = {
+              sourceUrl: finalizedContext.apiDocsUrl || config.apiDocsUrl,
+              matchedEndpoints: [],
+              warnings: [`API docs enrichment failed: ${(error as Error).message}`],
+            };
+          }
+        } else {
+          log.info('context.api_docs_skipped', { jiraKey, reason: relevance.reason });
+        }
+      }
+      finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan = classifyAcceptanceCriteriaExecution(finalizedContext);
+      finalizedContext.acceptanceCriteriaDiagnostics.cache = {
+        ...(finalizedContext.acceptanceCriteriaDiagnostics.cache || {}),
+        analysisSourceHash,
+        finalizedAcHash: finalizedAcceptanceCriteriaHash(finalizedContext),
+        executionPlanHash: executionPlanHash(finalizedContext),
+        apiContractHash: apiContractHash(finalizedContext),
+        acProvider: acProvider?.name || '',
+        acModel: acProvider?.model || '',
+        cacheHit: false,
+      };
+    }
     log.info('context.ac_execution_plan', {
       jiraKey,
-      items: finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan.map((item) => ({
+      items: (finalizedContext.acceptanceCriteriaDiagnostics.acceptanceCriteriaExecutionPlan || []).map((item) => ({
         criterionId: item.criterionId,
         executionType: item.executionType,
         coveragePolicy: item.coveragePolicy,
@@ -1391,7 +1508,59 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       manualScopeOverride: generationContext.manualScopeOverride,
     });
     const generationStartedAt = Date.now();
-    const generation = await generateTestCases(config.llm, generationContext);
+    const primaryGenerationProvider = configuredLlmProviders(config.llm.providers)[0];
+    const contextCache = cacheMetadata(body.context);
+    let generation:
+      | {
+          provider: string;
+          model: string;
+          testCases: GeneratedTestCase[];
+          stepTimings?: GenerationStepTiming[];
+        }
+      | null = null;
+    if (
+      primaryGenerationProvider &&
+      contextCache.analysisSourceHash &&
+      contextCache.finalizedAcHash &&
+      contextCache.executionPlanHash &&
+      typeof contextCache.apiContractHash === 'string'
+    ) {
+      const cached = await persistence.findCachedGeneratedRun({
+        jiraKey: body.context.ticketKey,
+        analysisSourceHash: contextCache.analysisSourceHash,
+        finalizedAcHash: contextCache.finalizedAcHash,
+        executionPlanHash: contextCache.executionPlanHash,
+        apiContractHash: contextCache.apiContractHash,
+        provider: primaryGenerationProvider.name,
+        model: primaryGenerationProvider.model,
+      });
+      if (cached) {
+        generation = {
+          provider: cached.provider,
+          model: cached.model,
+          testCases: cached.testCases,
+          stepTimings: [],
+        };
+        log.info('api.generate.cache_hit', {
+          jiraKey: body.context.ticketKey,
+          cachedFromGeneratedRunId: cached.generatedRunId,
+          provider: cached.provider,
+          model: cached.model,
+          caseCount: cached.testCases.length,
+        });
+      } else {
+        log.info('api.generate.cache_miss', {
+          jiraKey: body.context.ticketKey,
+          provider: primaryGenerationProvider.name,
+          model: primaryGenerationProvider.model,
+          finalizedAcHash: contextCache.finalizedAcHash,
+          executionPlanHash: contextCache.executionPlanHash,
+        });
+      }
+    }
+    if (!generation) {
+      generation = await generateTestCases(config.llm, generationContext);
+    }
     const generationDurationMs = Date.now() - generationStartedAt;
     // Per-LLM-step timing breakdown (initial gen + each repair pass) so a slow run shows which pass burned
     // the time, not just the total. Especially important for multi-minute DeepSeek runs.

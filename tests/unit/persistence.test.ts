@@ -42,6 +42,40 @@ test('file-backed persistence health ping reports fallback mode', async () => {
   });
 });
 
+test('file-backed persistence reports no LLM cache hits', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-agent-web-'));
+  const auditFile = path.join(tempDir, 'audit-log.jsonl');
+  const persistence = createPersistence({
+    databaseUrl: '',
+    auditFile,
+    logger,
+  });
+
+  await persistence.initialize();
+
+  assert.equal(
+    await persistence.findCachedAnalysisContext({
+      jiraKey: 'ORB-1',
+      analysisSourceHash: 'source',
+      acProvider: 'openai',
+      acModel: 'gpt-5.4-mini',
+    }),
+    null
+  );
+  assert.equal(
+    await persistence.findCachedGeneratedRun({
+      jiraKey: 'ORB-1',
+      analysisSourceHash: 'source',
+      finalizedAcHash: 'ac',
+      executionPlanHash: 'plan',
+      apiContractHash: 'api',
+      provider: 'openai',
+      model: 'gpt-5.4-mini',
+    }),
+    null
+  );
+});
+
 test('file-backed persistence stores and consumes oauth state', async () => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qa-agent-web-'));
   const auditFile = path.join(tempDir, 'audit-log.jsonl');
@@ -126,6 +160,12 @@ test('generated run quality migration persists quality, duration, and step timin
   assert.match(migration, /quality_json\s+JSONB/i);
   assert.match(migration, /step_timings_json\s+JSONB/i);
   assert.match(migration, /duration_ms\s+INTEGER/i);
+});
+
+test('generated run cache only reuses passed quality-gate runs', async () => {
+  const source = await fs.readFile(path.join(process.cwd(), 'src/server/services/persistence.ts'), 'utf8');
+
+  assert.match(source, /gr\.quality_json\s+#>>\s+'\{qualityGate\}'\s+=\s+'pass'/);
 });
 
 test('file-backed persistence reports due personal-data accounts and tracks reporting status', async () => {

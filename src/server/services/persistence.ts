@@ -85,6 +85,13 @@ interface StoredPushRunInput {
   };
 }
 
+export interface CachedGeneratedRun {
+  generatedRunId: string;
+  provider: string;
+  model: string;
+  testCases: GeneratedTestCase[];
+}
+
 export interface UserTestrailCreds {
   user: string;
   apiKeyEnc: string;
@@ -117,6 +124,21 @@ export interface Persistence {
   createAnalysisRun(input: { jiraKey: string; user: string; context: QaContext }): Promise<string | null>;
   createGeneratedRun(input: StoredGenerationRunInput): Promise<string | null>;
   createPushRun(input: StoredPushRunInput): Promise<string | null>;
+  findCachedAnalysisContext(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    acProvider: string;
+    acModel: string;
+  }): Promise<{ analysisRunId: string; context: QaContext } | null>;
+  findCachedGeneratedRun(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    finalizedAcHash: string;
+    executionPlanHash: string;
+    apiContractHash: string;
+    provider: string;
+    model: string;
+  }): Promise<CachedGeneratedRun | null>;
   listHistoryRuns(limit?: number): Promise<WorkflowHistorySummary[]>;
   getHistoryRun(id: string): Promise<WorkflowHistoryDetail | null>;
   getDiagnostics(): PersistenceDiagnostics;
@@ -258,6 +280,27 @@ class ResilientPersistence implements Persistence {
 
   createPushRun(input: StoredPushRunInput): Promise<string | null> {
     return this.active.createPushRun(input);
+  }
+
+  findCachedAnalysisContext(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    acProvider: string;
+    acModel: string;
+  }): Promise<{ analysisRunId: string; context: QaContext } | null> {
+    return this.active.findCachedAnalysisContext(input);
+  }
+
+  findCachedGeneratedRun(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    finalizedAcHash: string;
+    executionPlanHash: string;
+    apiContractHash: string;
+    provider: string;
+    model: string;
+  }): Promise<CachedGeneratedRun | null> {
+    return this.active.findCachedGeneratedRun(input);
   }
 
   listHistoryRuns(limit?: number): Promise<WorkflowHistorySummary[]> {
@@ -444,6 +487,14 @@ class FileBackedPersistence implements Persistence {
   }
 
   async createPushRun(): Promise<string | null> {
+    return null;
+  }
+
+  async findCachedAnalysisContext(): Promise<{ analysisRunId: string; context: QaContext } | null> {
+    return null;
+  }
+
+  async findCachedGeneratedRun(): Promise<CachedGeneratedRun | null> {
     return null;
   }
 
@@ -931,6 +982,71 @@ class PostgresPersistence implements Persistence {
       );
     }
     return pushRunId;
+  }
+
+  async findCachedAnalysisContext(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    acProvider: string;
+    acModel: string;
+  }): Promise<{ analysisRunId: string; context: QaContext } | null> {
+    const result = await this.pool.query(
+      `SELECT id, context_json
+       FROM analysis_runs
+       WHERE jira_key = $1
+         AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,analysisSourceHash}' = $2
+         AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,acProvider}' = $3
+         AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,acModel}' = $4
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [input.jiraKey, input.analysisSourceHash, input.acProvider, input.acModel]
+    );
+    const row = result.rows[0];
+    if (!row?.context_json) return null;
+    return { analysisRunId: String(row.id), context: row.context_json as QaContext };
+  }
+
+  async findCachedGeneratedRun(input: {
+    jiraKey: string;
+    analysisSourceHash: string;
+    finalizedAcHash: string;
+    executionPlanHash: string;
+    apiContractHash: string;
+    provider: string;
+    model: string;
+  }): Promise<CachedGeneratedRun | null> {
+    const result = await this.pool.query(
+      `SELECT gr.id, gr.provider, gr.model
+       FROM generated_runs gr
+       JOIN analysis_runs ar ON ar.id = gr.analysis_run_id
+       WHERE gr.jira_key = $1
+         AND gr.provider = $2
+         AND gr.model = $3
+         AND gr.quality_json #>> '{qualityGate}' = 'pass'
+         AND ar.context_json #>> '{acceptanceCriteriaDiagnostics,cache,analysisSourceHash}' = $4
+         AND ar.context_json #>> '{acceptanceCriteriaDiagnostics,cache,finalizedAcHash}' = $5
+         AND ar.context_json #>> '{acceptanceCriteriaDiagnostics,cache,executionPlanHash}' = $6
+         AND COALESCE(ar.context_json #>> '{acceptanceCriteriaDiagnostics,cache,apiContractHash}', '') = $7
+       ORDER BY gr.created_at DESC
+       LIMIT 1`,
+      [
+        input.jiraKey,
+        input.provider,
+        input.model,
+        input.analysisSourceHash,
+        input.finalizedAcHash,
+        input.executionPlanHash,
+        input.apiContractHash,
+      ]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      generatedRunId: String(row.id),
+      provider: String(row.provider || input.provider),
+      model: String(row.model || input.model),
+      testCases: await this.loadGeneratedTestCases(String(row.id)),
+    };
   }
 
   async listHistoryRuns(limit = 100): Promise<WorkflowHistorySummary[]> {
