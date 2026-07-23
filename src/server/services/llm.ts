@@ -21,6 +21,7 @@ import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResul
 import { requestHttpsJson } from './http';
 import { TtlCache } from './ttl-cache';
 import type { Logger } from './logger';
+import { recordLlmUsage } from './llm-usage';
 
 export interface ProviderConfig {
   name: string;
@@ -464,6 +465,8 @@ async function requestProviderJson<T>(
   for (let attempt = 0; attempt <= retryAttempts(); attempt += 1) {
     try {
       const response = await requestJson<any>(url, { Authorization: `Bearer ${provider.apiKey}` }, requestBody);
+      // Pure instrumentation: record token usage for cost analysis. Never alters the request/response.
+      recordLlmUsage({ task, label, provider: provider.name, model: provider.model, usage: response?.usage });
       const content = providerContent(response, label);
       const parsed = extractJson(content);
       return parse(parsed);

@@ -13,6 +13,7 @@ import {
   type AccessibleResource,
 } from './services/atlassian';
 import { classifyAcceptanceCriteriaExecution, finalizeAcceptanceCriteria } from './services/acceptance-criteria';
+import { withLlmUsageCapture, summarizeLlmUsage } from './services/llm-usage';
 import { buildQaContext } from './services/context-builder';
 import {
   configuredLlmProviders,
@@ -1416,12 +1417,20 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
     }
 
     if (!finalizedContext) {
-      finalizedContext = await finalizeAcceptanceCriteria(context, {
-        synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input, log),
-        logger: log,
-        skipStrongLlmSynthesis: usesFastAcceptanceCriteriaPath(config.llm),
-        // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
-        llm: config.llm,
+      const finalizeCaptured = await withLlmUsageCapture(() =>
+        finalizeAcceptanceCriteria(context, {
+          synthesizer: async (input) => synthesizeAcceptanceCriteria(config.llm, input, log),
+          logger: log,
+          skipStrongLlmSynthesis: usesFastAcceptanceCriteriaPath(config.llm),
+          // F3: enables the LLM excerpt-relevance gate (only fires when EXCERPT_RELEVANCE_LLM is set).
+          llm: config.llm,
+        })
+      );
+      finalizedContext = finalizeCaptured.result;
+      // Cost visibility: token usage for AC synthesis (+ any excerpt-relevance calls) on this analyze.
+      log.info('api.analyze.token_usage', {
+        jiraKey: context.ticketKey,
+        ...summarizeLlmUsage(finalizeCaptured.usage),
       });
       if (finalizedContext.constraints.scopeType === 'api') {
         // Not every backend ticket touches the HTTP API. Only fetch the docs when the ticket is
@@ -1634,7 +1643,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, log = logger
       }
     }
     if (!generation) {
-      generation = await generateTestCases(config.llm, generationContext, log);
+      const captured = await withLlmUsageCapture(() => generateTestCases(config.llm, generationContext, log));
+      generation = captured.result;
+      // Cost visibility: per-task token usage (and provider-cached input tokens) for this generate run.
+      log.info('api.generate.token_usage', {
+        jiraKey: body.context.ticketKey,
+        provider: generation.provider,
+        model: generation.model,
+        ...summarizeLlmUsage(captured.usage),
+      });
     }
     const generationDurationMs = Date.now() - generationStartedAt;
     // Per-LLM-step timing breakdown (initial gen + each repair pass) so a slow run shows which pass burned
