@@ -1785,6 +1785,31 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
       };
     }
 
+    // Some in-scope surfaces are NOT observable through a single HTTP request — a UI info/map panel,
+    // or a saved-dataset / export-file output. The Postman branches below (and the api-scope catch-all)
+    // would otherwise route these to a Postman plan: ORB-2565 AC-11 ("Info Panel ... apply to both grid
+    // results and site profiling results") falls to the catch-all, and AC-12 ("saved dataset / dataset
+    // export output") matches the structured-value branch on "output"+"fields". Generation then writes a
+    // manualVerification case but keeps executionType=postman (per the plan) → an empty apiSpec that fails
+    // validation (the recurring TC empty-apiSpec invalids). Classify them as manual_integration up front so
+    // the generated manual case's executionType matches the plan and counts as covered.
+    const uiPanelSurface =
+      /\b(?:info|map|side|detail|result)\s*panel\b/i.test(text) ||
+      (/\bpanel\b/i.test(text) && /\b(?:display|displayed|shown|show|render|rendered|mirror|view)\b/i.test(text));
+    const exportFileSurface =
+      /\b(?:saved\s+dataset|save\s+as\s+dataset|dataset\s+export|data\s+export|export(?:ed)?\s+(?:file|output|dataset)|download(?:ed)?\s+(?:the\s+)?dataset|exported\s+file|csv\s+export)\b/i.test(text);
+    if (uiPanelSurface || exportFileSurface) {
+      return {
+        criterionId: criterion.id,
+        executionType: 'manual_integration',
+        observableSurface: uiPanelSurface ? 'Result Info Panel (UI) display' : 'Saved dataset / exported file output',
+        reason: uiPanelSurface
+          ? 'Criterion verifies a UI panel display, not a single HTTP response; verify via UI/integration evidence.'
+          : 'Criterion verifies exported-file / saved-dataset output, not a single HTTP response; verify via integration/manual evidence.',
+        coveragePolicy: 'integration_verification',
+      };
+    }
+
     if (/\b(get\s+\/|stream|sse|dataset metadata|output row|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
       return postmanPlan(
         criterion.id,

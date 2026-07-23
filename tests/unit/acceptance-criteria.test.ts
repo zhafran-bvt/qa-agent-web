@@ -1456,6 +1456,51 @@ test('ORB-3472: classifies table-column and ETL criteria as manual DB verificati
   assert.equal(byId.get('AC-6')?.executionType, 'manual_integration');
 });
 
+test('ORB-2565: routes UI info-panel and export-file criteria to manual integration, not Postman', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2565',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/summary', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The analysis summary response returns adm_area_coverage_1 and adm_area_coverage_2 as formatted coverage values.',
+      },
+      {
+        id: 'AC-10',
+        text: 'The administrative area coverage values shown in the map Info Panel must match the values returned in the result table for the same grid or catchment.',
+      },
+      {
+        id: 'AC-11',
+        text: 'The Info Panel administrative area coverage behavior must apply to both grid results and site profiling results.',
+      },
+      {
+        id: 'AC-12',
+        text: 'The administrative area coverage fields must be included in the saved dataset / dataset export output for spatial analysis results.',
+      },
+    ],
+  });
+
+  const byId = new Map(classifyAcceptanceCriteriaExecution(context).map((item) => [item.criterionId, item]));
+
+  // A genuine response contract stays Postman-executable.
+  assert.equal(byId.get('AC-1')?.executionType, 'postman');
+  // UI info-panel and export-file surfaces are not observable via a single HTTP request; they must be
+  // manual so generation does not emit a postman-typed case with an empty apiSpec (validation failure).
+  assert.equal(byId.get('AC-10')?.executionType, 'manual_integration');
+  assert.equal(byId.get('AC-11')?.executionType, 'manual_integration');
+  assert.equal(byId.get('AC-12')?.executionType, 'manual_integration');
+  assert.match(byId.get('AC-11')?.observableSurface || '', /Info Panel/i);
+  assert.match(byId.get('AC-12')?.observableSurface || '', /dataset|export/i);
+});
+
 test('does not classify generic API wording as Postman without a concrete endpoint', () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3472',
