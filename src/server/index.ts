@@ -524,10 +524,9 @@ function sha256(value: unknown): string {
 
 function analysisSourceFingerprint(context: QaContext): string {
   return sha256({
-    // Bumped to 16: AC synthesis now forbids embedding internal implementation mechanics (R-tree,
-    // scoringRows, "as defined in the spec", etc.) in criteria — they must be externally observable — so
-    // prior cached analyses with contaminated ACs (e.g. AC-13's R-tree-stepping clause) must not be reused.
-    version: 16,
+    // Bumped to 17: endpoint planning now separates asynchronous submit triggers from result-field
+    // observation and keeps each synthesized criterion on one observable surface.
+    version: 17,
     ticketKey: context.ticketKey,
     mainIssue: context.mainIssue,
     linkedIssues: context.linkedIssues,
@@ -562,7 +561,7 @@ function finalizedAcceptanceCriteriaHash(context: QaContext): string {
 
 function executionPlanHash(context: QaContext): string {
   return sha256({
-    version: 1,
+    version: 2,
     executionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [],
   });
 }

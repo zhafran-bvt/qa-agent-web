@@ -9,7 +9,13 @@ import type {
   ScopeSnapshotTranslation,
   TestExecutionType,
 } from '../../shared/contracts';
-import { buildCoverage, casesLookDuplicative, normalizeAcceptanceCriteriaId, validateCases } from './validation';
+import {
+  buildCoverage,
+  caseMatchesAcceptanceCriteriaExecutionPlan,
+  casesLookDuplicative,
+  normalizeAcceptanceCriteriaId,
+  validateCases,
+} from './validation';
 import { normalizeSelectedEndpoints } from './api-docs';
 import type { AcceptanceCriteriaSynthesisInput, AcceptanceCriteriaSynthesisResult } from './acceptance-criteria';
 import { requestHttpsJson } from './http';
@@ -167,6 +173,15 @@ export function maxOutputTokensForTask(task: LlmTask): number {
   return Number.isFinite(configured) && configured > 0 ? configured : defaults[task];
 }
 
+export function maxOutputTokensForProviderTask(provider: { name: string }, task: LlmTask): number {
+  const isDeepSeek = String(provider.name || '').trim().toLowerCase() === 'deepseek';
+  if (isDeepSeek && task === 'coverage_repair') {
+    const configured = Number(process.env.LLM_DEEPSEEK_MAX_OUTPUT_TOKENS_COVERAGE_REPAIR);
+    return Number.isFinite(configured) && configured > 0 ? configured : 16_000;
+  }
+  return maxOutputTokensForTask(task);
+}
+
 function providerEnvPrefix(name: string): string {
   return String(name || 'provider').replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').toUpperCase();
 }
@@ -226,7 +241,7 @@ export function buildChatCompletionBody(provider: ProviderConfig, task: LlmTask,
     ? explicitMaxCompletionTokens
     : Number.isFinite(explicitMaxTokens) && explicitMaxTokens > 0
       ? explicitMaxTokens
-      : maxOutputTokensForTask(task);
+      : maxOutputTokensForProviderTask(provider, task);
   if (contract && messages.length) {
     const systemIndex = messages.findIndex((message) => message.role === 'system');
     if (systemIndex >= 0) {
@@ -518,6 +533,15 @@ export function providerContent(response: any, label: string): string {
     );
   }
   return choice?.message?.content ?? '';
+}
+
+export function shouldFailSoftCoverageRepair(provider: { name: string }, error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    String(provider.name || '').trim().toLowerCase() === 'deepseek' &&
+    isRetryableLlmContentError(error) &&
+    /truncated \(finish_reason=length\)/i.test(message)
+  );
 }
 
 export function findCaseArray(value: unknown): unknown[] | null {
@@ -1056,13 +1080,51 @@ function dedupeGeneratedCases(testCases: GeneratedTestCase[]): GeneratedTestCase
   return output;
 }
 
-function pruneSemanticDuplicateCases(
+function structuredApiContractKey(testCase: GeneratedTestCase): string {
+  const method = String(testCase.apiSpec?.method || '').trim().toUpperCase();
+  const path = String(testCase.apiSpec?.path || '').trim().toLowerCase().replace(/\/+$/, '');
+  const criteria = normalizeIdList(testCase.coversAcceptanceCriteria)
+    .map((item) => normalizeAcceptanceCriteriaId(item))
+    .sort();
+  const assertions = (testCase.apiSpec?.assertions || [])
+    .map((item) => String(item || '').trim().toLowerCase().replace(/\s+/g, ' '))
+    .filter(Boolean)
+    .sort();
+  const expectedResponse = String(testCase.apiSpec?.expectedResponse || '').replace(/\s+/g, '');
+  const samplePayload = String(testCase.apiSpec?.samplePayload || '').replace(/\s+/g, '');
+  if (!method || !path || !criteria.length || !assertions.length || !expectedResponse) return '';
+  return JSON.stringify({ method, path, criteria, assertions, expectedResponse, samplePayload });
+}
+
+function substantiatedCoverageCount(context: GenerateContext, testCase: GeneratedTestCase): number {
+  return buildCoverage([testCase], context.acceptanceCriteria, {
+    enforceAcceptanceCriteria: true,
+    scopeType: context.constraints?.scopeType,
+    acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+  }).coveredCriteria;
+}
+
+export function pruneSemanticDuplicateCases(
+  context: GenerateContext,
   testCases: GeneratedTestCase[]
 ): GeneratedTestCase[] {
   const candidates = dedupeGeneratedCases(testCases);
   const selected: GeneratedTestCase[] = [];
 
   for (const candidate of candidates) {
+    const candidateContract = structuredApiContractKey(candidate);
+    const contractMatchIndex = candidateContract
+      ? selected.findIndex((existing) => structuredApiContractKey(existing) === candidateContract)
+      : -1;
+    if (contractMatchIndex >= 0) {
+      const existing = selected[contractMatchIndex];
+      const existingCoverage = substantiatedCoverageCount(context, existing);
+      const candidateCoverage = substantiatedCoverageCount(context, candidate);
+      // Same AC + endpoint + payload + assertions is only collapsed automatically when one copy does
+      // not actually substantiate the claimed criterion. Preserve equally valid fixture variants.
+      if (candidateCoverage > existingCoverage) selected[contractMatchIndex] = candidate;
+      if (candidateCoverage !== existingCoverage) continue;
+    }
     if (selected.some((existing) => casesLookDuplicative(existing, candidate))) continue;
     selected.push(candidate);
   }
@@ -1088,9 +1150,9 @@ function matchesAcceptanceCriteriaExecutionPlan(context: GenerateContext, testCa
   const mappedCriteria = normalizeIdList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
   const plannedCriteria = mappedCriteria.map((criterionId) => planById.get(criterionId)).filter((item): item is NonNullable<typeof item> => Boolean(item));
   if (!plannedCriteria.length) return true;
-  const executionType = inferGeneratedCaseExecutionType(testCase, context.constraints?.scopeType);
-  if (!executionType) return true;
-  return plannedCriteria.every((item) => item.executionType === executionType);
+  return plannedCriteria.every((item) =>
+    caseMatchesAcceptanceCriteriaExecutionPlan(testCase, item, context.constraints?.scopeType)
+  );
 }
 
 /**
@@ -1148,7 +1210,7 @@ export function mergeGeneratedCasesWithQualityGate(
   candidateCases: GeneratedTestCase[]
 ): GeneratedTestCase[] {
   void scenarioPlan;
-  const base = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(existingCases));
+  const base = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(context, existingCases));
   let merged = [...base];
 
   for (const candidate of dedupeGeneratedCases(reconcileGeneratedCasesExecutionPlan(context, candidateCases))) {
@@ -1157,7 +1219,7 @@ export function mergeGeneratedCasesWithQualityGate(
     merged.push(candidate);
   }
 
-  return pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(merged));
+  return pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(context, merged));
 }
 
 export function buildGenerationPromptContext(context: GenerateContext) {
@@ -1252,6 +1314,7 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     input.directRequirements?.length
       ? 'input.directRequirements is a source-backed completeness checklist. Preserve every listed rule in scope as a distinct, testable criterion; do not replace it with a generic summary. Keep exact response fields, feature-flag states, storage/export/schema surfaces, and worked examples where they define the contract.'
       : '',
+    'Keep one observable surface per criterion. Do not combine an API response-field contract with persistence/export verification, and do not claim an asynchronous submit response contains result fields unless the source explicitly says that response body contains them.',
     input.groundingExamples?.length
       ? 'input.groundingExamples is independent source grounding, not an AC-count checklist. Copy its exact templates, entity names, values, and percentages verbatim into the relevant criteria. Never replace a supplied format with empty quotes or an invented generic placeholder.'
       : '',
@@ -2193,6 +2256,7 @@ async function repairMissingCoverageWithProvider(
       ? 'Reuse the same named actors/resources (assigned vs non-assigned) already established by the existing cases as executable preconditions, so repair cases read consistently with the set.'
       : '',
     'Each returned case must map to at least one missing acceptance criterion id.',
+    'Return exactly one focused case for each missing acceptance criterion. For a Postman target, apiSpec.method and apiSpec.path must exactly match that criterion\'s observableSurface in repairTargets.',
     'Keep each returned case focused: cover one missing acceptance criterion, or two tightly-coupled criteria at most. Do not staple unrelated AC ids onto a broad scenario.',
     'Keep the set minimal but sufficient.',
   ].filter(Boolean).join('\n');
@@ -2202,6 +2266,12 @@ async function repairMissingCoverageWithProvider(
       instruction: 'Generate only the missing coverage cases.',
       scopePriority,
       missingAcceptanceCriteria: missingCriteria,
+      repairTargets: missingCriteria.map((criterion) => ({
+        ...criterion,
+        executionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan?.find(
+          (item) => normalizeAcceptanceCriteriaId(item.criterionId) === normalizeAcceptanceCriteriaId(criterion.id)
+        ),
+      })),
       existingCases: existingCases.map((testCase) => ({
         id: testCase.id,
         title: testCase.title,
@@ -2568,13 +2638,13 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
           ...initial,
           testCases: applyClarificationBlockers(
             context,
-            reindexGeneratedCases(context.ticketKey, pruneSemanticDuplicateCases(initial.testCases))
+            reindexGeneratedCases(context.ticketKey, pruneSemanticDuplicateCases(context, initial.testCases))
           ),
           stepTimings,
         };
       }
 
-      let mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(initial.testCases));
+      let mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(context, initial.testCases));
       activeStage = 'scenario_plan_repair';
       const scenarioStartedAt = Date.now();
       const scenarioBeforeCount = mergedCases.length;
@@ -2611,16 +2681,25 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
           const repairTargets = dedupeCriteriaLike([...missingCriteria, ...underGranularCriteria]);
           if (!repairTargets.length) break;
           coverageAttempted = true;
-          const beforeCount = mergedCases.length;
+          const missingBefore = new Set(missingCriteria.map((criterion) => normalizeAcceptanceCriteriaId(criterion.id)));
           const repair = await repairMissingCoverageWithProvider(provider, context, mergedCases, repairTargets);
           mergedCases = mergeGeneratedCasesWithQualityGate(context, scenarioPlan, mergedCases, repair.testCases);
-          if (mergedCases.length === beforeCount) break;
+          const missingAfter = new Set(
+            getMissingAcceptanceCriteria(context, mergedCases).map((criterion) => normalizeAcceptanceCriteriaId(criterion.id))
+          );
+          const madeCoverageProgress = [...missingBefore].some((criterionId) => !missingAfter.has(criterionId));
+          if (!madeCoverageProgress && repairAttempt + 1 >= behavior.coverageRepairMaxAttempts) break;
         }
       } catch (error) {
         recordStep('coverage_repair', coverageStartedAt, coverageAttempted, coverageBeforeCount, mergedCases.length, error);
-        throw error;
+        // DeepSeek can exhaust its output budget while returning many full BDD repair cases. Preserve
+        // the best suite it already produced and let the quality gate report any remaining gaps.
+        // OpenAI keeps the existing throw/fallback behavior.
+        if (!shouldFailSoftCoverageRepair(provider, error)) throw error;
       }
-      recordStep('coverage_repair', coverageStartedAt, coverageAttempted, coverageBeforeCount, mergedCases.length);
+      if (!stepTimings.some((entry) => entry.step === 'coverage_repair')) {
+        recordStep('coverage_repair', coverageStartedAt, coverageAttempted, coverageBeforeCount, mergedCases.length);
+      }
 
       // BUG-10: after full-coverage repair, close single-polarity gaps the same way. This runs by default;
       // it is only skipped under the opt-in DeepSeek fast path (LLM_DEEPSEEK_FAST_GENERATION=true), which
@@ -2685,7 +2764,10 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
         try {
           validationAttempted = true;
           const repair = await repairInvalidCasesWithProvider(provider, context, invalidCases);
-          mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(mergeRepairedCases(mergedCases, repair.testCases)));
+          mergedCases = pruneExecutionTypeMismatchedCases(
+            context,
+            pruneSemanticDuplicateCases(context, mergeRepairedCases(mergedCases, repair.testCases))
+          );
         } catch (error) {
           recordStep('validation_repair', validationStartedAt, validationAttempted, validationBeforeCount, mergedCases.length, error);
           if (isFallbackError(error as Error & { statusCode?: number })) throw error;
@@ -2704,12 +2786,12 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
         compactionAttempted = true;
         mergedCases = compactScenarioPlannedCases(context, scenarioPlan, mergedCases);
       }
-      mergedCases = pruneSemanticDuplicateCases(mergedCases);
+      mergedCases = pruneSemanticDuplicateCases(context, mergedCases);
 
       // Snap any fabricated concrete id in an apiSpec path back to the documented template
       // (e.g. /v1/analysis/AC3PosAnalysis/stream -> /v1/analysis/{id}/stream). Deterministic + provider-safe.
       mergedCases = canonicalizeApiSpecPaths(mergedCases, context.apiContract?.matchedEndpoints || []);
-      mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(mergedCases));
+      mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(context, mergedCases));
       mergedCases = applyClarificationBlockers(context, reindexGeneratedCases(context.ticketKey, mergedCases));
       recordStep('compaction', compactionStartedAt, compactionAttempted, compactionBeforeCount, mergedCases.length);
 

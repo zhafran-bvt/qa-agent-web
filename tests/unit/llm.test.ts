@@ -20,6 +20,7 @@ import {
   isFallbackError,
   isRetryableLlmContentError,
   maxOutputTokensForTask,
+  maxOutputTokensForProviderTask,
   mergeGeneratedCasesWithQualityGate,
   mergeRepairedCases,
   normalizeAssertionList,
@@ -31,8 +32,10 @@ import {
   orderLlmProviders,
   providerContent,
   providerBehavior,
+  pruneSemanticDuplicateCases,
   reconcileGeneratedCaseExecutionPlan,
   reindexGeneratedCases,
+  shouldFailSoftCoverageRepair,
   allowLlmFallback,
   usesFastAcceptanceCriteriaPath,
   usesFastGenerationPath,
@@ -262,6 +265,35 @@ test('OpenAI request bodies keep prompts unchanged and use max_completion_tokens
   assert.equal(String((body.messages as any[])[0].content), 'Translate scope.');
 });
 
+test('only DeepSeek gets the larger coverage-repair output budget', () => {
+  const previous = process.env.LLM_DEEPSEEK_MAX_OUTPUT_TOKENS_COVERAGE_REPAIR;
+  delete process.env.LLM_DEEPSEEK_MAX_OUTPUT_TOKENS_COVERAGE_REPAIR;
+  try {
+    assert.equal(maxOutputTokensForProviderTask({ name: 'deepseek' }, 'coverage_repair'), 16_000);
+    assert.equal(
+      maxOutputTokensForProviderTask({ name: 'openai' }, 'coverage_repair'),
+      maxOutputTokensForTask('coverage_repair')
+    );
+
+    const deepseekBody = buildChatCompletionBody(
+      { name: 'deepseek', baseUrl: 'https://api.deepseek.com', apiKey: 'key', model: 'deepseek-v4-pro' },
+      'coverage_repair',
+      { model: 'deepseek-v4-pro', messages: [{ role: 'system', content: 'Repair coverage.' }] }
+    );
+    const openaiBody = buildChatCompletionBody(
+      { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'key', model: 'gpt-5.4-mini' },
+      'coverage_repair',
+      { model: 'gpt-5.4-mini', messages: [{ role: 'system', content: 'Repair coverage.' }] }
+    );
+
+    assert.equal(deepseekBody.max_tokens, 16_000);
+    assert.equal(openaiBody.max_completion_tokens, maxOutputTokensForTask('coverage_repair'));
+  } finally {
+    if (previous === undefined) delete process.env.LLM_DEEPSEEK_MAX_OUTPUT_TOKENS_COVERAGE_REPAIR;
+    else process.env.LLM_DEEPSEEK_MAX_OUTPUT_TOKENS_COVERAGE_REPAIR = previous;
+  }
+});
+
 test('provider behavior isolates model-specific generation hints from validation', () => {
   const deepseek = providerBehavior({ name: 'deepseek' });
   const openai = providerBehavior({ name: 'openai' });
@@ -390,6 +422,12 @@ test('truncated LLM content is retryable and eligible for fallback', () => {
   }
   assert.equal(isRetryableLlmContentError(error), true);
   assert.equal(isFallbackError(error as Error), true);
+  assert.equal(shouldFailSoftCoverageRepair({ name: 'deepseek' }, error), true);
+  assert.equal(shouldFailSoftCoverageRepair({ name: 'openai' }, error), false);
+  assert.equal(
+    shouldFailSoftCoverageRepair({ name: 'deepseek' }, new Error('LLM returned invalid JSON')),
+    false
+  );
 });
 
 test('finds generated cases from common LLM JSON wrappers', () => {
@@ -547,6 +585,71 @@ test('deterministic duplicate review excludes exact normalized title matches', (
       deterministic: true,
     },
   ]);
+});
+
+test('structured API duplicate pruning retains the copy that substantiates its AC', () => {
+  const context = {
+    ticketKey: 'ORB-2565',
+    constraints: { scopeType: 'api' },
+    acceptanceCriteria: [
+      {
+        id: 'AC-8',
+        text: 'If administrative areas are unavailable, both coverage fields must be null and the analysis result must still be returned successfully.',
+      },
+    ],
+    acceptanceCriteriaDiagnostics: {
+      acceptanceCriteriaExecutionPlan: [
+        {
+          criterionId: 'AC-8',
+          executionType: 'postman',
+          observableSurface: 'GET /v1/analysis/{id}/summary',
+          coveragePolicy: 'api_assertion',
+          reason: 'Result contract',
+        },
+      ],
+    },
+  };
+  const apiSpec = {
+    method: 'GET',
+    path: '/v1/analysis/{id}/summary',
+    samplePayload: '',
+    expectedResponse: '{"adm_area_coverage_1":null,"adm_area_coverage_2":null}',
+    assertions: [
+      'response.status == 200',
+      'adm_area_coverage_1 == null',
+      'adm_area_coverage_2 == null',
+      'response body is valid and accessible',
+    ],
+  };
+  const weak = {
+    id: 'TC-ORB-2565-008',
+    title: 'Coverage fields are null',
+    type: 'BDD',
+    caseIntent: 'edge',
+    jiraReference: 'ORB-2565',
+    preconditions: 'Administrative areas are unavailable.',
+    expectedResult: 'The summary succeeds and both coverage fields are null.',
+    bddScenario:
+      'Given administrative areas are unavailable\nWhen I send a GET request to "/v1/analysis/{id}/summary"\nThen both coverage fields are null\nAnd the response remains accessible',
+    coversAcceptanceCriteria: ['AC-8'],
+    sourceScope: ['ORB-2565'],
+    evidence: { coverageNote: 'Covers AC-8.' },
+    executionType: 'postman',
+    apiSpec,
+  };
+  const strong = {
+    ...weak,
+    id: 'TC-ORB-2565-015',
+    title: 'Coverage fields are null and the result is returned successfully',
+    caseIntent: 'negative',
+    expectedResult: 'The analysis result is returned successfully and both coverage fields are null.',
+    bddScenario:
+      'Given administrative areas are unavailable\nWhen I send a GET request to "/v1/analysis/{id}/summary"\nThen the analysis result is returned successfully\nAnd both coverage fields are null',
+  };
+
+  const pruned = pruneSemanticDuplicateCases(context as any, [weak, strong] as any);
+
+  assert.deepEqual(pruned.map((testCase) => testCase.id), ['TC-ORB-2565-015']);
 });
 
 test('normalizes top-level coverage note fallback', () => {
@@ -1323,6 +1426,40 @@ test('execution-plan reconciliation never relabels a concrete API case as manual
   assert.deepEqual(mergeGeneratedCasesWithQualityGate(context as any, [], [], [apiShapedCase] as any), []);
 });
 
+test('generation merge rejects a Postman repair case on the wrong endpoint for its AC', () => {
+  const context = {
+    constraints: { scopeType: 'api' },
+    acceptanceCriteriaDiagnostics: {
+      acceptanceCriteriaExecutionPlan: [
+        {
+          criterionId: 'AC-1',
+          executionType: 'postman',
+          observableSurface: 'GET /v1/analysis/{id}/summary',
+        },
+      ],
+    },
+  };
+  const wrongEndpoint = {
+    id: 'TC-WRONG',
+    title: '[BE][Spatial Analysis][ORB-2565] Wrong endpoint',
+    executionType: 'postman',
+    coversAcceptanceCriteria: ['AC-1'],
+    apiSpec: { method: 'POST', path: '/v1/analysis' },
+  };
+  const correctEndpoint = {
+    ...wrongEndpoint,
+    id: 'TC-CORRECT',
+    title: '[BE][Spatial Analysis][ORB-2565] Correct endpoint',
+    apiSpec: { method: 'GET', path: '/v1/analysis/{id}/summary' },
+  };
+
+  assert.deepEqual(mergeGeneratedCasesWithQualityGate(context as any, [], [], [wrongEndpoint] as any), []);
+  assert.deepEqual(
+    mergeGeneratedCasesWithQualityGate(context as any, [], [], [correctEndpoint] as any).map((testCase) => testCase.id),
+    ['TC-CORRECT']
+  );
+});
+
 test('generation merge keeps a different-polarity repair candidate for the same AC', () => {
   const context = {
     acceptanceCriteria: [
@@ -1386,7 +1523,7 @@ Then the response includes first_login_completed and progress records`,
   ]);
 });
 
-test('generation merge retains focused repair candidates by aligning their execution type', () => {
+test('generation merge does not relabel a manual repair case into Postman without an apiSpec', () => {
   const context = {
     acceptanceCriteria: [
       {
@@ -1460,8 +1597,8 @@ test('generation merge retains focused repair candidates by aligning their execu
 
   const merged = mergeGeneratedCasesWithQualityGate(context as any, [], existing as any, repairCandidates as any);
 
-  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3310-001', 'TC-ORB-3310-014', 'TC-ORB-3310-010']);
-  assert.equal(merged.find((testCase) => testCase.id === 'TC-ORB-3310-014')?.executionType, 'postman');
+  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3310-001', 'TC-ORB-3310-010']);
+  assert.equal(merged.some((testCase) => testCase.id === 'TC-ORB-3310-014'), false);
 });
 
 test('canonicalizeApiSpecPaths snaps a fabricated id back to the documented {id} template', () => {

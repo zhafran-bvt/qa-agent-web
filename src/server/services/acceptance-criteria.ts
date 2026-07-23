@@ -1647,6 +1647,24 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     );
     return documented ? endpointSurface(documented.method || '', documented.path || '') : '';
   };
+  const sourceExplicitlyBindsEndpointToResponse = (
+    criterion: ScopedItem,
+    endpoint: { method: string; path: string } | null
+  ): boolean => {
+    if (!endpoint) return false;
+    const excerpts = criterion.sourceExcerpts || [];
+    if (!excerpts.length) return true;
+    return excerpts.some((excerpt) => {
+      const excerptText = normalizeInlineText(excerpt.text);
+      const mentioned = firstMentionedCriterionEndpoint(excerptText);
+      return Boolean(
+        mentioned &&
+          mentioned.method === endpoint.method &&
+          mentioned.path.replace(/\/+$/, '') === endpoint.path.replace(/\/+$/, '') &&
+          /\b(?:response(?:\s+body)?|returns?|returned|includes?|contains?)\b/i.test(excerptText)
+      );
+    });
+  };
   const manualIntegrationPlan = (
     criterionId: string,
     reason: string,
@@ -1700,6 +1718,16 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     const resultEndpoint = streamEndpoint || summaryEndpoint || analysisDetailEndpoint;
     const criterionEndpoint = firstCriterionEndpoint(text);
     const proposedCriterionEndpoint = firstMentionedCriterionEndpoint(text);
+    // A ticket may name POST /v1/analysis as the trigger while defining fields on the asynchronous
+    // result dataset. Do not turn that scope marker into a claim about the POST response unless a
+    // source excerpt explicitly binds the endpoint to a returned response contract.
+    const resultFieldTriggeredBySubmit = Boolean(
+      proposedCriterionEndpoint?.method === 'POST' &&
+        resultEndpoint &&
+        /\b(?:analysis\s+results?|result\s+(?:fields?|dataset|rows?)|output\s+(?:fields?|dataset|rows?))\b/i.test(text) &&
+        !sourceExplicitlyBindsEndpointToResponse(criterion, proposedCriterionEndpoint)
+    );
+    const observableCriterionEndpoint = resultFieldTriggeredBySubmit ? resultEndpoint : criterionEndpoint;
 
     if (scopeType !== 'api') {
       if (/\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|sql|schema)\b/i.test(text)) {
@@ -1760,11 +1788,30 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     if (/\b(get\s+\/|stream|sse|dataset metadata|output row|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
       return postmanPlan(
         criterion.id,
-        criterionEndpoint || resultEndpoint || postEndpoint,
-        criterionEndpoint
+        observableCriterionEndpoint || resultEndpoint || postEndpoint,
+        observableCriterionEndpoint
           ? 'Criterion is observable through its referenced API endpoint.'
           : 'Criterion is observable through the documented analysis result response.',
-        proposedCriterionEndpoint
+        resultFieldTriggeredBySubmit ? null : proposedCriterionEndpoint
+      );
+    }
+
+    // A criterion that defines the scalar/format contract of a named result field belongs to the
+    // result endpoint, even when it contrasts that field with a JSON array. The generic JSON-shape
+    // branch below cannot decide between submit and result endpoints on its own.
+    const scalarResultFieldContract =
+      /\b(?:attributes?|fields?|values?)\b[\s\S]{0,180}\b(?:plain\s+strings?|string\s+scalars?|scalar\s+strings?|not\s+(?:a\s+)?json\s+array|format)\b/i.test(text);
+    if (
+      context.constraints?.apiContractRelevant !== false &&
+      resultEndpoint &&
+      scalarResultFieldContract &&
+      !observableCriterionEndpoint
+    ) {
+      return postmanPlan(
+        criterion.id,
+        resultEndpoint,
+        'Criterion defines observable result-field values, format, collection shape/order, or null behavior in the documented API response.',
+        resultFieldTriggeredBySubmit ? null : proposedCriterionEndpoint
       );
     }
 
@@ -1772,11 +1819,11 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
       const observableSurfaces = Array.from(new Set([postEndpoint, resultEndpoint].filter(Boolean)));
       return postmanPlan(
         criterion.id,
-        criterionEndpoint || observableSurfaces.join(' or '),
-        criterionEndpoint
+        observableCriterionEndpoint || observableSurfaces.join(' or '),
+        observableCriterionEndpoint
           ? 'Criterion defines a response contract on its referenced API endpoint.'
           : 'Criterion defines an API response or data-shape contract; verify it through the documented submit/result endpoints.',
-        proposedCriterionEndpoint
+        resultFieldTriggeredBySubmit ? null : proposedCriterionEndpoint
       );
     }
 
@@ -1792,7 +1839,7 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
       /\b(?:result|output|attribute|field|value|array)\b[\s\S]{0,160}\b(?:null|empty|unavailable|not\s+mapped|outside\s+supported)\b/i.test(text);
     const structuredReturnedValue =
       /\b(?:return|returns|returned|result|output)\b/i.test(text) &&
-      /\b(?:attribute|field|array|object|entries|entry|hierarchy|percentage|ordered|sorted)\b/i.test(text);
+      /\b(?:attributes?|fields?|array|object|entries|entry|hierarchy|percentage|ordered|sorted)\b/i.test(text);
     // A formatted value is also a response contract even when the synthesized AC calls it an
     // "attribute" rather than explicitly saying "response". For example, ORB-2565 requires the
     // returned coverage attribute to contain hierarchy text plus a percentage in one exact format.
@@ -1809,13 +1856,13 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     ) {
       return postmanPlan(
         criterion.id,
-        criterionEndpoint || resultEndpoint || postEndpoint,
+        observableCriterionEndpoint || resultEndpoint || postEndpoint,
         'Criterion defines observable result-field values, format, collection shape/order, or null behavior in the documented API response.',
-        proposedCriterionEndpoint
+        resultFieldTriggeredBySubmit ? null : proposedCriterionEndpoint
       );
     }
 
-    if (/\b(post\s+(?:[a-z][a-z0-9_-]*\/)?\/?v\d+\/|submit analysis|request body|payload|optional field|proportion_method|enum values?|default)\b/i.test(text)) {
+    if (/\b(post\s+(?:[a-z][a-z0-9_-]*\/)?\/?v\d+\/|submit analysis|request body|request payload|payload (?:field|parameter)|optional field|proportion_method|enum values?|default)\b/i.test(text)) {
       return postmanPlan(
         criterion.id,
         criterionEndpoint || postEndpoint,

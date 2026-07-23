@@ -643,6 +643,50 @@ test('validateCases preserves POST and GET variants even when they cover the sam
   assert.doesNotMatch(validation[1].warnings.join('\n'), /Potential duplicate/);
 });
 
+test('coverage rejects an AC claim made on the wrong Postman endpoint', () => {
+  const criteria = [
+    {
+      id: 'AC-1',
+      text: 'GET /v1/analysis/{id}/summary includes adm_area_coverage_1 and adm_area_coverage_2.',
+    },
+  ];
+  const executionPlan = [
+    {
+      criterionId: 'AC-1',
+      executionType: 'postman' as const,
+      observableSurface: 'GET /v1/analysis/{id}/summary',
+      reason: 'Result response contract.',
+      coveragePolicy: 'api_assertion' as const,
+    },
+  ];
+  const baseCase = {
+    id: 'TC-1',
+    executionType: 'postman' as const,
+    caseIntent: 'positive' as const,
+    coversAcceptanceCriteria: ['AC-1'],
+    expectedResult: 'The response includes adm_area_coverage_1 and adm_area_coverage_2.',
+    bddScenario:
+      'Feature: Coverage\nScenario: Result fields\nGiven an analysis exists\nWhen the result is requested\nThen the response includes adm_area_coverage_1 and adm_area_coverage_2',
+  };
+
+  const wrongCoverage = buildCoverage(
+    [{ ...baseCase, apiSpec: { method: 'POST', path: '/v1/analysis' } }],
+    criteria,
+    { scopeType: 'api', acceptanceCriteriaExecutionPlan: executionPlan }
+  );
+  const correctCoverage = buildCoverage(
+    [{ ...baseCase, apiSpec: { method: 'GET', path: '/v1/analysis/{id}/summary' } }],
+    criteria,
+    { scopeType: 'api', acceptanceCriteriaExecutionPlan: executionPlan }
+  );
+
+  assert.deepEqual(wrongCoverage.uncoveredCriteria, ['AC-1']);
+  assert.deepEqual(wrongCoverage.unsubstantiatedClaims, [
+    { caseId: 'TC-1', criterionId: 'AC-1', reason: 'execution_mismatch' },
+  ]);
+  assert.deepEqual(correctCoverage.uncoveredCriteria, []);
+});
+
 test('validateCases keeps materially different variants for the same AC and endpoint', () => {
   const criteria = [{ id: 'AC-1', text: 'The coverage array supports multiple administrative areas.' }];
   const base = {

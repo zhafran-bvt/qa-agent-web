@@ -26,7 +26,7 @@ interface HttpReference {
   path: string;
 }
 
-interface GeneratedLikeCase {
+export interface GeneratedLikeCase {
   id?: string;
   title?: string;
   goal?: string;
@@ -276,6 +276,23 @@ function sameHttpReference(a: HttpReference, b: HttpReference): boolean {
     const segB = segsB[index];
     return segA === '{param}' || segB === '{param}' || segA === segB;
   });
+}
+
+export function caseMatchesAcceptanceCriteriaExecutionPlan(
+  testCase: GeneratedLikeCase,
+  plannedExecution: AcceptanceCriteriaExecutionPlanItem,
+  scopeType: 'web' | 'api' = 'web'
+): boolean {
+  const executionType = inferExecutionType(testCase, scopeType);
+  if (executionType && plannedExecution.executionType !== executionType) return false;
+  if (scopeType !== 'api' || plannedExecution.executionType !== 'postman') return true;
+
+  const plannedRefs = extractHttpReferences(plannedExecution.observableSurface || '');
+  if (!plannedRefs.length) return true;
+  const method = normalizeText(testCase.apiSpec?.method).toUpperCase();
+  const path = normalizeText(testCase.apiSpec?.path);
+  if (!method || !path) return false;
+  return plannedRefs.some((ref) => sameHttpReference(ref, { method, path }));
 }
 
 const DUPLICATE_STOPWORDS = new Set([
@@ -761,7 +778,11 @@ export function buildCoverage(
       const entry = entryById.get(criterionId);
       if (!entry) continue;
       const plannedExecution = executionPlanById.get(criterionId);
-      if (scopeType === 'api' && plannedExecution && executionType && plannedExecution.executionType !== executionType) {
+      if (
+        scopeType === 'api' &&
+        plannedExecution &&
+        !caseMatchesAcceptanceCriteriaExecutionPlan(testCase, plannedExecution, scopeType)
+      ) {
         unsubstantiatedClaims.push({ caseId, criterionId, reason: 'execution_mismatch' });
         continue;
       }

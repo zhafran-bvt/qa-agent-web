@@ -1380,6 +1380,42 @@ test('ORB-2565: classifies a returned attribute format as an API result assertio
   ]);
 });
 
+test('ORB-2565: treats POST as a trigger and routes result-field contracts to the summary endpoint', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2565',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text:
+          'POST analytics/v1/analysis must return administrative area coverage as two separate result fields, adm_area_coverage_1 and adm_area_coverage_2, on site-profiling spatial analysis results.',
+        sourceExcerpts: [
+          { kind: 'jira', text: 'Enhance API: POST analytics/v1/analysis' },
+          { kind: 'jira', text: 'Add adm. area coverage attribute on spatial analysis result dataset (for site profiling)' },
+        ],
+      },
+      {
+        id: 'AC-2',
+        text:
+          'Each administrative area coverage field must be a plain string value, not a JSON array or bulleted list, and must use the format: full administrative hierarchy followed by the coverage percentage in parentheses, for example: Cengkareng Timur, Cengkareng, Jakarta Barat, DKI Jakarta (48.84% coverage).',
+      },
+    ],
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/summary', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+  });
+
+  const byId = new Map(classifyAcceptanceCriteriaExecution(context).map((item) => [item.criterionId, item]));
+
+  assert.equal(byId.get('AC-1')?.observableSurface, 'GET /v1/analysis/{id}/summary');
+  assert.equal(byId.get('AC-2')?.observableSurface, 'GET /v1/analysis/{id}/summary');
+});
+
 test('ORB-3472: classifies table-column and ETL criteria as manual DB verification', () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3472',
