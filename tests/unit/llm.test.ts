@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import https from 'node:https';
 import {
+  applyClarificationBlockers,
   buildGenerationPromptContext,
   buildChatCompletionBody,
   buildDeterministicDuplicateRecommendations,
@@ -13,6 +16,7 @@ import {
   getMissingScenarioPlanItems,
   getUnderGranularAcceptanceCriteria,
   getSinglePolarityGaps,
+  generateTestCases,
   isFallbackError,
   isRetryableLlmContentError,
   maxOutputTokensForTask,
@@ -27,10 +31,102 @@ import {
   orderLlmProviders,
   providerContent,
   providerBehavior,
+  reconcileGeneratedCaseExecutionPlan,
+  reindexGeneratedCases,
   allowLlmFallback,
   usesFastAcceptanceCriteriaPath,
   usesFastGenerationPath,
 } from '../../src/server/services/llm';
+
+test('mocked OpenAI generation completes with BDD-only output and contiguous ticket IDs', async (t) => {
+  const providerPayload = {
+    choices: [
+      {
+        finish_reason: 'stop',
+        message: {
+          content: JSON.stringify({
+            testCases: [
+              {
+                id: 'TC-07',
+                title: '[FE][Spatial Analysis][ORB-9999] Displays the saved analysis status',
+                goal: 'Confirm the results page displays the saved analysis status.',
+                type: 'Scenario',
+                caseIntent: 'negative',
+                jiraReference: 'ORB-9999',
+                preconditions: 'A completed saved analysis exists for the signed-in user.',
+                inputs: 'Use the saved analysis identifier from the precondition.',
+                expectedResult: 'The results page displays the saved analysis status.',
+                bddScenario:
+                  'Feature: Saved analysis results\nScenario: Display saved analysis status\nGiven a completed saved analysis exists\nWhen the user opens the results page\nThen the saved analysis status is displayed',
+                coversAcceptanceCriteria: ['AC-1'],
+                sourceScope: ['ORB-9999'],
+                evidence: { coverageNote: 'Verifies AC-1 on the results page.' },
+              },
+            ],
+          }),
+        },
+      },
+    ],
+  };
+  let capturedBody = '';
+  t.mock.method(https, 'request', ((_options: unknown, callback?: (response: any) => void) => {
+    const response = Object.assign(new EventEmitter(), { headers: {}, statusCode: 200 });
+    const request = Object.assign(new EventEmitter(), {
+      write(chunk: unknown) {
+        capturedBody += String(chunk || '');
+      },
+      end() {
+        queueMicrotask(() => {
+          callback?.(response);
+          response.emit('data', JSON.stringify(providerPayload));
+          response.emit('end');
+        });
+      },
+      setTimeout() {
+        return request;
+      },
+      destroy() {
+        return request;
+      },
+    });
+    return request;
+  }) as unknown as typeof https.request);
+
+  const result = await generateTestCases(
+    {
+      providers: [
+        { name: 'openai', baseUrl: 'https://api.openai.test/v1', apiKey: 'test-key', model: 'gpt-5.4-mini' },
+      ],
+    },
+    {
+      ticketKey: 'ORB-9999',
+      epic: 'Spatial Analysis',
+      mainIssue: {
+        key: 'ORB-9999',
+        summary: 'Display saved analysis status',
+        description: 'The results page displays the saved analysis status.',
+      },
+      linkedIssues: [],
+      confluencePages: [],
+      attachments: [],
+      userStories: [],
+      acceptanceCriteria: [{ id: 'AC-1', text: 'The results page displays the saved analysis status.' }],
+      acceptanceCriteriaSource: 'main_jira',
+      confidenceLevel: 'high',
+      confidenceReasons: [],
+      constraints: { scopeType: 'web', feOnly: true },
+      coverageEnforced: true,
+      manualScopeOverride: false,
+      manualScopeOverrideReason: '',
+    } as any
+  );
+
+  assert.match(capturedBody, /"model":"gpt-5.4-mini"/);
+  assert.equal(result.provider, 'openai');
+  assert.deepEqual(result.testCases.map((testCase) => testCase.id), ['TC-ORB-9999-001']);
+  assert.deepEqual(result.testCases.map((testCase) => testCase.type), ['BDD']);
+  assert.deepEqual(result.testCases.map((testCase) => testCase.caseIntent), ['positive']);
+});
 
 test('orders OpenAI first by default while preserving fallback providers', () => {
   const providers = orderLlmProviders([
@@ -329,10 +425,13 @@ test('normalizes snake case LLM fields', () => {
     {
       id: 'TC-01',
       title: '[Web][Spatial Analysis][ORB-3118] Example',
-      type: 'Happy Path',
+      goal: 'Example',
+      type: 'BDD',
       caseIntent: 'positive',
       jiraReference: 'ORB-3118',
       preconditions: 'User is logged in.',
+      inputs: '',
+      expectedResult: 'z',
       bddScenario: 'Feature: Example\nScenario: Example\nGiven x\nWhen y\nThen z',
       coversAcceptanceCriteria: [],
       sourceScope: [],
@@ -343,6 +442,21 @@ test('normalizes snake case LLM fields', () => {
       },
     }
   );
+});
+
+test('normalizes API case titles so prerequisite verbs cannot contradict apiSpec', () => {
+  const normalized = normalizeCase(
+    {
+      id: 'TC-1',
+      title: '[BE][Spatial Analysis][ORB-2565] POST /v1/analysis then verify coverage result format',
+      apiSpec: { method: 'GET', path: '/v1/analysis/{id}/summary' },
+    },
+    0
+  );
+
+  assert.equal(normalized.title, '[BE][Spatial Analysis][ORB-2565] then verify coverage result format');
+  assert.equal(normalized.apiSpec?.method, 'GET');
+  assert.equal(normalized.apiSpec?.path, '/v1/analysis/{id}/summary');
 });
 
 test('normalizes coverage metadata fields', () => {
@@ -381,6 +495,20 @@ test('normalizes explicit case intent and falls back for legacy cases', () => {
       0
     ).caseIntent,
     'edge'
+  );
+
+  assert.equal(
+    normalizeCase(
+      {
+        title: '[BE][Spatial Analysis][ORB-3118] Empty payload is rejected',
+        type: 'BDD',
+        case_intent: 'positive',
+        inputs: 'empty payload',
+        expected_result: 'The API rejects the request with a 400 error.',
+      },
+      0
+    ).caseIntent,
+    'negative'
   );
 });
 
@@ -779,7 +907,7 @@ test('localizes scope snapshot with field-by-field fallback and preserves ids', 
 
 test('BUG-10: getSinglePolarityGaps surfaces a conditional criterion covered only in one polarity', () => {
   const context = {
-    acceptanceCriteria: [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is 0' }],
+    acceptanceCriteria: [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is 0 and enabled when radius is valid' }],
   };
   const testCases = [
     {
@@ -837,8 +965,14 @@ test('scenario plan derives generic, domain-neutral families mapped to real crit
       ].join('\n'),
     },
     acceptanceCriteria: [
-      { id: 'AC-1', text: 'The optional method defaults to existing behavior when omitted and supports an explicit value.' },
-      { id: 'AC-2', text: 'Invalid method values are rejected and the alternate output format is supported.' },
+      {
+        id: 'AC-1',
+        text: 'The optional method defaults to existing behavior when omitted, supports an explicit value, and keeps reruns unchanged.',
+      },
+      {
+        id: 'AC-2',
+        text: 'Invalid method values are rejected, and the method supports the secondary surface and alternate output format.',
+      },
     ],
     confluencePages: [],
   };
@@ -877,6 +1011,58 @@ test('scenario plan drops a family that matches no acceptance criterion (no forc
   assert.equal(plan.some((item) => item.id === 'SP-INVALID-VALUE'), false);
 });
 
+test('ORB-2564: unrelated linked Confluence pages cannot inject generic scenario families', () => {
+  const context = {
+    ticketKey: 'ORB-2564',
+    epic: 'Spatial Analysis',
+    mainIssue: {
+      key: 'ORB-2564',
+      summary: '[BE] Add administrative area coverage information to grid analysis results',
+      description: [
+        'Enhance API: POST analytics/v1/analysis',
+        'Add administrative area coverage attribute for grid analysis.',
+        'Return the value as a JSON array and set data_label to bulleted_list.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The grid analysis result includes an administrative area coverage attribute.',
+        sourceExcerpt: 'Add administrative area coverage attribute for grid analysis.',
+      },
+      {
+        id: 'AC-2',
+        text: 'The administrative area coverage attribute is represented as a JSON array.',
+        sourceExcerpt: 'Data format should be in JSON array, to support multiple coverage adm area.',
+      },
+      {
+        id: 'AC-3',
+        text: 'The coverage attribute data_label equals bulleted_list.',
+        sourceExcerpt: 'Set data_label to bulleted_list for client rendering.',
+      },
+    ],
+    confluencePages: [
+      {
+        id: 'unrelated-1',
+        title: 'Mobility calculation design',
+        body: 'The calculated output uses a weighting formula and SUM of device count proportion.',
+      },
+      {
+        id: 'unrelated-2',
+        title: 'Analysis history and hierarchy',
+        body: 'An explicit opt-in flag is enabled. Rerun existing analysis. Coarser parent output aggregates child values.',
+      },
+      {
+        id: 'unrelated-3',
+        title: 'Reference tile implementation',
+        body: 'One row per occupied tile. Missing reference rows use a SQL fallback and no matching rows produce zero.',
+      },
+    ],
+  };
+
+  assert.deepEqual(buildScenarioPlan(context as any), []);
+});
+
 test('one generic case does not cover distinct scenario families', () => {
   const context = {
     ticketKey: 'ORB-1000',
@@ -889,7 +1075,12 @@ test('one generic case does not cover distinct scenario families', () => {
         'The method also applies to a secondary surface as well as the primary one.',
       ].join('\n'),
     },
-    acceptanceCriteria: [{ id: 'AC-1', text: 'The optional method defaults to existing behavior and rejects invalid values.' }],
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'The optional method defaults to existing behavior, rejects invalid values, and also applies to the secondary surface.',
+      },
+    ],
     confluencePages: [],
   };
   const plan = buildScenarioPlan(context as any);
@@ -1025,6 +1216,22 @@ test('under-granular coverage does not flag once focused case count is sufficien
   assert.deepEqual(getUnderGranularAcceptanceCriteria(context as any, cases as any, []), []);
 });
 
+test('under-granular coverage requests a dedicated case when three ACs are compressed into two cases', () => {
+  const context = {
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'The response includes the coverage attribute.' },
+      { id: 'AC-2', text: 'The coverage value is a JSON array with multiple entries.' },
+      { id: 'AC-3', text: 'The coverage metadata uses data_label bulleted_list.' },
+    ],
+  };
+  const cases = [
+    { title: 'Presence and array contract', coversAcceptanceCriteria: ['AC-1', 'AC-2'] },
+    { title: 'Renderer metadata', coversAcceptanceCriteria: ['AC-3'] },
+  ];
+
+  assert.deepEqual(getUnderGranularAcceptanceCriteria(context as any, cases as any, []).map((item) => item.id), ['AC-1']);
+});
+
 test('validation repair: mergeRepairedCases swaps invalid cases in place by id and keeps the rest', () => {
   const original = [
     { id: 'TC-1', title: 'Valid A' },
@@ -1048,7 +1255,75 @@ test('validation repair: mergeRepairedCases swaps invalid cases in place by id a
   assert.equal(merged[2], original[2]);
 });
 
-test('generation merge drops semantic duplicate repair candidates before final validation', () => {
+test('ORB-3472: execution-plan reconciliation keeps focused cases instead of silently pruning them', () => {
+  const context = {
+    constraints: { scopeType: 'api' },
+    acceptanceCriteriaDiagnostics: {
+      acceptanceCriteriaExecutionPlan: [
+        { criterionId: 'AC-1', executionType: 'postman', observableSurface: 'GET /v1/analysis/{id}/stream' },
+        { criterionId: 'AC-4', executionType: 'manual_db', observableSurface: 'Database schema / migration state' },
+        { criterionId: 'AC-6', executionType: 'manual_integration', observableSurface: 'Service integration/runtime behavior' },
+      ],
+    },
+  };
+
+  const alignedPostman = reconcileGeneratedCaseExecutionPlan(context as any, {
+    id: 'TC-AC1',
+    title: 'Verify dasymetric weighting formula',
+    executionType: 'manual_other',
+    coversAcceptanceCriteria: ['AC-1'],
+  } as any);
+  const alignedDatabase = reconcileGeneratedCaseExecutionPlan(context as any, {
+    id: 'TC-AC4',
+    title: 'Verify intersection area database column',
+    executionType: 'manual_other',
+    coversAcceptanceCriteria: ['AC-4'],
+  } as any);
+
+  assert.equal(alignedPostman.executionType, 'postman');
+  assert.equal(alignedDatabase.executionType, 'manual_db');
+
+  const splitBroadCase = reconcileGeneratedCaseExecutionPlan(context as any, {
+    id: 'TC-BROAD',
+    title: 'Verify schema and repository integration',
+    executionType: 'manual_integration',
+    coversAcceptanceCriteria: ['AC-4', 'AC-6'],
+  } as any);
+  assert.deepEqual(splitBroadCase.coversAcceptanceCriteria, ['AC-6']);
+});
+
+test('execution-plan reconciliation never relabels a concrete API case as manual', () => {
+  const context = {
+    constraints: { scopeType: 'api' },
+    acceptanceCriteriaDiagnostics: {
+      acceptanceCriteriaExecutionPlan: [
+        {
+          criterionId: 'AC-3',
+          executionType: 'manual_integration',
+          observableSurface: 'Integration behavior requiring reviewer-selected evidence',
+        },
+      ],
+    },
+  };
+  const apiShapedCase = {
+    id: 'TC-AC3',
+    title: 'Verify returned coverage array ordering',
+    executionType: 'postman',
+    coversAcceptanceCriteria: ['AC-3'],
+    apiSpec: {
+      method: 'GET',
+      path: '/v1/analysis/{id}/summary',
+      assertions: ['coverage array is sorted by percentage descending'],
+    },
+  };
+
+  const reconciled = reconcileGeneratedCaseExecutionPlan(context as any, apiShapedCase as any);
+  assert.equal(reconciled.executionType, 'postman');
+  assert.deepEqual(reconciled.apiSpec, apiShapedCase.apiSpec);
+  assert.deepEqual(mergeGeneratedCasesWithQualityGate(context as any, [], [], [apiShapedCase] as any), []);
+});
+
+test('generation merge keeps a different-polarity repair candidate for the same AC', () => {
   const context = {
     acceptanceCriteria: [
       {
@@ -1104,10 +1379,14 @@ Then the response includes first_login_completed and progress records`,
 
   const merged = mergeGeneratedCasesWithQualityGate(context as any, [], existing as any, repairCandidates as any);
 
-  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3218-AC2', 'TC-ORB-3218-AC3']);
+  assert.deepEqual(merged.map((testCase) => testCase.id), [
+    'TC-ORB-3218-AC2',
+    'TC-ORB-3218-AC2-N1',
+    'TC-ORB-3218-AC3',
+  ]);
 });
 
-test('generation merge drops repair candidates with incompatible execution type', () => {
+test('generation merge retains focused repair candidates by aligning their execution type', () => {
   const context = {
     acceptanceCriteria: [
       {
@@ -1181,7 +1460,8 @@ test('generation merge drops repair candidates with incompatible execution type'
 
   const merged = mergeGeneratedCasesWithQualityGate(context as any, [], existing as any, repairCandidates as any);
 
-  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3310-001', 'TC-ORB-3310-010']);
+  assert.deepEqual(merged.map((testCase) => testCase.id), ['TC-ORB-3310-001', 'TC-ORB-3310-014', 'TC-ORB-3310-010']);
+  assert.equal(merged.find((testCase) => testCase.id === 'TC-ORB-3310-014')?.executionType, 'postman');
 });
 
 test('canonicalizeApiSpecPaths snaps a fabricated id back to the documented {id} template', () => {
@@ -1206,6 +1486,58 @@ test('canonicalizeApiSpecPaths snaps a fabricated id back to the documented {id}
   assert.equal((result[2] as any).apiSpec.path, '/v1/unknown/thing');
   // A case without apiSpec is untouched.
   assert.equal((result[3] as any).apiSpec, undefined);
+});
+
+test('reindexGeneratedCases produces contiguous ticket-scoped IDs and a fixed BDD type after pruning', () => {
+  const cases = [
+    { id: 'TC-01', title: 'First', type: 'Scenario' },
+    { id: 'TC-04', title: 'Second', type: 'Acceptance' },
+    { id: 'TC-09', title: 'Third', type: 'Happy Path' },
+  ];
+
+  const reindexed = reindexGeneratedCases('orb-2565', cases as any);
+
+  assert.deepEqual(reindexed.map((testCase) => testCase.id), [
+    'TC-ORB-2565-001',
+    'TC-ORB-2565-002',
+    'TC-ORB-2565-003',
+  ]);
+  assert.deepEqual(reindexed.map((testCase) => testCase.type), ['BDD', 'BDD', 'BDD']);
+});
+
+test('applyClarificationBlockers attaches the blocker only to cases mapped to the ambiguous AC', () => {
+  const context = {
+    acceptanceCriteriaDiagnostics: {
+      directRequirements: [
+        {
+          id: 'REQ-2',
+          text: 'Coverage rounding is TBD.',
+          disposition: 'needs_clarification',
+          sourceKind: 'spec',
+          sourceLocation: 'Spec: Result formatting',
+          sourceUrl: 'https://example.test/spec',
+          acceptanceCriteriaIds: ['AC-2'],
+          clarificationReason: 'Rounding precision is undefined.',
+        },
+      ],
+    },
+  };
+  const cases = [
+    { id: 'TC-ORB-2565-001', coversAcceptanceCriteria: ['AC-1'] },
+    { id: 'TC-ORB-2565-002', coversAcceptanceCriteria: ['AC-2'] },
+  ];
+
+  const blocked = applyClarificationBlockers(context as any, cases as any);
+
+  assert.equal(blocked[0].clarificationBlockers, undefined);
+  assert.deepEqual(blocked[1].clarificationBlockers, [
+    {
+      requirementId: 'REQ-2',
+      reason: 'Rounding precision is undefined.',
+      sourceLocation: 'Spec: Result formatting',
+      sourceUrl: 'https://example.test/spec',
+    },
+  ]);
 });
 
 test('normalizeAssertionList extracts text from object assertions instead of yielding [object Object]', () => {

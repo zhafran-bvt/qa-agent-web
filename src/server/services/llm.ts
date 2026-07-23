@@ -354,6 +354,7 @@ export function buildScopePriorityContext(context: GenerateContext) {
         parentStorySummary: context.scopeParentIssue?.summary || '',
         scopedPrdSectionTitle: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
         scopedPrdSectionBody: context.scopeConfluenceSection?.body || '',
+        figmaReferences: context.figmaReferences || [],
         actualDevScopeGuidance: context.actualDevScopeGuidance,
       },
     };
@@ -382,6 +383,7 @@ export function buildScopePriorityContext(context: GenerateContext) {
         parentStorySummary: context.scopeParentIssue?.summary || '',
         scopedPrdSectionTitle: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
         scopedPrdSectionBody: context.scopeConfluenceSection?.body || '',
+        figmaReferences: context.figmaReferences || [],
         actualDevScopeGuidance: context.actualDevScopeGuidance,
       },
     };
@@ -399,6 +401,7 @@ export function buildScopePriorityContext(context: GenerateContext) {
       parentStorySummary: context.scopeParentIssue?.summary || '',
       scopedPrdSectionTitle: context.scopeConfluenceSection?.matchedHeading || context.scopeConfluenceSection?.title || '',
       scopedPrdSectionBody: context.scopeConfluenceSection?.body || '',
+      figmaReferences: context.figmaReferences || [],
       actualDevScopeGuidance: context.actualDevScopeGuidance,
     },
   };
@@ -576,10 +579,18 @@ export function normalizeJiraReference(value: unknown): string {
   return exactMatch ? exactMatch[0].toUpperCase() : raw.toUpperCase();
 }
 
-function normalizeCaseIntent(value: unknown): 'positive' | 'negative' | 'edge' | undefined {
-  const normalized = String(value || '').trim().toLowerCase();
-  if (normalized === 'positive' || normalized === 'negative' || normalized === 'edge') return normalized;
-  return undefined;
+function normalizeApiCaseTitle(value: unknown, apiMethod: string): string {
+  const title = String(value || '').trim();
+  if (!title || !apiMethod) return title;
+  // The structured apiSpec is the executable source of truth. Removing HTTP verbs from a generated
+  // title prevents a stale prerequisite (for example POST to create an analysis) from contradicting
+  // the actual assertion operation (GET the resulting summary). BDD keeps the full request sequence.
+  return title
+    .replace(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+(?:(?:[A-Za-z][A-Za-z0-9_-]*\/)?\/?v\d+\/\S+|\/\S+)/gi, '')
+    .replace(/\b(?:GET|POST|PUT|PATCH|DELETE)\b/gi, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([,.;:!?)\]])/g, '$1')
+    .trim();
 }
 
 function normalizeExecutionType(value: unknown): TestExecutionType | undefined {
@@ -680,14 +691,35 @@ function findDuplicateRecommendationArray(value: unknown): unknown[] | null {
 }
 
 function inferCaseIntent(testCase: Record<string, unknown>): 'positive' | 'negative' | 'edge' {
-  const haystack = [
-    String(testCase.type || ''),
-    String(testCase.title || ''),
-    normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
+  const apiSpec = (testCase.apiSpec || testCase.api_spec || {}) as Record<string, unknown>;
+  const manualVerification = (testCase.manualVerification || testCase.manual_verification || {}) as Record<string, unknown>;
+  const bddScenario = normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || '');
+  const observableOutcome = [
+    String(testCase.expectedResult || testCase.expected_result || ''),
+    String(apiSpec.expectedResponse || ''),
+    String(apiSpec.assertions || ''),
+    String(manualVerification.expectedResult || ''),
+    extractBddExpectedResult(bddScenario),
   ]
     .filter(Boolean)
     .join(' \n ')
     .toLowerCase();
+  const haystack = [
+    String(testCase.title || ''),
+    String(testCase.preconditions || testCase.custom_preconds || ''),
+    String(testCase.inputs || testCase.testData || testCase.test_data || ''),
+    observableOutcome,
+    bddScenario,
+  ]
+    .filter(Boolean)
+    .join(' \n ')
+    .toLowerCase();
+
+  // Outcome wins over fixture shape: a null/empty/limit input that is rejected is a negative case;
+  // the same boundary accepted with a defined fallback is an edge case.
+  if (/\b(?:4\d\d|negative|invalid|error|errors|fail(?:s|ed|ure)?|reject(?:ed|s|ion)?|deny|denied|blocked|disabled|unavailable|unauthorized|forbidden)\b/.test(observableOutcome)) {
+    return 'negative';
+  }
 
   if (/\b(edge|boundary|boundaries|limit|limits|maximum|max(?:imum)?|minimum|min(?:imum)?|empty|zero|null|duplicate|overflow|large dataset|single item)\b/.test(haystack)) {
     return 'edge';
@@ -698,6 +730,24 @@ function inferCaseIntent(testCase: Record<string, unknown>): 'positive' | 'negat
   }
 
   return 'positive';
+}
+
+function extractBddExpectedResult(bddScenario: string): string {
+  const lines = bddScenario
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const thenIndex = lines.findIndex((line) => /^Then\b/i.test(line));
+  if (thenIndex < 0) return '';
+  const resultLines: string[] = [];
+  for (const line of lines.slice(thenIndex)) {
+    if (/^Then\b/i.test(line) || /^And\b/i.test(line) || /^But\b/i.test(line)) {
+      resultLines.push(line.replace(/^(Then|And|But)\s*:?[\s]*/i, '').trim());
+      continue;
+    }
+    break;
+  }
+  return resultLines.filter(Boolean).join(' ');
 }
 
 export function normalizeIdList(value: unknown): string[] {
@@ -903,11 +953,12 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
     : {}) || {};
   const apiMethod = String(apiSpecRecord.method || testCase.method || '').trim().toUpperCase();
   const apiPath = String(apiSpecRecord.path || testCase.path || testCase.endpoint || '').trim();
-  const title = String(testCase.title || '');
+  const title = normalizeApiCaseTitle(testCase.title, apiMethod);
   // Titles use a single [BE]/[FE] tag (not [API]/[DB]), so execution type is inferred from the
   // structured payload: an apiSpec ⇒ postman, a manualVerification block ⇒ manual_db.
   const inferredExecutionType: TestExecutionType | undefined = apiMethod || apiPath ? 'postman' : Object.keys(manualRecord).length ? 'manual_other' : undefined;
   const executionType = normalizeExecutionType(testCase.executionType || testCase.execution_type) || inferredExecutionType;
+  const bddScenario = normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || '');
   const manualSteps = Array.isArray(manualRecord.steps)
     ? manualRecord.steps.map((step) => String(step || '').trim()).filter(Boolean)
     : normalizeTextList(manualRecord.steps || '').split('\n').map((step) => step.trim()).filter(Boolean);
@@ -915,12 +966,18 @@ export function normalizeCase(testCase: Record<string, unknown>, index: number):
   return {
     id: String(testCase.id || testCase.testCaseId || testCase.test_case_id || `TC-${String(index + 1).padStart(2, '0')}`),
     title,
-    type: String(testCase.type || ''),
+    goal: String(testCase.goal || '').trim() || title.replace(/^\[[^\]]+\]\[[^\]]+\]\[[^\]]+\]\s*/, '').trim(),
+    type: 'BDD',
     ...(executionType ? { executionType } : {}),
-    caseIntent: normalizeCaseIntent(testCase.caseIntent || testCase.case_intent) || inferCaseIntent(testCase),
+    caseIntent: inferCaseIntent(testCase),
     jiraReference: normalizeJiraReference(testCase.jiraReference || testCase.jira_reference || testCase.refs || ''),
     preconditions: normalizeTextList(testCase.preconditions || testCase.custom_preconds || ''),
-    bddScenario: normalizeBddScenario(testCase.bddScenario || testCase.bdd_scenario || testCase.custom_testrail_bdd_scenario || ''),
+    inputs: normalizeTextList(testCase.inputs || testCase.testData || testCase.test_data || ''),
+    expectedResult:
+      String(testCase.expectedResult || testCase.expected_result || '').trim() ||
+      String(manualRecord.expectedResult || manualRecord.expected_result || '').trim() ||
+      extractBddExpectedResult(bddScenario),
+    bddScenario,
     coversAcceptanceCriteria: normalizeIdList(testCase.coversAcceptanceCriteria || testCase.covers_acceptance_criteria || ''),
     sourceScope: normalizeIdList(testCase.sourceScope || testCase.source_scope || ''),
     ...(apiMethod || apiPath
@@ -1014,9 +1071,12 @@ function pruneSemanticDuplicateCases(
 }
 
 function inferGeneratedCaseExecutionType(testCase: GeneratedTestCase, scopeType?: 'web' | 'api'): TestExecutionType | undefined {
+  // Concrete API metadata is stronger evidence than a provider-supplied execution label. Prioritizing
+  // apiSpec prevents a postman case mislabeled as manual_integration from being treated as manual and
+  // silently relabeled into an invalid hybrid during execution-plan reconciliation.
+  if (testCase.apiSpec?.method || testCase.apiSpec?.path) return 'postman';
   const explicit = normalizeExecutionType(testCase.executionType);
   if (explicit) return explicit;
-  if (testCase.apiSpec?.method || testCase.apiSpec?.path) return 'postman';
   if (testCase.manualVerification) return 'manual_other';
   return scopeType === 'api' ? 'postman' : undefined;
 }
@@ -1033,8 +1093,52 @@ function matchesAcceptanceCriteriaExecutionPlan(context: GenerateContext, testCa
   return plannedCriteria.every((item) => item.executionType === executionType);
 }
 
+/**
+ * Keep focused LLM cases instead of silently discarding them when the model chose the wrong execution
+ * label. The acceptance-criteria execution plan is deterministic and authoritative; once every mapped
+ * AC points to the same surface we can safely align the case to that surface and let structural
+ * validation/repair add the required apiSpec or manualVerification fields.
+ *
+ * For a broad case spanning multiple execution surfaces, retain only mappings compatible with the
+ * case's concrete execution shape. The removed ACs remain uncovered and are handled by the focused
+ * coverage-repair pass.
+ */
+export function reconcileGeneratedCaseExecutionPlan(context: GenerateContext, testCase: GeneratedTestCase): GeneratedTestCase {
+  const executionPlan = context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [];
+  if (!executionPlan.length) return testCase;
+
+  const planById = new Map(executionPlan.map((item) => [normalizeAcceptanceCriteriaId(item.criterionId), item]));
+  const mappedCriteria = normalizeIdList(testCase.coversAcceptanceCriteria).map((item) => normalizeAcceptanceCriteriaId(item));
+  const plannedCriteria = mappedCriteria
+    .map((criterionId) => ({ criterionId, plan: planById.get(criterionId) }))
+    .filter((item): item is { criterionId: string; plan: NonNullable<(typeof executionPlan)[number]> } => Boolean(item.plan));
+  if (!plannedCriteria.length) return testCase;
+
+  const plannedTypes = new Set(plannedCriteria.map((item) => item.plan.executionType));
+  if (plannedTypes.size === 1) {
+    const [executionType] = Array.from(plannedTypes);
+    const concreteExecutionType = inferGeneratedCaseExecutionType(testCase, context.constraints?.scopeType);
+    // Never turn a concrete API case into a manual case just by changing executionType. Leave the
+    // mismatch intact so the pruning/coverage-repair path regenerates it from the authoritative plan.
+    if (concreteExecutionType === 'postman' && executionType !== 'postman') return testCase;
+    return testCase.executionType === executionType ? testCase : { ...testCase, executionType };
+  }
+
+  const executionType = inferGeneratedCaseExecutionType(testCase, context.constraints?.scopeType);
+  if (!executionType) return testCase;
+  const compatibleCriteria = plannedCriteria
+    .filter((item) => item.plan.executionType === executionType)
+    .map((item) => item.criterionId);
+  if (!compatibleCriteria.length || compatibleCriteria.length === mappedCriteria.length) return testCase;
+  return { ...testCase, coversAcceptanceCriteria: compatibleCriteria };
+}
+
+function reconcileGeneratedCasesExecutionPlan(context: GenerateContext, testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  return testCases.map((testCase) => reconcileGeneratedCaseExecutionPlan(context, testCase));
+}
+
 function pruneExecutionTypeMismatchedCases(context: GenerateContext, testCases: GeneratedTestCase[]): GeneratedTestCase[] {
-  return testCases.filter((testCase) => matchesAcceptanceCriteriaExecutionPlan(context, testCase));
+  return reconcileGeneratedCasesExecutionPlan(context, testCases).filter((testCase) => matchesAcceptanceCriteriaExecutionPlan(context, testCase));
 }
 
 export function mergeGeneratedCasesWithQualityGate(
@@ -1047,7 +1151,7 @@ export function mergeGeneratedCasesWithQualityGate(
   const base = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(existingCases));
   let merged = [...base];
 
-  for (const candidate of dedupeGeneratedCases(candidateCases)) {
+  for (const candidate of dedupeGeneratedCases(reconcileGeneratedCasesExecutionPlan(context, candidateCases))) {
     if (!matchesAcceptanceCriteriaExecutionPlan(context, candidate)) continue;
     if (merged.some((existing) => casesLookDuplicative(existing, candidate))) continue;
     merged.push(candidate);
@@ -1090,8 +1194,10 @@ export function buildGenerationPromptContext(context: GenerateContext) {
         }
       : null,
     scopeAuthority: context.scopeAuthority,
+    figmaReferences: context.figmaReferences || [],
     acceptanceCriteria: context.acceptanceCriteria,
     acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan || [],
+    directRequirements: context.acceptanceCriteriaDiagnostics?.directRequirements || [],
     acceptanceCriteriaSource: context.acceptanceCriteriaSource,
     userStories: context.userStories,
     confidenceLevel: context.confidenceLevel,
@@ -1109,6 +1215,11 @@ export function buildGenerationPromptContext(context: GenerateContext) {
 async function synthesizeWithProvider(provider: ProviderConfig, input: AcceptanceCriteriaSynthesisInput): Promise<ProviderSynthesisResult> {
   // Synthesis is conservative: it canonicalizes or splits supported requirements, but must not broaden scope.
   const prdScopedThinTicket = input.acceptanceCriteriaSource === 'parent_story_confluence_section' && input.thinTicketFallbackUsed;
+  const mainTicketDelegatesToPrd =
+    Boolean(input.prdSectionBody) &&
+    /\b(?:see|refer(?:ence)?|refer)\s+(?:to\s+)?(?:the\s+)?(?:us|user\s+story|prd|requirements?)\b/i.test(
+      input.mainIssueDescription
+    );
   const targetInstruction =
     input.targetMinCriteria && input.targetMaxCriteria
       ? `Target ${input.targetMinCriteria}-${input.targetMaxCriteria} medium-granularity criteria unless the ticket is clearly simpler.`
@@ -1121,16 +1232,34 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
     prdScopedThinTicket
       ? 'Do not broaden beyond the matched PRD subsection and the thin ticket title.'
       : 'Parent Story and PRD are supporting context only and must not expand scope beyond the main ticket.',
+    mainTicketDelegatesToPrd
+      ? 'The main Jira explicitly says to see or refer to the matched PRD/user-story subsection. Treat that subsection as normative detail for the output behavior already named by Jira: include independently testable value-content, multiple-value, percentage/format, and null/unavailable-data rules that apply to the Jira-scoped endpoint. Keep Jira as the hard boundary and exclude later addenda, UI-only behavior, or representation changes that contradict the Jira payload contract.'
+      : '',
     'Prefer testable behavior and owned payload or data contracts for the resolved ticket scope.',
     'Ignore background, non-goals, unrelated dependency notes, code scaffolding, partial flow-control lines, and duplicate rendered/plain fragments.',
     input.technicalSpecExcerpts
-      ? 'A linked Technical Specification is provided in input.technicalSpecExcerpts. Treat it as the authoritative implementation detail for the behaviors already in this ticket\'s scope — it is more precise than the PRD, which only paraphrases intent.'
+      ? 'A linked Technical Specification is provided in input.technicalSpecExcerpts. Treat it as the authoritative source for the precise OBSERVABLE behavior of the in-scope features — more precise than the PRD, which only paraphrases intent. Use it to sharpen WHAT is externally observable, not to document HOW it is built internally.'
       : '',
     input.technicalSpecExcerpts
-      ? 'Ground each criterion in the spec\'s concrete rules and capture spec-level behavior the PRD merely implies: point-in-time vs per-call access checks, per-endpoint or per-RPC enforcement (each endpoint/RPC that takes an id must be validated individually), exact filter semantics, and backward-compatibility or null-value edges. Derive a distinct criterion for each such rule.'
+      ? 'Ground each criterion in the spec\'s concrete OBSERVABLE rules the PRD merely implies: point-in-time vs per-call access checks, per-endpoint or per-RPC enforcement (each endpoint/RPC that takes an id must be validated individually), exact filter semantics, and backward-compatibility or null-value edges. Derive a distinct criterion for each such observable rule.'
+      : '',
+    input.technicalSpecExcerpts
+      ? 'Every acceptance criterion must be externally observable and black-box verifiable — an API request/response field or status, a stored or exported value, or a UI state. Do NOT embed internal implementation mechanics in a criterion: data structures (e.g. R-tree, scoringRows, gridRTree, accumulators), algorithms or stepping logic, internal function/flow/module names, storage-engine choices, or clauses like "as defined in the technical spec" or "in-engine". State WHAT is observable, never HOW it is implemented. If two output surfaces must behave the same (e.g. grid and site-profiling both gain the new field), phrase it as the observable parity to assert on each surface, not as a shared internal mechanism. A rule with no observable effect is not an acceptance criterion — omit it.'
       : '',
     input.technicalSpecExcerpts
       ? 'Use the spec only to SHARPEN and COMPLETE criteria for behavior already in the ticket scope — do not add features outside the ticket. If the spec marks something deferred, not-done, or out of scope, do not turn it into an active criterion (note it as out of scope instead).'
+      : '',
+    input.directRequirements?.length
+      ? 'input.directRequirements is a source-backed completeness checklist. Preserve every listed rule in scope as a distinct, testable criterion; do not replace it with a generic summary. Keep exact response fields, feature-flag states, storage/export/schema surfaces, and worked examples where they define the contract.'
+      : '',
+    input.groundingExamples?.length
+      ? 'input.groundingExamples is independent source grounding, not an AC-count checklist. Copy its exact templates, entity names, values, and percentages verbatim into the relevant criteria. Never replace a supplied format with empty quotes or an invented generic placeholder.'
+      : '',
+    input.repairOnlyMissingRequirements
+      ? 'This is a focused omission repair. Return exactly one criterion per listed direct requirement. Compare against input.existingCriteria and state only the missing observable clause; do not repeat, summarize, or bundle behavior already covered there.'
+      : '',
+    input.figmaReferences?.length
+      ? 'QA supplied Figma design references are included as supplemental visual context. Use them only to clarify frontend behavior or visible states when the link content is available; never invent requirements from a URL alone, and keep Jira/PRD scope authoritative.'
       : '',
     input.technicalSpecExcerpts && input.scopeBoundary
       ? `The ticket's in-scope operations are exactly: ${input.scopeBoundary}. Derive criteria ONLY for these operations and the behaviors the ticket description lists. The spec describes a broader feature than this one ticket — do NOT promote a spec capability into an active criterion when it has no matching in-scope operation (for example, login / authentication URL isolation when no login or auth-login endpoint is in scope; that belongs to a different ticket). Treat such capabilities as background context only.`
@@ -1172,7 +1301,9 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
           role: 'user',
           content: JSON.stringify(
             {
-              instruction: 'Produce the final canonical acceptance criteria set.',
+              instruction: input.repairOnlyMissingRequirements
+                ? 'Produce only the missing direct-requirement acceptance criteria.'
+                : 'Produce the final canonical acceptance criteria set.',
               input,
             },
             null,
@@ -1206,6 +1337,9 @@ async function synthesizeWithProvider(provider: ProviderConfig, input: Acceptanc
         ? `Return ${input.targetMinCriteria}-${input.targetMaxCriteria} criteria if the ticket supports that many distinct behaviors.`
         : 'Return a medium-granularity canonical set.',
       input.granularityHint || '',
+      input.groundingExamples?.length
+        ? 'Preserve every applicable input.groundingExamples template or worked value verbatim in the repaired criterion; do not blank, generalize, or invent its format.'
+        : '',
       specGrounded
         ? 'Keep these concerns separate when present: per-endpoint/per-RPC access enforcement, point-in-time vs per-call validation, exact filter semantics (e.g. plan vs partner assignment), backward-compatibility or null-value edges, and transactional email/URL routing.'
         : 'Keep these concerns separate when present: selection and visibility, geometry preservation, Run Analysis payload, Save Config payload with dataset_id linkage, datasets[] versus legacy dataset behavior, and preview or map label behavior.',
@@ -1510,33 +1644,13 @@ export function getUnderGranularAcceptanceCriteria(
   if (!targetMin || testCases.length >= targetMin) return [];
 
   const criteria = context.acceptanceCriteria || [];
-  const broadCoverageThreshold = 2;
+  const broadCoverageThreshold = 1;
   const broadCovered = criteria.filter((criterion) => {
     const coveringCases = testCases.filter((testCase) => (testCase.coversAcceptanceCriteria || []).includes(criterion.id));
     return coveringCases.length > 0 && coveringCases.every((testCase) => (testCase.coversAcceptanceCriteria || []).length > broadCoverageThreshold);
   });
   const needed = Math.max(0, targetMin - testCases.length);
   return broadCovered.slice(0, needed);
-}
-
-function generationTextFromContext(context: GenerateContext): string {
-  return [
-    context.ticketKey,
-    context.epic,
-    context.mainIssue?.summary,
-    context.mainIssue?.description,
-    context.mainIssue?.renderedDescription,
-    ...(context.mainIssue?.comments || []),
-    context.scopeAuthority?.title,
-    context.scopeAuthority?.body,
-    context.scopeConfluenceSection?.title,
-    context.scopeConfluenceSection?.body,
-    ...(context.confluencePages || []).map((page) => [page.title, page.body, ...(page.comments || []).map((comment) => comment.body)].join('\n')),
-    ...(context.acceptanceCriteria || []).map((criterion) => criterion.text),
-  ]
-    .flat()
-    .filter(Boolean)
-    .join('\n');
 }
 
 function generatedCaseText(testCase: GeneratedTestCase): string {
@@ -1557,28 +1671,41 @@ function generatedCaseText(testCase: GeneratedTestCase): string {
     .join('\n');
 }
 
-function contextContains(contextText: string, patterns: RegExp[]): boolean {
-  return patterns.some((pattern) => pattern.test(contextText));
-}
-
-function matchingCriterionIds(context: GenerateContext, specificPatterns: RegExp[], basePatterns: RegExp[]): string[] {
-  const criteria = context.acceptanceCriteria || [];
-  // Prefer the family's own (specific) pattern matches — those map the scenario to genuinely-related
-  // criteria. Only when nothing specific matches do we fall back to the broad base patterns, and then to
-  // a single criterion — so a scenario never inflates its coverage by claiming every AC that merely
-  // mentions a generic word like "method" or "output" (which is what the broad base patterns match). A
-  // family that matches neither returns [] and is dropped by addScenarioPlanItem (not force-mapped).
-  const specific = criteria.filter((criterion) => specificPatterns.some((pattern) => pattern.test(criterion.text))).map((criterion) => criterion.id);
-  if (specific.length) return specific;
-  return criteria.filter((criterion) => basePatterns.some((pattern) => pattern.test(criterion.text))).map((criterion) => criterion.id).slice(0, 1);
-}
-
-function firstEvidenceLine(contextText: string, patterns: RegExp[]): string {
-  const lines = contextText
-    .split(/\n+/)
-    .map((line) => line.trim())
+function criterionPlanningEvidence(criterion: GenerateContext['acceptanceCriteria'][number]): string[] {
+  return [
+    criterion.text,
+    criterion.sourceExcerpt,
+    ...(criterion.sourceExcerpts || []).map((excerpt) => excerpt.text),
+  ]
+    .flat()
+    .map((value) => String(value || '').trim())
     .filter(Boolean);
-  return lines.find((line) => patterns.some((pattern) => pattern.test(line))) || lines[0] || '';
+}
+
+function patternMatchesAny(value: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(value));
+}
+
+/**
+ * A scenario family may be created only from evidence attached to the final AC it maps to. Broad Jira,
+ * Story, and Confluence pages are intentionally excluded: those pages can contain adjacent features and
+ * historical designs, which previously triggered unrelated generic scenarios and then force-mapped them
+ * through words such as "analysis" or "result".
+ */
+function matchingCriteriaForScenario(
+  context: GenerateContext,
+  sourcePatterns: RegExp[],
+  criterionPatterns: RegExp[]
+): Array<{ id: string; evidence: string }> {
+  const matches: Array<{ id: string; evidence: string }> = [];
+  for (const criterion of context.acceptanceCriteria || []) {
+    const evidence = criterionPlanningEvidence(criterion);
+    if (!evidence.some((value) => patternMatchesAny(value, criterionPatterns))) continue;
+    const sourceEvidence = evidence.find((value) => patternMatchesAny(value, sourcePatterns));
+    if (!sourceEvidence) continue;
+    matches.push({ id: criterion.id, evidence: sourceEvidence });
+  }
+  return matches;
 }
 
 function addScenarioPlanItem(items: ScenarioPlanItem[], item: ScenarioPlanItem) {
@@ -1588,11 +1715,9 @@ function addScenarioPlanItem(items: ScenarioPlanItem[], item: ScenarioPlanItem) 
 }
 
 export function buildScenarioPlan(context: GenerateContext): ScenarioPlanItem[] {
-  const contextText = generationTextFromContext(context);
   const hasCriteria = Boolean((context.acceptanceCriteria || []).length);
-  if (!hasCriteria || !contextText.trim()) return [];
+  if (!hasCriteria) return [];
 
-  const baseCriterionPatterns = [/\b(method|mode|option|output|analysis|result|stream|field|value|behavior)\b/i];
   const items: ScenarioPlanItem[] = [];
   const add = (
     id: string,
@@ -1605,14 +1730,15 @@ export function buildScenarioPlan(context: GenerateContext): ScenarioPlanItem[] 
     priority: number,
     executionHint: string
   ) => {
-    if (!contextContains(contextText, sourcePatterns)) return;
+    const matchingCriteria = matchingCriteriaForScenario(context, sourcePatterns, criterionPatterns);
+    if (!matchingCriteria.length) return;
     addScenarioPlanItem(items, {
       id,
       title,
       intent,
       caseIntent,
-      sourceCriterionIds: matchingCriterionIds(context, criterionPatterns, baseCriterionPatterns),
-      sourceEvidence: firstEvidenceLine(contextText, sourcePatterns),
+      sourceCriterionIds: matchingCriteria.map((criterion) => criterion.id),
+      sourceEvidence: matchingCriteria[0].evidence,
       requiredTerms,
       priority,
       executionHint,
@@ -1882,14 +2008,19 @@ function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boo
   const { apiMode, apiContractRelevant } = opts;
   return [
     apiMode
-      ? 'Each testCases item must include id, title, type, executionType, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
-      : 'Each testCases item must include id, title, type, caseIntent, jiraReference, preconditions, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+      ? 'Each testCases item must include id, title, goal, type, executionType, caseIntent, jiraReference, preconditions, inputs, expectedResult, bddScenario, coversAcceptanceCriteria, sourceScope, evidence, and apiSpec or manualVerification when applicable.'
+      : 'Each testCases item must include id, title, goal, type, caseIntent, jiraReference, preconditions, inputs, expectedResult, bddScenario, coversAcceptanceCriteria, sourceScope, evidence.',
+    'Set type to exactly "BDD". Positive/negative/edge classification belongs only in caseIntent.',
     'caseIntent must be exactly one of: positive, negative, edge.',
+    'Every case must include a standalone goal, inputs or test data when applicable, and expectedResult. expectedResult must be a concise observable outcome and agree with the BDD Then/And statements.',
     'jiraReference must be exactly the main Jira ticket key from context.ticketKey, for example ORB-3079. Do not append acceptance criterion ids, slashes, commas, or extra refs.',
     'The evidence object must include coverageNote only. Do not restate PRD section title or acceptance criteria text there.',
     apiMode
       ? 'All titles must follow [BE][{Epic}][{Ticket ID}] Title. Set executionType "postman" for API/endpoint cases, "manual_db" for database/migration verification, "manual_code_review" for proto/generated-code/repository review, "manual_integration" for internal worker/runtime verification, and "manual_other" only when no better manual type applies. Do not put API, DB, or Web in the title — only [BE].'
       : 'Titles must follow [FE][{Epic}][{Ticket ID}] Title.',
+    apiMode
+      ? 'If a case title or When step names GET, POST, PUT, PATCH, or DELETE, the case MUST use executionType "postman" and apiSpec.method/apiSpec.path must name that same API operation. Never label a case POST/GET while providing only manualVerification.'
+      : '',
     'bddScenario must include Feature, Scenario, Given, When, Then, and useful And steps.',
     apiMode
       ? 'MANDATORY for every "postman" case: a populated apiSpec object with a non-empty apiSpec.method (GET/POST/PUT/PATCH/DELETE) AND a non-empty apiSpec.path (e.g. /v1/analysis). A postman case without apiSpec.method and apiSpec.path is INVALID and will be rejected — if you cannot give an endpoint, use executionType "manual_db" instead. apiSpec.path MUST be a documented endpoint path and MUST use the placeholder for ids exactly as documented (e.g. /v1/analysis/{id}/stream) — never substitute a made-up concrete id into the path; put "id comes from the prior request" in preconditions instead. Also include samplePayload when the endpoint accepts a body, expectedResponse, and assertions, and mirror the payload + expected response/assertions in the bddScenario as triple-quoted blocks so it is executable from Postman guidance.'
@@ -1901,7 +2032,7 @@ function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boo
       ? 'Follow context.acceptanceCriteriaExecutionPlan exactly: a postman case may cover only ACs whose executionType is "postman"; manual_db/manual_code_review/manual_integration/manual_other cases may cover only ACs with the same executionType. If one user journey depends on another endpoint, put the dependency in preconditions and assert only the observableSurface for the AC being covered.'
       : '',
     apiMode
-      ? 'Use only endpoint paths present in context.apiContract.matchedEndpoints. If a case needs an endpoint not in that matched set, do not fabricate a confident path — note in preconditions that the path is assumed and must be verified against the API docs.'
+      ? 'Use only endpoint paths present in context.apiContract.matchedEndpoints. If a source mentions an endpoint not in that matched set, follow its manual_integration execution plan; do not emit apiSpec or a Postman case for it.'
       : '',
     apiMode && apiContractRelevant
       ? 'Precise traceability: set coversAcceptanceCriteria to ONLY the acceptance criteria a case actually verifies through its When/Then steps. Never staple an unrelated AC onto a case (e.g. a dataset-list or dataset-data test must NOT claim an email-routing or login-restriction AC it does not exercise).'
@@ -1909,9 +2040,12 @@ function sharedCaseDirectives(opts: { apiMode: boolean; apiContractRelevant: boo
     apiMode && apiContractRelevant
       ? 'One endpoint per case: each postman case must exercise EXACTLY the single endpoint in its apiSpec. When an effect is triggered by one endpoint but observed on another (e.g. submit via POST /v1/analysis, then read the result on GET /v1/analysis/{id}/stream), make the OBSERVATION its own focused case whose apiSpec is the endpoint that actually shows the effect, and record the triggering action as an already-completed precondition in prose (e.g. "an analysis was submitted with proportion_method DASYMETRIC and has completed; its id is known") WITHOUT writing a second HTTP method+path anywhere in the bddScenario. The When/Then steps must reference only the apiSpec endpoint, and every acceptance criterion the case claims must be verified on that single endpoint response via apiSpec.assertions — not merely narrated in prose. A case whose real assertions live on a different endpoint than its apiSpec produces false-green coverage and will be rejected.'
       : '',
+    apiMode && apiContractRelevant
+      ? 'For a JSON-array acceptance criterion, assert that the returned business field VALUE is an actual JSON array; checking only metadata such as data_type="array" is insufficient. If the criterion says the array supports multiple values, use a fixture with at least two distinct entries and assert the array cardinality and entry contents.'
+      : '',
     'Keep each case focused: map coversAcceptanceCriteria to at most 2 acceptance criteria. If a flow seems to satisfy more, split it into one focused case per behavior instead of one broad case. Only an explicit smoke or end-to-end case (say so in the title, e.g. "... end-to-end smoke") may map to more.',
     apiMode && apiContractRelevant
-      ? 'Write executable scenarios with concrete, reusable fixtures in the Given steps — name the actors and resources (e.g. a specific partner/org and an assigned vs a non-assigned resource) and reuse them consistently across scenarios — so every case has unambiguous preconditions rather than abstract phrasing.'
+      ? 'Write executable scenarios with concrete, reusable fixtures in the Given steps. Reuse any exact named entities, sample values, or percentages supplied by context.directRequirements; otherwise use neutral identifiers from the API contract, never invented customer or brand names.'
       : '',
     apiMode && !apiContractRelevant
       ? 'This backend ticket does NOT change the HTTP API contract (no endpoint references). Do not create Postman/API cases and do not invent endpoints. Produce manual_db cases (manualVerification with target, steps, expectedResult) for data/schema/DB work, or manual_other when DB is not involved.'
@@ -2121,14 +2255,14 @@ export function mergeRepairedCases(original: GeneratedTestCase[], repaired: Gene
 }
 
 // Validation-repair: re-prompt the provider to FIX cases that failed structural validation (most often a
-// postman/API case missing its apiSpec). Weaker models (e.g. DeepSeek) don't reliably emit the required
-// shape, and nothing else in the pipeline corrects it — so this pass turns an unpushable suite into a
-// valid one. Mirrors the other repair passes; corrected cases keep their id so mergeRepairedCases can
-// swap them in place.
+// postman/API case missing its apiSpec) or claimed an AC their observable assertions do not substantiate.
+// The latter matters even when another case covers the same AC: leaving that weak mapping in the batch
+// creates a failed quality gate after a visually complete coverage table. Corrected cases keep their id
+// so mergeRepairedCases can swap them in place.
 async function repairInvalidCasesWithProvider(
   provider: ProviderConfig,
   context: GenerateContext,
-  invalidCases: Array<{ testCase: GeneratedTestCase; errors: string[] }>
+  invalidCases: Array<{ testCase: GeneratedTestCase; issues: string[] }>
 ): Promise<ProviderGenerationResult> {
   const scopePriority = buildScopePriorityContext(context);
   const scopeType = context.constraints?.scopeType || 'web';
@@ -2139,16 +2273,17 @@ async function repairInvalidCasesWithProvider(
     'You are a senior QA engineer FIXING test cases that failed validation.',
     'Return strict JSON only. No markdown and no explanation.',
     'The JSON must be an object with this exact top-level shape: {"testCases":[...]}',
-    'For every case in casesToFix, return a corrected full case that resolves EVERY listed validationError while keeping the same id, the same scenario meaning, and the same coversAcceptanceCriteria. Do not drop cases, do not renumber ids, and do not add new cases.',
+    'For every case in casesToFix, return a corrected full case that resolves EVERY listed validationIssue while keeping the same id, the same scenario meaning, and the same coversAcceptanceCriteria. Do not drop cases, do not renumber ids, and do not add new cases.',
+    'If an issue says an acceptance criterion is claimed but not substantiated, add concrete Then/assertion/manual-verification evidence for every material condition in that criterion. Do not merely repeat the criterion in the title or preconditions.',
     'The most common fix: a postman/API case is missing its apiSpec. Add a populated apiSpec with a concrete method (e.g. POST) and path (e.g. /v1/analysis), plus samplePayload/expectedResponse/assertions, and mirror the payload + expected response in the bddScenario as triple-quoted blocks.',
     ...sharedCaseDirectives({ apiMode, apiContractRelevant, providerBehavior: behavior }),
   ].filter(Boolean).join('\n');
 
   const userPrompt = JSON.stringify(
     {
-      instruction: 'Return corrected versions of every case in casesToFix that resolve their validationErrors. Keep the same id for each.',
+      instruction: 'Return corrected versions of every case in casesToFix that resolve their validationIssues. Keep the same id for each.',
       scopePriority,
-      casesToFix: invalidCases.map(({ testCase, errors }) => ({ testCase, validationErrors: errors })),
+      casesToFix: invalidCases.map(({ testCase, issues }) => ({ testCase, validationIssues: issues })),
       context: buildGenerationPromptContext(context),
     },
     null,
@@ -2359,7 +2494,41 @@ export function canonicalizeApiSpecPaths(
   });
 }
 
-export async function generateTestCases(config: LlmConfig, context: GenerateContext) {
+/** Fresh, unpushed suites use stable contiguous IDs after every merge/repair/prune stage. */
+export function reindexGeneratedCases(ticketKey: string, testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  const prefix = String(ticketKey || 'TICKET').trim().toUpperCase() || 'TICKET';
+  return testCases.map((testCase, index) => ({
+    ...testCase,
+    id: `TC-${prefix}-${String(index + 1).padStart(3, '0')}`,
+    type: 'BDD' as const,
+  }));
+}
+
+/** Attach immutable source-clarification blockers to the focused cases they affect. */
+export function applyClarificationBlockers(context: GenerateContext, testCases: GeneratedTestCase[]): GeneratedTestCase[] {
+  const blockers = (context.acceptanceCriteriaDiagnostics?.directRequirements || []).filter(
+    (requirement) => requirement.disposition === 'needs_clarification' && requirement.acceptanceCriteriaIds.length
+  );
+  if (!blockers.length) return testCases;
+  return testCases.map((testCase) => {
+    const mappedCriteria = new Set((testCase.coversAcceptanceCriteria || []).map((id) => normalizeAcceptanceCriteriaId(id)));
+    const matched = blockers.filter((requirement) =>
+      requirement.acceptanceCriteriaIds.some((criterionId) => mappedCriteria.has(normalizeAcceptanceCriteriaId(criterionId)))
+    );
+    if (!matched.length) return testCase;
+    return {
+      ...testCase,
+      clarificationBlockers: matched.map((requirement) => ({
+        requirementId: requirement.id,
+        reason: requirement.clarificationReason || 'The source requirement needs clarification before this test can be finalized.',
+        sourceLocation: requirement.sourceLocation,
+        ...(requirement.sourceUrl ? { sourceUrl: requirement.sourceUrl } : {}),
+      })),
+    };
+  });
+}
+
+export async function generateTestCases(config: LlmConfig, context: GenerateContext, logger?: Logger) {
   const providers = configuredLlmProviders(config.providers || []);
   if (!providers.length) {
     throw new Error('No LLM provider API key is configured.');
@@ -2368,6 +2537,7 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
   let lastError: Error | undefined;
   for (let index = 0; index < providers.length; index += 1) {
     const provider = providers[index];
+    let activeStage: GenerationStepName | 'final_quality_validation' = 'initial_generation';
     try {
       const stepTimings: GenerationStepTiming[] = [];
       const recordStep = (
@@ -2394,10 +2564,18 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       const initial = await generateWithProvider(provider, context, scenarioPlan);
       recordStep('initial_generation', initialStartedAt, true, 0, initial.testCases.length);
       if (!context.coverageEnforced) {
-        return { ...initial, stepTimings };
+        return {
+          ...initial,
+          testCases: applyClarificationBlockers(
+            context,
+            reindexGeneratedCases(context.ticketKey, pruneSemanticDuplicateCases(initial.testCases))
+          ),
+          stepTimings,
+        };
       }
 
       let mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(initial.testCases));
+      activeStage = 'scenario_plan_repair';
       const scenarioStartedAt = Date.now();
       const scenarioBeforeCount = mergedCases.length;
       let scenarioAttempted = false;
@@ -2422,6 +2600,7 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       }
       // Capping/compaction runs once at the end, AFTER the coverage + polarity repairs below, so those
       // passes see the full case set and compaction can't discard the coverage they add (no pre-repair cap).
+      activeStage = 'coverage_repair';
       const coverageStartedAt = Date.now();
       const coverageBeforeCount = mergedCases.length;
       let coverageAttempted = false;
@@ -2446,6 +2625,7 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       // BUG-10: after full-coverage repair, close single-polarity gaps the same way. This runs by default;
       // it is only skipped under the opt-in DeepSeek fast path (LLM_DEEPSEEK_FAST_GENERATION=true), which
       // trades this and the scenario-plan repair away to avoid multi-minute DeepSeek runs.
+      activeStage = 'polarity_repair';
       const polarityStartedAt = Date.now();
       const polarityBeforeCount = mergedCases.length;
       const polarityGaps = getSinglePolarityGaps(context, mergedCases);
@@ -2463,29 +2643,45 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       recordStep('polarity_repair', polarityStartedAt, polarityAttempted, polarityBeforeCount, mergedCases.length);
 
       // Validation-repair: re-prompt to fix structurally-invalid cases (e.g. a postman case with no
-      // apiSpec) so the suite is actually pushable. Scoped to case shape (enforceAcceptanceCriteria off —
-      // AC coverage is handled by the passes above). Fail-soft, and it stops as soon as a round makes no
-      // progress so a model that can't produce a valid shape can't spin the loop.
+      // apiSpec), endpoint contradictions, and claimed-but-unsubstantiated AC mappings. AC completeness
+      // is handled by the coverage passes above; including the canonical ACs here lets per-case endpoint
+      // validation run.
+      // Fail-soft, and stop when a round makes no progress so a model cannot spin indefinitely.
+      activeStage = 'validation_repair';
       const structuralValidationOptions = {
         jiraKey: context.ticketKey,
         epic: context.epic,
         feOnly: context.constraints?.feOnly,
         scopeType: context.constraints?.scopeType,
         allowNonMainRefs: true,
-        enforceAcceptanceCriteria: false,
+        acceptanceCriteria: context.acceptanceCriteria,
+        enforceAcceptanceCriteria: true,
         matchedEndpoints: context.apiContract?.matchedEndpoints,
+        acceptanceCriteriaExecutionPlan: context.acceptanceCriteriaDiagnostics?.acceptanceCriteriaExecutionPlan,
+        directRequirements: context.acceptanceCriteriaDiagnostics?.directRequirements,
       };
       let lastInvalidSignature = '';
       const validationStartedAt = Date.now();
       const validationBeforeCount = mergedCases.length;
       let validationAttempted = false;
       for (let repairAttempt = 0; repairAttempt < behavior.validationRepairMaxAttempts; repairAttempt += 1) {
-        const invalid = validateCases(mergedCases, structuralValidationOptions).filter((entry) => !entry.valid);
-        if (!invalid.length) break;
-        const signature = invalid.map((entry) => entry.id).sort().join('|');
+        const casesNeedingRepair = validateCases(mergedCases, structuralValidationOptions)
+          .map((entry) => ({
+            ...entry,
+            repairIssues: [
+              ...entry.errors,
+              ...entry.warnings.filter((warning) => /claimed but not substantiated by the case steps\/assertions/i.test(warning)),
+            ],
+          }))
+          .filter((entry) => !entry.valid || entry.repairIssues.length > 0);
+        if (!casesNeedingRepair.length) break;
+        const signature = casesNeedingRepair
+          .map((entry) => `${entry.id}:${entry.repairIssues.join(' | ')}`)
+          .sort()
+          .join('||');
         if (signature === lastInvalidSignature) break; // previous repair round didn't fix these — stop
         lastInvalidSignature = signature;
-        const invalidCases = invalid.map((entry) => ({ testCase: mergedCases[entry.index], errors: entry.errors }));
+        const invalidCases = casesNeedingRepair.map((entry) => ({ testCase: mergedCases[entry.index], issues: entry.repairIssues }));
         try {
           validationAttempted = true;
           const repair = await repairInvalidCasesWithProvider(provider, context, invalidCases);
@@ -2500,6 +2696,7 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
         recordStep('validation_repair', validationStartedAt, validationAttempted, validationBeforeCount, mergedCases.length);
       }
 
+      activeStage = 'compaction';
       const compactionStartedAt = Date.now();
       const compactionBeforeCount = mergedCases.length;
       let compactionAttempted = false;
@@ -2513,7 +2710,41 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
       // (e.g. /v1/analysis/AC3PosAnalysis/stream -> /v1/analysis/{id}/stream). Deterministic + provider-safe.
       mergedCases = canonicalizeApiSpecPaths(mergedCases, context.apiContract?.matchedEndpoints || []);
       mergedCases = pruneExecutionTypeMismatchedCases(context, pruneSemanticDuplicateCases(mergedCases));
+      mergedCases = applyClarificationBlockers(context, reindexGeneratedCases(context.ticketKey, mergedCases));
       recordStep('compaction', compactionStartedAt, compactionAttempted, compactionBeforeCount, mergedCases.length);
+
+      activeStage = 'final_quality_validation';
+      // Assess final completeness/quality, but do NOT throw a retryable error for a content shortfall.
+      // Throwing here made isFallbackError treat it as fallback-eligible → fall back to a slower provider
+      // (DeepSeek), which does not improve coverage and whose multi-minute timeout turned a usable partial
+      // suite into a hard failure (the ORB-2565 generate 504). Provider fallback is for AVAILABILITY
+      // (429/quota — still thrown from the LLM calls above), not for content completeness. Return the best
+      // suite; the route's coverage/validation/quality gate surfaces every gap and blocks push until fixed.
+      const finalMissingCriteria = getMissingAcceptanceCriteria(context, mergedCases);
+      const finalUnderGranularCriteria = getUnderGranularAcceptanceCriteria(context, mergedCases, scenarioPlan);
+      const finalValidation = validateCases(mergedCases, structuralValidationOptions);
+      const finalInvalidEntries = finalValidation.filter(
+        (entry) => !entry.valid && !(mergedCases[entry.index]?.clarificationBlockers || []).length
+      );
+      const finalWeakMappingEntries = finalValidation.filter((entry) =>
+        entry.warnings.some((warning) => /claimed but not substantiated by the case steps\/assertions/i.test(warning))
+      );
+      if (
+        finalMissingCriteria.length ||
+        finalUnderGranularCriteria.length ||
+        finalInvalidEntries.length ||
+        finalWeakMappingEntries.length
+      ) {
+        logger?.warn('llm.generation.incomplete_returned', {
+          ticketKey: context.ticketKey,
+          provider: provider.name,
+          model: provider.model,
+          missingCriteria: finalMissingCriteria.map((criterion) => criterion.id),
+          underGranularCriteria: finalUnderGranularCriteria.map((criterion) => criterion.id),
+          invalidCaseIds: finalInvalidEntries.map((entry) => entry.id),
+          weakMappingCaseIds: finalWeakMappingEntries.map((entry) => entry.id),
+        });
+      }
 
       return {
         provider: initial.provider,
@@ -2524,7 +2755,19 @@ export async function generateTestCases(config: LlmConfig, context: GenerateCont
     } catch (error) {
       lastError = error as Error;
       const hasFallback = index < providers.length - 1;
-      if (!hasFallback || !isFallbackError(lastError as Error & { statusCode?: number })) {
+      const fallbackEligible = isFallbackError(lastError as Error & { statusCode?: number });
+      logger?.warn('llm.generation.provider_failed', {
+        ticketKey: context.ticketKey,
+        provider: provider.name,
+        model: provider.model,
+        stage: activeStage,
+        fallbackTriggered: Boolean(hasFallback && fallbackEligible),
+        fallbackEligible,
+        retryableContent: isRetryableLlmContentError(lastError),
+        statusCode: (lastError as Error & { statusCode?: number }).statusCode,
+        errorMessage: lastError.message,
+      });
+      if (!hasFallback || !fallbackEligible) {
         throw error;
       }
     }

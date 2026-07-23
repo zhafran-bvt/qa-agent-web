@@ -7,6 +7,8 @@ interface ApprovalPanelProps {
   sectionId: string;
   casesValid: boolean;
   coverageComplete: boolean;
+  readyCaseCount?: number;
+  blockedCaseCount?: number;
   busy: boolean;
   results: string;
   pushBlocker: string;
@@ -20,6 +22,8 @@ export function ApprovalPanel({
   sectionId,
   casesValid,
   coverageComplete,
+  readyCaseCount = 0,
+  blockedCaseCount = 0,
   busy,
   results,
   pushBlocker,
@@ -69,6 +73,12 @@ export function ApprovalPanel({
         <output className="field-readonly">{sectionId || '—'}</output>
       </div>
       <p className="field-hint">{t.sectionAuto}</p>
+
+      {readyCaseCount || blockedCaseCount ? (
+        <p className={`push-selection-summary${blockedCaseCount ? ' has-blockers' : ''}`}>
+          {t.readyBlockedSummary(readyCaseCount, blockedCaseCount)}
+        </p>
+      ) : null}
 
       <div className="push-gates">
         <div className="push-gates-title">{t.gatesTitle}</div>

@@ -1,10 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   assessAcceptanceCriteriaQuality,
+  type AcceptanceCriteriaSynthesisInput,
+  buildDirectRequirementInventory,
+  buildSourceGroundingExamples,
   classifyAcceptanceCriteriaExecution,
   detectCrossSourceConflicts,
   finalizeAcceptanceCriteria,
+  requirementCriterionMatchScore,
 } from '../../src/server/services/acceptance-criteria';
 import type { QaContext } from '../../src/shared/contracts';
 
@@ -84,6 +90,60 @@ function buildBaseContext(overrides: Partial<QaContext> = {}): QaContext {
       'Use the main Jira issue for implementation-specific acceptance criteria, then the linked parent Story and its targeted PRD subsection for canonical scope. Blocking and BE tickets are context only.',
     ...overrides,
   };
+}
+
+interface Orb2565RequirementFixtureRecord {
+  text: string;
+  sourceKind: 'jira' | 'prd' | 'spec';
+}
+
+function buildRealOrb2565RequirementContext(): QaContext {
+  const records = JSON.parse(
+    readFileSync(resolve(process.cwd(), 'tests/fixtures/orb-2565-run-9056c40c-direct-requirements.json'), 'utf8')
+  ) as Orb2565RequirementFixtureRecord[];
+  const sourceText = (sourceKind: Orb2565RequirementFixtureRecord['sourceKind']) =>
+    records.filter((record) => record.sourceKind === sourceKind).map((record) => record.text).join('\n');
+  const prdBody = sourceText('prd');
+
+  return buildBaseContext({
+    ticketKey: 'ORB-2565',
+    mainIssue: {
+      key: 'ORB-2565',
+      summary: '[BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)',
+      description: sourceText('jira'),
+      webUrl: 'https://bvarta-project.atlassian.net/browse/ORB-2565',
+    },
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: '[BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)',
+      body: prdBody,
+      reason: 'Actual scoped PRD fragments captured from analysis run 9056c40c.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-2565',
+    },
+    scopeConfluenceSection: {
+      pageId: '1228177422',
+      title: 'Spatial Analysis Functional Improvement',
+      url: 'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement',
+      anchor: '2.-As-a-User,-I-want-to-see-administrative-info-at-spatial-analysis-result-table',
+      matchedHeading: 'As a User, I want to see administrative info at spatial analysis result table',
+      matched: true,
+      reason: 'Actual ORB-2565 scoped PRD section.',
+      sourceIssueKey: 'ORB-2565',
+      body: prdBody,
+    },
+    confluencePages: [
+      {
+        id: '1869414433',
+        title: 'Spatial Analysis - Administrative Area Coverage on Result',
+        body: sourceText('spec'),
+        sourceUrl:
+          'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result',
+        sourceRefs: [{ issueKey: 'ORB-2565', sourceType: 'main-rendered-description', relationship: 'spec-descendant' }],
+      },
+    ],
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+  });
 }
 
 test('classifies ORB-3310-style SQL, sample tables, and rendered implementation chunks as weak AC', () => {
@@ -221,6 +281,65 @@ test('finalizes weak technical-design criteria into a synthesized canonical set'
   assert.equal(finalized.acceptanceCriteriaDiagnostics.rawAcceptanceCriteriaQuality, 'weak');
   assert.equal((finalized.acceptanceCriteriaDiagnostics.discardedFragmentExamples || []).some((text) => /└── if/i.test(text)), true);
   assert.match(finalized.acceptanceCriteriaDiagnostics.selectedAcceptanceCriteriaReason || '', /synthesized/i);
+});
+
+test('explicit Jira See US reference sets medium granularity for the matched PRD requirements', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2564',
+    mainIssue: {
+      key: 'ORB-2564',
+      summary: '[BE] Add administrative area coverage to grid analysis results',
+      description: [
+        'See US on the linked PRD subsection.',
+        'Scope',
+        '- Enhance API: POST analytics/v1/analysis',
+        '- Add administrative area coverage attribute for grid analysis.',
+        '- Data format should be in JSON array to support multiple areas.',
+        '- Set data_label to bulleted_list.',
+      ].join('\n'),
+    },
+    acceptanceCriteria: [
+      { id: 'AC-1', text: 'Data format should be in JSON array to support multiple areas.', source: 'ORB-2564 description' },
+      { id: 'AC-2', text: 'Set data_label to bulleted_list.', source: 'ORB-2564 description' },
+    ],
+    scopeConfluenceSection: {
+      pageId: '1228177422',
+      title: 'Spatial Analysis Functional Improvement',
+      url: 'https://example.test/prd',
+      anchor: 'administrative-info',
+      matchedHeading: 'As a User, I want to see administrative info at spatial analysis result table',
+      matched: true,
+      reason: 'Explicit Jira link matched this subsection.',
+      sourceIssueKey: 'ORB-2530',
+      body: [
+        'The attribute may contain multiple administrative areas.',
+        'Each administrative area includes its coverage percentage.',
+        'The attribute can be null when administrative areas have not been mapped.',
+        'Null values do not block the analysis result.',
+      ].join('\n'),
+    },
+  });
+  let synthesisInput: AcceptanceCriteriaSynthesisInput | undefined;
+
+  await finalizeAcceptanceCriteria(context, {
+    synthesizer: async (input) => {
+      synthesisInput = input;
+      return {
+        acceptanceCriteria: [
+          { id: 'AC-1', text: 'POST /v1/analysis returns the administrative area coverage attribute for grid analysis.' },
+          { id: 'AC-2', text: 'The coverage value is a JSON array containing multiple administrative areas.' },
+          { id: 'AC-3', text: 'Each returned administrative area includes its coverage percentage.' },
+          { id: 'AC-4', text: 'Unmapped coverage may be null without invalidating the analysis result.' },
+          { id: 'AC-5', text: 'The coverage attribute data_label equals bulleted_list.' },
+        ],
+      };
+    },
+  });
+
+  assert.equal(synthesisInput?.targetMinCriteria, 4);
+  assert.equal(synthesisInput?.targetMaxCriteria, 6);
+  assert.match(synthesisInput?.granularityHint || '', /explicitly delegates requirement detail/i);
+  assert.match(synthesisInput?.prdSectionBody || '', /coverage percentage/i);
 });
 
 test('marks the run not-production-ready and records a reason when synthesis returns an empty set', async () => {
@@ -1006,7 +1125,83 @@ test('F3: the relevance gate never touches weak-tier excerpts', async () => {
   assert.equal(finalized.acceptanceCriteria[0].sourceExcerptConfidence, 'weak');
 });
 
-test('classifies ORB-3310 acceptance criteria by executable surface', () => {
+test('PRD requirement inventory preserves distinct contracts (incl. opposite-polarity pairs) and worked examples', async () => {
+  const prdUrl = 'https://example.test/wiki/pages/2565/admin-coverage';
+  // Requirements (the "what") live in the matched PRD subsection.
+  const prdBody = [
+    '- adm_area_coverage_1 must contain the hierarchy and percentage using the worked example `Central Jakarta - 61.5%`.',
+    '- Returned administrative areas must be ordered by coverage percentage descending.',
+    '- The response must expose exactly the top two values through adm_area_coverage_1 and adm_area_coverage_2.',
+    '- When only one administrative area exists, adm_area_coverage_2 must be an empty string.',
+    '- When no mapped area exists, both coverage attributes must be null.',
+    '- When the feature flag is disabled, the response must omit both coverage attributes.',
+    '- When the feature flag is enabled, the response must include both coverage attributes.',
+    '- Persistence must write both computed coverage values to the analysis result record.',
+    '- CSV export must include adm_area_coverage_1 and adm_area_coverage_2.',
+    '- Existing response fields must remain backward compatible for clients that ignore the new attributes.',
+    '- Coverage percentage rounding must remain TBD pending clarification.',
+    '- A dashboard visualization is out of scope and must not generate a test case.',
+  ].join('\n');
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2565',
+    mainIssue: {
+      key: 'ORB-2565',
+      summary: '[BE] Enhance Spatial Analysis - Administrative Area Coverage',
+      description: 'Add administrative area coverage columns to the spatial analysis result.',
+    },
+    scopeAuthority: {
+      type: 'matched_prd_subsection',
+      title: 'Administrative Area Coverage',
+      body: prdBody,
+      reason: 'Matched PRD subsection carries the requirements.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-2565',
+    },
+    scopeConfluenceSection: {
+      pageId: 'PRD-2565',
+      title: 'Administrative Area Coverage',
+      url: prdUrl,
+      anchor: '',
+      matchedHeading: 'Administrative Area Coverage',
+      matched: true,
+      reason: '',
+      sourceIssueKey: 'ORB-2565',
+      body: prdBody,
+    },
+    // A tech-spec page must exist to enable the inventory, but its implementation prose is NOT a requirement.
+    confluencePages: [
+      {
+        id: '2565001',
+        title: 'Administrative Area Coverage Design',
+        body: 'The value is stored as a native BSON string via the existing save path; an in-memory R-Tree is reused.',
+        sourceRefs: [{ issueKey: 'ORB-2565', sourceType: 'remote-link', relationship: 'Tech Doc' }],
+        sourceUrl: 'https://example.test/wiki/pages/2565/design',
+      },
+    ],
+  });
+
+  const finalized = await finalizeAcceptanceCriteria(context, { skipStrongLlmSynthesis: true });
+  const inventory = finalized.acceptanceCriteriaDiagnostics.directRequirements || [];
+  const actionable = inventory.filter((requirement) => requirement.disposition !== 'out_of_scope');
+
+  assert.ok(actionable.length >= 10, `expected more than nine distinct direct requirements, got ${actionable.length}`);
+  // The tech-spec implementation prose never becomes a requirement.
+  assert.equal(inventory.some((requirement) => requirement.sourceKind === 'spec'), false);
+  assert.equal(inventory.some((requirement) => /bson string|r-tree/i.test(requirement.text)), false);
+  // Opposite-polarity contracts share most of their wording but must both survive dedup as distinct rules.
+  assert.ok(actionable.some((requirement) => /feature flag is disabled/i.test(requirement.text)), 'flag-off contract must be preserved');
+  assert.ok(actionable.some((requirement) => /feature flag is enabled/i.test(requirement.text)), 'flag-on contract must be preserved');
+  // No verbatim-append: a source-only requirement with no matching raw AC must NOT be pasted in as an AC.
+  assert.equal(finalized.acceptanceCriteria.some((criterion) => /csv export must include/i.test(criterion.text)), false);
+  assert.equal(inventory.find((requirement) => /rounding/i.test(requirement.text))?.disposition, 'needs_clarification');
+  assert.equal(inventory.find((requirement) => /dashboard visualization/i.test(requirement.text))?.disposition, 'out_of_scope');
+  const workedExample = inventory.find((requirement) => /Central Jakarta/i.test(requirement.text));
+  assert.equal(workedExample?.sourceKind, 'prd');
+  assert.ok(workedExample?.workedExamples?.some((example) => example.includes('Central Jakarta')));
+  assert.ok(workedExample?.workedExamples?.some((example) => example.includes('61.5%')));
+});
+
+test('downgrades explicit API criteria to manual integration when no fetched contract verifies their endpoints', () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3310',
     constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
@@ -1037,13 +1232,21 @@ test('classifies ORB-3310 acceptance criteria by executable surface', () => {
   const plan = classifyAcceptanceCriteriaExecution(context);
   const byId = new Map(plan.map((item) => [item.criterionId, item]));
 
-  assert.equal(byId.get('AC-1')?.executionType, 'postman');
-  assert.match(byId.get('AC-1')?.observableSurface || '', /POST \/v1\/analysis/);
+  assert.equal(byId.get('AC-1')?.executionType, 'manual_integration');
+  assert.deepEqual(byId.get('AC-1')?.endpointDowngrade, {
+    method: 'POST',
+    path: '/v1/analysis',
+    reason: 'Endpoint POST /v1/analysis is not present in the fetched API contract; Postman generation is prohibited until the contract is verified.',
+  });
   assert.equal(byId.get('AC-2')?.executionType, 'manual_code_review');
   assert.equal(byId.get('AC-3')?.executionType, 'manual_db');
   assert.equal(byId.get('AC-4')?.executionType, 'manual_integration');
-  assert.equal(byId.get('AC-5')?.executionType, 'postman');
-  assert.match(byId.get('AC-5')?.observableSurface || '', /GET \/v1\/analysis\/\{id\}\/stream/);
+  assert.equal(byId.get('AC-5')?.executionType, 'manual_integration');
+  assert.deepEqual(byId.get('AC-5')?.endpointDowngrade, {
+    method: 'GET',
+    path: '/v1/analysis/{id}/stream',
+    reason: 'Endpoint GET /v1/analysis/{id}/stream is not present in the fetched API contract; Postman generation is prohibited until the contract is verified.',
+  });
 });
 
 test('classifies API-observable enum and schema acceptance criteria as postman, not manual artifacts', () => {
@@ -1092,6 +1295,158 @@ test('classifies API-observable enum and schema acceptance criteria as postman, 
   assert.equal(byId.get('AC-5')?.executionType, 'manual_db');
 });
 
+test('ORB-2564: classifies POST-prefixed and JSON response contracts as explicit API cases', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2564',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'POST analytics/v1/analysis returns an administrative area coverage attribute in the grid analysis result dataset.',
+      },
+      {
+        id: 'AC-2',
+        text: 'The administrative area coverage attribute is returned as a JSON array so multiple areas can be represented.',
+      },
+      {
+        id: 'AC-3',
+        text: 'The response includes a data_label value of bulleted_list for the administrative area coverage array.',
+      },
+      {
+        id: 'AC-4',
+        text: "When multiple administrative areas are present, the returned array contains each area's hierarchy and coverage percentage and is ordered by coverage percentage in descending order.",
+      },
+      {
+        id: 'AC-5',
+        text: 'If one administrative area is available, the array contains that single value; if areas have not been mapped or the grid is outside supported regions, the attribute may be null.',
+      },
+    ],
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/summary', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+  });
+
+  const byId = new Map(classifyAcceptanceCriteriaExecution(context).map((item) => [item.criterionId, item]));
+
+  assert.equal(byId.get('AC-1')?.executionType, 'postman');
+  assert.equal(byId.get('AC-1')?.observableSurface, 'POST /v1/analysis');
+  assert.equal(byId.get('AC-2')?.executionType, 'postman');
+  assert.match(byId.get('AC-2')?.observableSurface || '', /POST \/v1\/analysis/);
+  assert.match(byId.get('AC-2')?.observableSurface || '', /GET \/v1\/analysis\/\{id\}\/summary/);
+  assert.equal(byId.get('AC-3')?.executionType, 'postman');
+  assert.equal(byId.get('AC-3')?.observableSurface, 'GET /v1/analysis/{id}/summary');
+  assert.equal(byId.get('AC-4')?.executionType, 'postman');
+  assert.equal(byId.get('AC-4')?.observableSurface, 'GET /v1/analysis/{id}/summary');
+  assert.equal(byId.get('AC-5')?.executionType, 'postman');
+  assert.equal(byId.get('AC-5')?.observableSurface, 'GET /v1/analysis/{id}/summary');
+});
+
+test('ORB-2565: classifies a returned attribute format as an API result assertion', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2565',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    acceptanceCriteria: [
+      {
+        id: 'AC-2',
+        text:
+          'The administrative area coverage attribute contains the administrative area hierarchy text together with its coverage percentage, using the format " ( % coverage)".',
+      },
+    ],
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/summary', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+  });
+
+  const plan = classifyAcceptanceCriteriaExecution(context);
+
+  assert.deepEqual(plan, [
+    {
+      criterionId: 'AC-2',
+      executionType: 'postman',
+      coveragePolicy: 'api_assertion',
+      observableSurface: 'GET /v1/analysis/{id}/summary',
+      reason: 'Criterion defines observable result-field values, format, collection shape/order, or null behavior in the documented API response.',
+    },
+  ]);
+});
+
+test('ORB-3472: classifies table-column and ETL criteria as manual DB verification', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3472',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: true },
+    apiContract: {
+      sourceUrl: 'https://dev.lokasi.com/api-docs/',
+      matchedEndpoints: [
+        { method: 'POST', path: '/v1/analysis', source: 'api_docs' },
+        { method: 'GET', path: '/v1/analysis/{id}/stream', source: 'api_docs' },
+      ],
+      warnings: [],
+    },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'Dasymetric weight is calculated using the area-weighted formula and returned by the analysis result stream.',
+      },
+      {
+        id: 'AC-4',
+        text: 'The dasymetric_id_h3_level_8 table includes a non-null DOUBLE PRECISION column named intersection_area_m2.',
+      },
+      {
+        id: 'AC-5',
+        text: 'The ETL populates intersection_area_m2 for each h3_id and adm_area_id row with the geometric intersection area.',
+      },
+      {
+        id: 'AC-6',
+        text: 'GetH3BuildingRatio returns intersection_area_m2 together with building_ratio for each cell.',
+      },
+    ],
+  });
+
+  const byId = new Map(classifyAcceptanceCriteriaExecution(context).map((item) => [item.criterionId, item]));
+
+  assert.equal(byId.get('AC-1')?.executionType, 'postman');
+  assert.equal(byId.get('AC-4')?.executionType, 'manual_db');
+  assert.equal(byId.get('AC-5')?.executionType, 'manual_db');
+  assert.equal(byId.get('AC-6')?.executionType, 'manual_integration');
+});
+
+test('does not classify generic API wording as Postman without a concrete endpoint', () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-3472',
+    constraints: { feOnly: false, beAlreadyTested: false, scopeType: 'api', apiContractRelevant: false },
+    acceptanceCriteria: [
+      {
+        id: 'AC-1',
+        text: 'Dasymetric weight is calculated using the area-weighted formula and returned by the analysis result stream.',
+      },
+      {
+        id: 'AC-2',
+        text: 'The response must preserve the sum of dasymetric weights across partitions.',
+      },
+      {
+        id: 'AC-3',
+        text: 'Submit analysis accepts an optional proportion method.',
+      },
+    ],
+  });
+
+  const plan = classifyAcceptanceCriteriaExecution(context);
+
+  assert.equal(plan.some((item) => item.executionType === 'postman'), false);
+  assert.ok(plan.every((item) => item.executionType === 'manual_integration'));
+  assert.ok(plan.every((item) => !/Documented analysis API response|POST \/v1\/analysis/.test(item.observableSurface)));
+});
+
 test('classifies web-scope onboarding criteria without analysis API defaults', () => {
   const context = buildBaseContext({
     ticketKey: 'ORB-3218',
@@ -1126,4 +1481,305 @@ test('classifies web-scope onboarding criteria without analysis API defaults', (
   assert.equal(byId.get('AC-4')?.executionType, 'manual_integration');
   assert.equal(byId.get('AC-8')?.executionType, 'manual_integration');
   assert.match(byId.get('AC-8')?.observableSurface || '', /PUT \/onboarding\/progress\/\{module_id\}/);
+});
+
+test('ORB-2565 regression: requirements come from PRD/Jira; the tech-spec body is not mined as requirements', () => {
+  // The requirement "what" lives in the PRD (with a duplicate restatement to exercise dedup).
+  const prdBody = [
+    'The results must be sorted by coverage_pct in descending order.',
+    'Results must be sorted by coverage_pct descending.',
+    'The response must include the top two administrative areas by coverage.',
+    'The export must contain the coverage_pct column for each administrative area.',
+    'The stream must expose per-row coverage values to the client.',
+    'The legacy singular dataset field must be removed from the response payload.',
+    'The MCP tools must exclude the adm_area_coverage dataset from their output.',
+    'When the feature flag is off, the system must fall back to the legacy behavior.',
+    'The persisted analysis config must store the selected proportion method.',
+  ].join('\n');
+  // The tech spec is implementation prose — it must NOT become requirements (only grounding/context).
+  const specBody = [
+    'sequenceDiagram',
+    'FE->>BE: request analysis',
+    'CREATE TABLE adm_area_coverage (id UUID PRIMARY KEY, coverage_pct DOUBLE PRECISION NOT NULL);',
+    'CREATE INDEX idx_cov ON adm_area_coverage (coverage_pct);',
+    'The value routes through convertToMongoDBType and is stored as a native BSON string.',
+    'Build one in-memory adm R-Tree per level via rtree.BulkLoad for the tile candidates.',
+    'key = (floor(lon/S), floor(lat/S)); group by key, keeping a running bbox per occupied tile.',
+    'Feed accumulator into the same column writer as grid (top-2 → two string columns).',
+  ].join('\n');
+
+  const context = buildBaseContext({
+    ticketKey: 'ORB-2565',
+    mainIssue: { key: 'ORB-2565', summary: '[BE] Enhance Spatial Analysis', description: 'Add coverage-based ranking and export.' },
+    scopeAuthority: { type: 'matched_prd_subsection', title: 'Enhanced Spatial Analysis', body: prdBody, reason: '', quality: 'high', sourceIssueKey: 'ORB-2565' },
+    scopeConfluenceSection: { pageId: 'PRD-1', title: 'PRD', url: '', anchor: '', matchedHeading: '', matched: true, reason: '', sourceIssueKey: 'ORB-2565', body: prdBody },
+    confluencePages: [{ id: 'SPEC-1', title: 'Technical Design - Spatial Analysis', body: specBody }],
+  });
+
+  const inventory = buildDirectRequirementInventory(context);
+  const texts = inventory.map((requirement) => requirement.text.toLowerCase());
+
+  // No requirement is sourced from the tech spec — that is the core of the fix.
+  assert.equal(inventory.some((requirement) => requirement.sourceKind === 'spec'), false);
+  // And none of the spec's implementation prose leaks in as a requirement.
+  assert.equal(
+    texts.some((text) => /create table|create index|r-tree|sequencediagram|fe->>be|bson string|floor\(|feed accumulator/.test(text)),
+    false,
+    'spec implementation prose must not become requirements'
+  );
+  // Real PRD contracts are kept; the count stays focused.
+  assert.ok(texts.some((text) => text.includes('top two administrative areas')));
+  assert.ok(texts.some((text) => text.includes('mcp tools must exclude')));
+  assert.ok(inventory.length >= 5 && inventory.length <= 12, `expected a focused PRD/Jira inventory, got ${inventory.length}`);
+  // The sorting restatement collapses to a single requirement.
+  const sortingRequirements = texts.filter((text) => /sort(?:ed)?[\s\S]*coverage_pct[\s\S]*(?:desc|descending)/.test(text));
+  assert.equal(sortingRequirements.length, 1, `sorting contract should collapse to 1, got ${sortingRequirements.length}`);
+});
+
+test('ORB-2565 real-run regression: requirements come from PRD/Jira, spec noise excluded, spec grounding survives', () => {
+  const context = buildRealOrb2565RequirementContext();
+  const inventory = buildDirectRequirementInventory(context);
+  const texts = inventory.map((requirement) => requirement.text.toLowerCase());
+
+  // The fix: the technical spec is never a requirement source — every requirement is PRD or Jira.
+  assert.equal(
+    inventory.every((requirement) => requirement.sourceKind === 'prd' || requirement.sourceKind === 'jira'),
+    true,
+    'no requirement may be sourced from the technical spec'
+  );
+  // The 51 spec fragments no longer inflate the count.
+  assert.ok(inventory.length >= 8 && inventory.length <= 18, `expected a focused PRD/Jira inventory, got ${inventory.length}`);
+  // Spec architecture / code / SQL / diagram / persistence prose never survives as a requirement.
+  assert.equal(
+    texts.some((text) =>
+      /r-tree|processdatasetsstream|scoringrows|floor\s*\(|savebatchrows|values\s+join|flowchart|admlevelstepupthreshold|bson|rtree\.bulkload|converttomongodbtype/.test(
+        text
+      )
+    ),
+    false,
+    'spec architecture, code, SQL, diagram, and persistence prose must not survive as requirements'
+  );
+  // Spec problem/background narration is not a contract either.
+  assert.equal(texts.some((text) => /a spatial-analysis result has no administrative-area context today/.test(text)), false);
+
+  // Real PRD/Jira contracts are present.
+  assert.ok(texts.some((text) => /top[-\s]?(?:2|two)/.test(text)));
+  assert.ok(texts.some((text) => /descending|sort/.test(text)));
+  assert.ok(texts.some((text) => /info panel/.test(text)));
+  assert.ok(texts.some((text) => /export|download dataset/.test(text)));
+  assert.ok(texts.some((text) => /latency|performance/.test(text)));
+
+  // Grounding is extracted independently from the raw corpus (spec included), so concrete formats and
+  // worked values survive even though the spec body is never mined for requirements.
+  const grounding = buildSourceGroundingExamples(context).flatMap((entry) => entry.workedExamples || []);
+  assert.ok(grounding.some((example) => /Name \(X\.XX% coverage\)/i.test(example)), 'spec format template must survive as grounding');
+  assert.ok(grounding.some((example) => /Cengkareng Timur/i.test(example)), 'PRD worked value must survive as grounding');
+});
+
+test('abnormal inventory: synthesis is compacted (no checklist) and the run is not production-ready', async () => {
+  // 45 genuinely-distinct externally-observable rules in the PRD — over the abnormal ceiling, none collapse.
+  const prdLines = Array.from(
+    { length: 45 },
+    (_, index) => `The response for module_alpha${index} must include field_beta${index}, outcome_gamma${index}, invariant_delta${index}, and marker_epsilon${index} when trigger_zeta${index} occurs.`
+  );
+  // A spec page must exist to enable the inventory, and it carries the format grounding (not a requirement).
+  const specBody = 'The coverage column value uses the format "Name (X.XX% coverage)" as its display template.';
+  const context = buildBaseContext({
+    ticketKey: 'ORB-BIG',
+    scopeAuthority: { type: 'matched_prd_subsection', title: 'Big Surface', body: prdLines.join('\n'), reason: '', quality: 'high', sourceIssueKey: 'ORB-BIG' },
+    confluencePages: [{ id: 'SPEC-BIG', title: 'Technical Design - Big Surface', body: specBody }],
+  });
+
+  let capturedInput: AcceptanceCriteriaSynthesisInput | undefined;
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async (input) => {
+      capturedInput = input;
+      return { acceptanceCriteria: [{ id: 'AC-1', text: 'The system returns a focused analysis result.' }] };
+    },
+  });
+
+  const diagnostics = finalized.acceptanceCriteriaDiagnostics;
+  assert.equal(diagnostics.abnormalRequirementInventory, true);
+  // The inflated checklist must NOT be handed to synthesis — that is what forced ~one AC per line.
+  assert.equal((capturedInput?.directRequirements || []).length, 0, 'synthesis must not receive the inflated requirement checklist');
+  assert.ok(
+    capturedInput?.groundingExamples?.some((requirement) =>
+      requirement.workedExamples?.some((example) => /Name \(X\.XX% coverage\)/.test(example))
+    ),
+    'source grounding must remain available even while the abnormal checklist is withheld'
+  );
+  // And the run must not stay silently production-eligible.
+  assert.equal(diagnostics.acceptanceCriteriaNotProductionReady, true);
+});
+
+test('source grounding repairs a blank compacted coverage format and preserves angle-bracket templates', async () => {
+  const realContext = buildRealOrb2565RequirementContext();
+  let synthesisInput: AcceptanceCriteriaSynthesisInput | undefined;
+  const grounded = await finalizeAcceptanceCriteria(realContext, {
+    synthesizer: async (input) => {
+      synthesisInput = input;
+      return {
+        acceptanceCriteria: [
+          {
+            id: 'AC-1',
+            text: 'The administrative area coverage value must use the source hierarchy and percentage format " ".',
+          },
+        ],
+      };
+    },
+  });
+
+  assert.ok(
+    synthesisInput?.groundingExamples?.some((requirement) =>
+      requirement.workedExamples?.some((example) => /Cengkareng Timur[\s\S]*48\.84% coverage/.test(example))
+    )
+  );
+  assert.equal(
+    (synthesisInput?.directRequirements || []).some((requirement) =>
+      /fmt\.sprintf|model\.AdmAreaIntersection/.test(requirement.text)
+    ),
+    false,
+    'the implementation sentence carrying the example must not become a checklist item'
+  );
+  assert.match(grounded.acceptanceCriteria[0].text, /Name \(X\.XX% coverage\)/);
+
+  const placeholderContext = buildBaseContext();
+  const placeholder = await finalizeAcceptanceCriteria(placeholderContext, {
+    synthesizer: async () => ({
+      acceptanceCriteria: [
+        {
+          id: 'AC-1',
+          text: 'The response uses format "<administrative-area-hierarchy> (<coverage-percentage>% coverage)".',
+        },
+      ],
+    }),
+  });
+  assert.match(placeholder.acceptanceCriteria[0].text, /<administrative-area-hierarchy>/);
+  assert.match(placeholder.acceptanceCriteria[0].text, /<coverage-percentage>/);
+});
+
+test('semantic requirement mapping prevents a top-two wording variant from triggering omission repair', async () => {
+  const context = buildBaseContext({
+    ticketKey: 'ORB-MAP',
+    mainIssue: {
+      key: 'ORB-MAP',
+      summary: 'Return top-two coverage fields',
+      description: 'The result must select the top-2 administrative areas by coverage desc and write them into two string columns.',
+    },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'Return top-two coverage fields',
+      body: 'The result must select the top-2 administrative areas by coverage desc and write them into two string columns.',
+      reason: 'Focused mapping fixture.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-MAP',
+    },
+    confluencePages: [
+      {
+        id: 'SPEC-MAP',
+        title: 'Technical Design - Coverage Result',
+        body: 'The result must select the top-2 administrative areas by coverage desc and write them into two string columns.',
+      },
+    ],
+  });
+  let synthesisCalls = 0;
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async () => {
+      synthesisCalls += 1;
+      return {
+        acceptanceCriteria: [
+          {
+            id: 'AC-1',
+            text: 'Administrative areas must be selected by coverage percentage in descending order, with the highest written to the first column and the second-highest to the second column.',
+          },
+        ],
+      };
+    },
+  });
+
+  assert.equal(synthesisCalls, 1, 'a semantically covered requirement must not trigger a repair call');
+  assert.deepEqual(finalized.acceptanceCriteriaDiagnostics.directRequirements?.[0]?.acceptanceCriteriaIds, ['AC-1']);
+});
+
+test('requirement mapping rejects cross-family lookalikes that share coverage or flag identifiers', () => {
+  const trace = (id: string, text: string) => ({
+    id,
+    text,
+    disposition: 'in_scope' as const,
+    sourceKind: 'spec' as const,
+    sourceLocation: 'Spec: ORB-2565',
+    acceptanceCriteriaIds: [],
+  });
+  const criterion = (id: string, text: string) => ({ id, text, source: 'ORB-2565 synthesized' });
+
+  const formatRequirement = trace(
+    'REQ-FORMAT',
+    'Each value is a plain string with the coverage percentage appended as (X.XX% coverage).'
+  );
+  const formatCriterion = criterion('AC-FORMAT', 'Each coverage column uses the format "<name> (<X.XX% coverage>)".');
+  const orderingCriterion = criterion('AC-ORDER', 'Administrative areas are sorted by coverage percentage descending.');
+  assert.ok(requirementCriterionMatchScore(formatRequirement, formatCriterion) > 0);
+  assert.equal(requirementCriterionMatchScore(formatRequirement, orderingCriterion), 0);
+
+  const clampRequirement = trace('REQ-CLAMP', 'Clamp coverage_pct to [0,100].');
+  const thresholdCriterion = criterion('AC-THRESHOLD', 'Only rows with coverage_pct > 0 are retained.');
+  assert.equal(requirementCriterionMatchScore(clampRequirement, thresholdCriterion), 0);
+
+  const flagRequirement = trace(
+    'REQ-FLAG',
+    'Gate enrichment on ADM_AREA_COVERAGE_ENABLED, which defaults to off.'
+  );
+  const flagCriterion = criterion(
+    'AC-FLAG',
+    'ADM_AREA_COVERAGE_ENABLED controls enrichment and defaults to off.'
+  );
+  const latencyCriterion = criterion(
+    'AC-LATENCY',
+    'Compare latency with ADM_AREA_COVERAGE_ENABLED enabled and disabled.'
+  );
+  assert.ok(requirementCriterionMatchScore(flagRequirement, flagCriterion) > 0);
+  assert.equal(requirementCriterionMatchScore(flagRequirement, latencyCriterion), 0);
+});
+
+test('focused omission repair keeps at most one best candidate per missing requirement', async () => {
+  const sourceBody = [
+    'The result columns must be exported in dataset downloads.',
+    'The result columns must be streamed to API clients.',
+  ].join('\n');
+  const context = buildBaseContext({
+    ticketKey: 'ORB-REPAIR',
+    mainIssue: { key: 'ORB-REPAIR', summary: 'Stream and export result columns', description: sourceBody },
+    scopeAuthority: {
+      type: 'main_jira_description',
+      title: 'Stream and export result columns',
+      body: sourceBody,
+      reason: 'Focused repair fixture.',
+      quality: 'high',
+      sourceIssueKey: 'ORB-REPAIR',
+    },
+    confluencePages: [{ id: 'SPEC-REPAIR', title: 'Technical Design - Result Delivery', body: sourceBody }],
+  });
+  let calls = 0;
+  let repairInput: AcceptanceCriteriaSynthesisInput | undefined;
+  const finalized = await finalizeAcceptanceCriteria(context, {
+    synthesizer: async (input) => {
+      calls += 1;
+      if (!input.repairOnlyMissingRequirements) {
+        return { acceptanceCriteria: [{ id: 'AC-1', text: 'The result columns must be included in dataset exports.' }] };
+      }
+      repairInput = input;
+      return {
+        acceptanceCriteria: [
+          { id: 'AC-1', text: 'The result columns must be streamed to API clients.' },
+          { id: 'AC-2', text: 'The result columns must be stored, streamed, and exported for all clients.' },
+        ],
+      };
+    },
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(repairInput?.targetMinCriteria, 1);
+  assert.equal(repairInput?.targetMaxCriteria, 1);
+  assert.equal(repairInput?.existingCriteria?.length, 1);
+  assert.equal(finalized.acceptanceCriteria.filter((criterion) => /direct-requirement repair/.test(criterion.source || '')).length, 1);
 });

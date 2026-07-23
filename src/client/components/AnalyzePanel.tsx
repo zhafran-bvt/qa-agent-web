@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AnalyzeRequest, SuggestedTicket } from '../../shared/contracts';
+import type { AnalyzeRequest, ResolvedQaScopeType, SuggestedTicket } from '../../shared/contracts';
 import type { UiLanguage } from '../i18n';
 import { uiText } from '../i18n';
 
@@ -62,6 +62,23 @@ function SuggestionsSlider({
   );
 }
 
+function splitFigmaReferences(value: string): string[] {
+  return value
+    .split(/[\r\n,]+/)
+    .map((reference) => reference.trim())
+    .filter(Boolean);
+}
+
+function isFigmaReference(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+      (parsed.hostname === 'figma.com' || parsed.hostname.endsWith('.figma.com'));
+  } catch {
+    return false;
+  }
+}
+
 interface AnalyzePanelProps {
   form: AnalyzeRequest;
   busy: boolean;
@@ -72,6 +89,7 @@ interface AnalyzePanelProps {
   suggestionsError: string;
   canAnalyze: boolean;
   analyzeBlocker: string;
+  resolvedScopeType?: ResolvedQaScopeType;
   onLogin: () => void;
   onChange: (patch: Partial<AnalyzeRequest>) => void;
   onSuggestionSelect: (ticketKey: string) => void;
@@ -88,12 +106,18 @@ export function AnalyzePanel({
   suggestionsError,
   canAnalyze,
   analyzeBlocker,
+  resolvedScopeType,
   onLogin,
   onChange,
   onSuggestionSelect,
   onAnalyze,
 }: AnalyzePanelProps) {
   const t = uiText[lang].analyze;
+  // Before analysis the scope is still unknown, so QA can provide a link up front.
+  // Once Jira scope is resolved, keep Figma references strictly FE/web-only.
+  const showFigmaReferences = resolvedScopeType ? resolvedScopeType === 'web' : form.scopeType !== 'api' && form.feOnly !== false;
+  const figmaReferenceText = (form.figmaReferences || []).join('\n');
+  const invalidFigmaReference = showFigmaReferences && (form.figmaReferences || []).some((reference) => !isFigmaReference(reference));
   return (
     <section className="analysis-card">
       <div className="analysis-ticket">
@@ -117,10 +141,26 @@ export function AnalyzePanel({
             <span>{t.jiraTicketKey}</span>
             <input value={form.jiraKey} placeholder="ORB-3118" onChange={(event) => onChange({ jiraKey: event.target.value })} />
           </label>
-          <button className="button" type="button" disabled={Boolean(analyzeBlocker)} onClick={() => onAnalyze()}>
+          <button className="button" type="button" disabled={Boolean(analyzeBlocker) || invalidFigmaReference} onClick={() => onAnalyze()}>
             {busy ? t.analyzing : t.action}
           </button>
         </div>
+
+        {showFigmaReferences ? (
+          <label className="field figma-reference-field">
+            <span>
+              {t.figmaReferences}
+              <small>{t.figmaReferencesHint}</small>
+            </span>
+            <textarea
+              aria-label={t.figmaReferences}
+              value={figmaReferenceText}
+              placeholder={t.figmaReferencesPlaceholder}
+              onChange={(event) => onChange({ figmaReferences: splitFigmaReferences(event.target.value) })}
+            />
+            {invalidFigmaReference ? <small className="action-hint">{t.figmaReferencesInvalid}</small> : null}
+          </label>
+        ) : null}
 
         <div className="toggle-row">
           <label className="checkbox">

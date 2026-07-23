@@ -90,6 +90,7 @@ const baseContext: QaContext = {
   constraints: {
     feOnly: true,
     beAlreadyTested: false,
+    scopeType: 'web',
   },
   actualDevScopeGuidance: 'Use scoped PRD for thin tickets.',
 };
@@ -154,6 +155,57 @@ describe('ContextPanel', () => {
 
     expect(screen.getByText('Analyzing Jira and Confluence...')).toBeTruthy();
     expect(screen.getByText('Resolving scope authority, acceptance criteria, and supporting evidence for this ticket.')).toBeTruthy();
+  });
+
+  it('renders QA-supplied Figma references as links', () => {
+    render(
+      <ContextPanel
+        context={{ ...baseContext, figmaReferences: ['https://www.figma.com/design/abc123/QA-Agent'] }}
+        analyzing={false}
+        translation={null}
+        translating={false}
+        permissionApproved={false}
+        overrideReason=""
+        busy={false}
+        lang="en"
+        onLanguageChange={vi.fn()}
+        onPermissionApprovedChange={vi.fn()}
+        onOverrideReasonChange={vi.fn()}
+        generateBlocker=""
+        onGenerate={vi.fn()}
+      />
+    );
+
+    const link = screen.getByRole('link', { name: 'https://www.figma.com/design/abc123/QA-Agent' });
+    expect(link.getAttribute('href')).toBe('https://www.figma.com/design/abc123/QA-Agent');
+    expect(link.getAttribute('target')).toBe('_blank');
+  });
+
+  it('does not display Figma references for API scope', () => {
+    render(
+      <ContextPanel
+        context={{
+          ...baseContext,
+          figmaReferences: ['https://www.figma.com/design/abc123/QA-Agent'],
+          constraints: { ...baseContext.constraints, feOnly: false, scopeType: 'api' },
+        }}
+        analyzing={false}
+        translation={null}
+        translating={false}
+        permissionApproved={false}
+        overrideReason=""
+        busy={false}
+        lang="en"
+        onLanguageChange={vi.fn()}
+        onPermissionApprovedChange={vi.fn()}
+        onOverrideReasonChange={vi.fn()}
+        generateBlocker=""
+        onGenerate={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByRole('link', { name: 'https://www.figma.com/design/abc123/QA-Agent' })).toBeNull();
+    expect(screen.queryByText('Figma design references')).toBeNull();
   });
 
   it('shows next steps when no scope has been loaded yet', () => {

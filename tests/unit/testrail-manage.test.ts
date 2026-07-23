@@ -10,6 +10,7 @@ test('buildGeneratedCaseBody maps a generated BDD case to add_case fields', () =
     caseIntent: 'positive',
     jiraReference: 'ORB-3172',
     preconditions: 'User has a no-score result.',
+    expectedResult: 'The AI Summary tab is available and shows the executive summary.',
     bddScenario: 'Feature: AI Summary\nScenario: View\nGiven x\nWhen y\nThen z',
   } as unknown as GeneratedTestCase;
 
@@ -19,7 +20,14 @@ test('buildGeneratedCaseBody maps a generated BDD case to add_case fields', () =
   assert.equal(body.type_id, 1); // BDD/positive -> functional
   assert.equal(body.refs, 'ORB-3172');
   assert.equal(body.custom_preconds, 'User has a no-score result.');
-  assert.deepEqual(body.custom_testrail_bdd_scenario, [{ content: testCase.bddScenario }]);
+  assert.deepEqual(body.custom_testrail_bdd_scenario, [
+    {
+      content: `${testCase.bddScenario}\n\nExpected Result:\n${testCase.expectedResult}`,
+    },
+  ]);
+
+  assert.equal(buildGeneratedCaseBody({ ...testCase, caseIntent: 'negative' } as GeneratedTestCase).type_id, 2);
+  assert.equal(buildGeneratedCaseBody({ ...testCase, caseIntent: 'edge' } as GeneratedTestCase).type_id, 5);
 });
 
 test('buildManageCaseBody omits undefined fields and wraps the BDD scenario', () => {

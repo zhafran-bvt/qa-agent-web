@@ -29,6 +29,8 @@ function evaluation(overrides: Partial<GenerateQualityEvaluation> = {}): Generat
     rawAcceptanceCriteriaQuality: 'strong',
     synthesisUsed: true,
     noisyRawAcceptanceCriteria: false,
+    abnormalRequirementInventory: false,
+    unmappedRequirementCount: 0,
     falseGreenCoverageRisk: false,
     qualityGate: 'pass',
     ...overrides,
@@ -43,6 +45,11 @@ describe('qualityGateReasons', () => {
   it('surfaces the not-production-ready (noisy raw AC) reason', () => {
     const reasons = qualityGateReasons(evaluation({ noisyRawAcceptanceCriteria: true, qualityGate: 'fail' }));
     expect(reasons.some((r) => /not synthesized \(not production-ready\)/.test(r))).toBe(true);
+  });
+
+  it('surfaces unmapped in-scope requirements as a coverage-traceability reason', () => {
+    const reasons = qualityGateReasons(evaluation({ unmappedRequirementCount: 3, qualityGate: 'warn' }));
+    expect(reasons.some((r) => /3 in-scope source requirement\(s\) not covered/.test(r))).toBe(true);
   });
 
   it('includes limits in the polarity and broad-coverage reasons', () => {

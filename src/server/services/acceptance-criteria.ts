@@ -2,6 +2,7 @@ import type {
   AcceptanceCriteriaExecutionPlanItem,
   ConfluencePageSummary,
   CrossSourceConflict,
+  DirectRequirementTrace,
   QaContext,
   ScopedItem,
 } from '../../shared/contracts';
@@ -11,6 +12,7 @@ import { NEGATION_CUES, POLARITY_AXES, SPEC_PAGE_TITLE_RE } from './keywords';
 import { isExcerptRelevant } from './llm';
 import type { ExcerptRelevanceInput, LlmConfig } from './llm';
 import { mapWithConcurrency } from './ttl-cache';
+import { endpointIsDocumented } from './validation';
 
 export interface ParsedIssueSection {
   heading: string;
@@ -30,6 +32,8 @@ export interface AcceptanceCriteriaSynthesisInput {
   thinTicketFallbackUsed?: boolean;
   prdSubsectionMatchQuality?: 'confident' | 'broad' | 'none';
   actualDevScopeGuidance: string;
+  /** Optional QA-supplied design links; URLs are context only and never treated as verified requirements. */
+  figmaReferences?: string[];
   targetMinCriteria?: number;
   targetMaxCriteria?: number;
   granularityHint?: string;
@@ -37,6 +41,17 @@ export interface AcceptanceCriteriaSynthesisInput {
   // synthesizer can ground criteria in implementation detail (point-in-time semantics, per-endpoint
   // enforcement, backward-compat edges) instead of PRD paraphrases. Empty when no spec page is linked.
   technicalSpecExcerpts?: string;
+  /** Atomic direct rules collected from Jira, the scoped PRD, and linked technical specs. */
+  directRequirements?: Array<Pick<DirectRequirementTrace, 'id' | 'text' | 'sourceKind' | 'sourceLocation' | 'workedExamples'>>;
+  /**
+   * Concrete source examples are grounding, not a completeness checklist. They remain available when
+   * an abnormal inventory forces directRequirements to be withheld from synthesis.
+   */
+  groundingExamples?: Array<Pick<DirectRequirementTrace, 'id' | 'text' | 'sourceKind' | 'sourceLocation' | 'workedExamples'>>;
+  /** Final criteria already accepted before a focused omission-repair call. */
+  existingCriteria?: Array<Pick<ScopedItem, 'id' | 'text'>>;
+  /** When true, return only criteria that cover directRequirements supplied for this repair call. */
+  repairOnlyMissingRequirements?: boolean;
   // The ticket's concrete in-scope operations (matched API endpoints). Used as a hard boundary so spec
   // grounding sharpens criteria for these operations without promoting unrelated spec capabilities
   // (e.g. login isolation when no login endpoint is in scope) into active criteria. Empty when unknown.
@@ -79,23 +94,45 @@ interface CriteriaQualityAssessment {
   weakSignals: string[];
 }
 
+const HTML_TAG_NAME_RE = /^(?:a|br|code|div|em|h[1-6]|li|ol|p|pre|span|strong|table|tbody|td|th|thead|tr|ul)$/i;
+const TEMPLATE_PLACEHOLDER_SIGNAL_RE = /(?:name|value|percentage|percent|coverage|path|hierarchy|id|field|column|attribute)/i;
+
+function stripMarkupPreservingTemplatePlaceholders(value: unknown): string {
+  const placeholders: string[] = [];
+  const protectedValue = String(value || '').replace(/<([^<>]{2,80})>/g, (match, rawInner: string) => {
+    const inner = String(rawInner || '').trim();
+    const tagName = inner.replace(/^\//, '').split(/\s+/)[0];
+    if (
+      !inner ||
+      inner.startsWith('/') ||
+      /[=/]/.test(inner) ||
+      HTML_TAG_NAME_RE.test(tagName) ||
+      !TEMPLATE_PLACEHOLDER_SIGNAL_RE.test(inner)
+    ) {
+      return match;
+    }
+    const index = placeholders.push(`<${inner}>`) - 1;
+    return `__QA_TEMPLATE_PLACEHOLDER_${index}__`;
+  });
+  return protectedValue.replace(/<[^>]+>/g, ' ').replace(/__QA_TEMPLATE_PLACEHOLDER_(\d+)__/g, (_, index: string) => placeholders[Number(index)] || '');
+}
+
 function normalizeInlineText(value: unknown): string {
-  return String(value || '')
+  return stripMarkupPreservingTemplatePlaceholders(value)
     .replace(/\r/g, '')
     .replace(/\u00a0/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
     .replace(/[ \t]+/g, ' ')
     .trim();
 }
 
 function normalizeMultilineText(value: unknown): string {
-  return String(value || '')
+  const withBreaks = String(value || '')
     .replace(/\r/g, '')
     .replace(/\u00a0/g, ' ')
     .replace(/<(?:br|br\/)\s*>/gi, '\n')
     .replace(/<\/(?:p|div|li|ul|ol|h1|h2|h3|h4|h5|h6)>/gi, '\n')
-    .replace(/<li[^>]*>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
+    .replace(/<li[^>]*>/gi, '');
+  return stripMarkupPreservingTemplatePlaceholders(withBreaks)
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -333,6 +370,20 @@ function determineContextGranularityTarget(context: QaContext, parsedSections: P
       max: 6,
       hint:
         'Use medium granularity for thin-ticket PRD subsection fallback. Cover each distinct behavior in the matched subsection. When present, keep entry-point availability, variant framing, output narrative style, content sections, risk or warning information, recommendations or takeaways, and single-item versus comparative behavior as separate criteria.',
+    };
+  }
+
+  const explicitlyDelegatesToMatchedPrd =
+    Boolean(context.scopeConfluenceSection?.matched && context.scopeConfluenceSection?.body) &&
+    /\b(?:see|refer(?:ence)?|refer)\s+(?:to\s+)?(?:the\s+)?(?:us|user\s+story|prd|requirements?)\b/i.test(
+      normalizeMultilineText(description)
+    );
+  if (explicitlyDelegatesToMatchedPrd) {
+    return {
+      min: 4,
+      max: 6,
+      hint:
+        'The main Jira explicitly delegates requirement detail to the matched PRD or user-story subsection. Keep the Jira endpoint and payload shape as the hard scope boundary, but include each independently testable behavior from the referenced subsection that directly describes that scoped output, including value content, multi-value behavior, and null or unavailable-data behavior when present. Exclude later addenda or UI-only changes that replace or contradict the Jira payload contract.',
     };
   }
 
@@ -852,7 +903,9 @@ function isTechnicalSpecPage(page: ConfluencePageSummary, scopePageId?: string):
   if (SPEC_PAGE_TITLE_RE.test(page.title || '')) return true;
   // A page fetched as an immediate child of a spec page (BUG-06 descendant expansion) inherits spec
   // treatment even when its own title doesn't say "specification".
-  return (page.sourceRefs || []).some((ref) => ref.relationship === 'spec-descendant');
+  return (page.sourceRefs || []).some(
+    (ref) => ref.relationship === 'spec-descendant' || SPEC_PAGE_TITLE_RE.test(ref.relationship || '')
+  );
 }
 
 function collectTechnicalSpecExcerpts(context: QaContext): { text: string; pages: string[] } {
@@ -871,6 +924,548 @@ function collectTechnicalSpecExcerpts(context: QaContext): { text: string; pages
     remaining -= body.length;
   }
   return { text: blocks.join('\n\n'), pages: used };
+}
+
+const DIRECT_REQUIREMENT_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'these', 'those', 'when', 'then', 'must', 'should', 'shall', 'will',
+  'into', 'through', 'where', 'which', 'have', 'has', 'are', 'is', 'be', 'a', 'an', 'of', 'to', 'in', 'on', 'or', 'by', 'as',
+  'result', 'results', 'analysis', 'data', 'value', 'values', 'field', 'fields', 'system', 'service', 'feature', 'ticket',
+]);
+const CLARIFICATION_REQUIREMENT_RE = /\b(?:tbd|todo|open question|not defined|undefined|to be decided|needs? clarification|unclear|not specified|pending decision)\b/i;
+const OUT_OF_SCOPE_REQUIREMENT_RE = /\b(?:out of scope|non-goal|not in scope|deferred|future work|will not|do not implement)\b/i;
+
+function directRequirementTokens(value: string): Set<string> {
+  const tokens = new Set<string>();
+  for (const rawToken of String(value || '').toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) || []) {
+    if (DIRECT_REQUIREMENT_STOPWORDS.has(rawToken)) continue;
+    const token = rawToken
+      .replace(/(?:ed|ing)$/, (suffix) => (rawToken.length - suffix.length >= 5 ? '' : suffix))
+      .replace(/ies$/, 'y')
+      .replace(/s$/, (suffix) => (rawToken.length >= 6 ? '' : suffix));
+    tokens.add(token);
+    if (rawToken === 'coverage_pct') {
+      tokens.add('coverage');
+      tokens.add('percentage');
+    }
+  }
+  return tokens;
+}
+
+function requirementWorkedExamples(value: string): string[] {
+  const examples = new Set<string>();
+  const source = String(value || '');
+  // Keep complete templates/examples ahead of isolated entities. This is what lets a compacted prompt
+  // retain `Name (X.XX% coverage)` and a concrete PRD example rather than only a place-name fragment.
+  const patterns = [
+    /[`"“]([^`"”]{2,160})[`"”]/g,
+    /(?:\bName|\b[A-Z][A-Za-z0-9,' -]{2,120})\s*\(\s*(?:X(?:\.X+)?|\d+(?:[.,]\d+)?)%\s*coverage\s*\)/g,
+    /\b(?:X(?:\.X+)?|\d+(?:[.,]\d+)?)%\s*coverage\b/gi,
+    /\b[A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+){1,3}\b/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of source.matchAll(pattern)) {
+      const example = String(match[1] || match[0] || '').trim().replace(/[,:;]$/, '');
+      if (example && example.length <= 160) examples.add(example);
+    }
+  }
+  return [...examples].slice(0, 8);
+}
+
+// A normative obligation the implementation must satisfy. Used to protect genuine requirements from the
+// structural-exclusion heuristics below (a line that states an obligation is never a heading/background).
+const NORMATIVE_MODAL_RE = /\b(?:must|shall|should|is required|are required|needs? to|has to|have to|when\b[\s\S]*\bthen\b|if\b[\s\S]*\bthen\b)\b/i;
+
+// Behavior/obligation verbs that mark a requirement even without a modal (declarative spec rules like
+// "results are sorted by coverage_pct"). Deliberately verbs/observable-behavior only — NOT bare nouns
+// like schema/table/column, whose presence previously let pure DDL and architecture prose through.
+const DIRECT_REQUIREMENT_BEHAVIOR_RE =
+  /\b(?:adds?|gains?|contains?|sort(?:ed)?|ordered|limited to|top\s+two|displays?|displayed|excludes?|persists?|persisted|stored|streamed|exported|returns?|includes?|renamed?|falls?\s?back|defaults?\s+to|remains?\s+unchanged|exposed?|surfaced?)\b/i;
+
+const DIRECT_CONTRACT_SURFACE_RE =
+  /\b(?:requests?|responses?|payloads?|results?|outputs?|fields?|columns?|attributes?|tables?|info\s+panels?|datasets?|exports?|exported|downloads?|streams?|streamed|schema|queryable|agent|mcp|feature\s+flags?|latency|performance|null(?:able)?|coverage(?:_pct)?|percentage|administrative\s+areas?|mapping|intersection|overlap|compatib\w*)\b/i;
+const DIRECT_CONTRACT_RULE_RE =
+  /\b(?:format|full\s+(?:hierarchy\s+)?path|top[-\s]?(?:2|two)|descending|exactly\s+one|only\s+one|no\s+(?:mapping|intersection)|outside\s+supported|never\s+(?:blocks?|sees)|does\s+not\s+block|clamp(?:ed)?|default\s+off|opt[-\s]?in|unchanged|same\s+as|consistent\s+with|exclude\w*|omit\w*|nullable|native\s+(?:bson\s+)?string)\b/i;
+const CALCULATION_CONTRACT_RE =
+  /\b(?:coverage_pct|coverage\s+percentage|numerator|denominator|intersection\s+area|relative\s+to|planar\s+area|clamp(?:ed)?\s+to\s+\[?0\s*,\s*100\]?|contains?\s+(?:means|implies|returns?)\s+100)\b/i;
+const INTERNAL_IMPLEMENTATION_RE =
+  /\b(?:processDatasetsStream|GeometryRows|buildRTreeFromGrids|traverseGridsWithRTree|scoringRows|R-Tree|BulkLoad|saveScoringDatasetBatches|saveBatchRows|ToRawDataset|convertToMongoDBType|BuildDatasetSchema|addProportionColumn|writeExportAnalyticsRows|ConvertDefinedTypeToString|convertString|simplefeatures|GetAreaSizeM2|boundary_p\d+|AdmLevelStepUpThreshold|OutputType|running\s+bbox|server-side\s+cursor|second\s+index|per-row\s+SQL|VALUES\s+JOIN)\b|\bfloor\s*\(|\blen\s*\(/gi;
+
+function internalImplementationTokenCount(text: string): number {
+  return text.match(INTERNAL_IMPLEMENTATION_RE)?.length || 0;
+}
+
+// Structural / non-normative source lines that must never become a "requirement": diagram syntax, SQL/DDL
+// fragments, background/rationale framing, performance assumptions, and section headings. This is the
+// precision filter that stops a 12-requirement ticket's spec from inflating into ~100 "requirements".
+function isNonRequirementLine(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  // Mermaid / diagram syntax and arrows.
+  if (/^(?:sequencediagram|classdiagram|erdiagram|flowchart|graph\s+(?:td|lr|rl|bt)|participant\b|subgraph\b|state\b)/i.test(t)) return true;
+  if (/(?:--?>>?|==>|-\.->|\|>|:::)/.test(t)) return true;
+  // SQL / DDL fragments.
+  if (/^(?:create|alter|drop|select|insert|update|delete|with|join|where|from|on|index|constraint|foreign\s+key|primary\s+key|unique)\b/i.test(t)) return true;
+  if (/^\)?\s*(?:as\s+\w+|if\s+len\s*\(|for\s+\w+\s*:=|return\s+\w+)\b/i.test(t)) return true;
+  if (/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+\s*=/i.test(t)) return true;
+  if (/^[a-z][a-z0-9_]*\s*\[[^\]]+\]\s*=/i.test(t)) return true;
+  if (/\b(?:varchar|integer|bigint|boolean|timestamptz|uuid|double\s+precision|not\s+null|serial|jsonb)\b/i.test(t) && /[(),;]/.test(t) && !NORMATIVE_MODAL_RE.test(t)) return true;
+  // Background / rationale / framing intros.
+  if (/^(?:background|context|problem(?:\s+statement)?|rationale|motivation|overview|goals?|non-?goals?|assumptions?|notes?|summary|introduction|glossary|terminology|appendix|references?)\b\s*[:.\-—]?/i.test(t)) return true;
+  if (/^(?:e\.g\.|i\.e\.|for example|for instance)\b/i.test(t)) return true;
+  if (/^(?:this document|previous\s*ly|currently|today\b|users? can only|this makes it difficult|a spatial-analysis result has no\b|the value is already\b|so in the \w+\.data document\b)/i.test(t)) return true;
+  if (/^geometry\./i.test(t)) return true;
+  if (/^(?:feed|route|pass|wire)\s+(?:the\s+)?(?:accumulator|rows?|values?)\b[\s\S]*\b(?:writer|pipeline|handler|processor)\b/i.test(t)) return true;
+  if (/\b(?:model\.AdmAreaIntersection|fmt\.Sprintf|finalize step)\b/i.test(t) && !NORMATIVE_MODAL_RE.test(t)) return true;
+  if (/\bRangeSearch\b[\s\S]*\b(?:candidate cells?|accumulator)\b/i.test(t) && !NORMATIVE_MODAL_RE.test(t)) return true;
+  if (/^(?:adaptive step|shortcut\b|pick\s+[A-Z]\b|the robust\b|one\s+O\(|same rule\s+[—-]|doing it here|each occupied tile|the flowchart|the pass branches|we use a plain degree grid)\b/i.test(t)) return true;
+  if (/\(\s*(?:e\.g\.)?\s*$|\b(?:e\.g\.|for example)\s*$|^true\s*\(/i.test(t)) return true;
+  if (/^(?:mcp|approach|how it is persisted|persistence|storage|algorithm)\s*[—:\-]/i.test(t) && !NORMATIVE_MODAL_RE.test(t)) return true;
+  if (/^add new attribute\b/i.test(t) && !/\b[a-z][a-z0-9]+_[a-z0-9_]+\b/.test(t)) return true;
+  // Performance / capacity assumptions (not testable contracts).
+  if (/\b(?:assume|assuming|approximately|for performance|performance assumption|estimated|expected latency|throughput)\b/i.test(t) && !NORMATIVE_MODAL_RE.test(t)) return true;
+  // Implementation narration may be useful technical context, but it is not an independently testable
+  // contract unless the same sentence states an external surface or a calculation rule.
+  if (
+    internalImplementationTokenCount(t) >= 2 &&
+    !CALCULATION_CONTRACT_RE.test(t) &&
+    !(DIRECT_CONTRACT_SURFACE_RE.test(t) && (NORMATIVE_MODAL_RE.test(t) || DIRECT_CONTRACT_RULE_RE.test(t)))
+  ) {
+    return true;
+  }
+  // Heading: short, mostly title-cased, unpunctuated, and not stating an obligation.
+  const words = t.split(/\s+/);
+  if (words.length <= 8 && !/[.:!?]$/.test(t) && !NORMATIVE_MODAL_RE.test(t) && !DIRECT_REQUIREMENT_BEHAVIOR_RE.test(t)) {
+    const capitalized = words.filter((word) => /^[A-Z0-9]/.test(word)).length;
+    if (capitalized >= Math.ceil(words.length * 0.6)) return true;
+  }
+  return false;
+}
+
+function isDirectRequirementCandidate(text: string): boolean {
+  const normalized = normalizeInlineText(text);
+  if (normalized.length < 20 || normalized.length > 620) return false;
+  if (isFragmentaryCriterion(normalized)) return false;
+  if (isNonRequirementLine(normalized)) return false;
+  const explicitDisposition = OUT_OF_SCOPE_REQUIREMENT_RE.test(normalized) || CLARIFICATION_REQUIREMENT_RE.test(normalized);
+  const normativeContract = NORMATIVE_MODAL_RE.test(normalized) && DIRECT_CONTRACT_SURFACE_RE.test(normalized);
+  const declarativeContract =
+    DIRECT_CONTRACT_SURFACE_RE.test(normalized) &&
+    (DIRECT_REQUIREMENT_BEHAVIOR_RE.test(normalized) || DIRECT_CONTRACT_RULE_RE.test(normalized));
+  const calculationContract = CALCULATION_CONTRACT_RE.test(normalized) && hasClearExpectedBehaviorSignal(normalized);
+  const compatibilityOrPerformanceContract =
+    /\b(?:request(?:s| messages?)? (?:is|are|remains?|remain)?\s*unchanged|backward compatib\w*|compare\b[\s\S]*\blatency|latency\b[\s\S]*\benabled\/disabled)\b/i.test(normalized);
+  return explicitDisposition || normativeContract || declarativeContract || calculationContract || compatibilityOrPerformanceContract;
+}
+
+function expandCoordinatedSurfaceRequirement(text: string): string[] {
+  const match = text.match(/^(?:net:\s*)?(.*?\bcolumns?)\s+are\s+stored,\s*streamed,\s*and\s*exported,\s*but\s+(.+)$/i);
+  if (!match) return [text];
+  const rawSubject = match[1].trim();
+  const subject = rawSubject.charAt(0).toUpperCase() + rawSubject.slice(1);
+  const agentClause = match[2].replace(/\bthem\b/gi, rawSubject).replace(/^./, (character) => character.toUpperCase());
+  return [`${subject} are stored.`, `${subject} are streamed.`, `${subject} are exported.`, agentClause];
+}
+
+function splitDirectRequirementCandidates(value: string): string[] {
+  const candidates: string[] = [];
+  for (const rawLine of normalizeMultilineText(value).split('\n')) {
+    const line = rawLine.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim();
+    if (!line) continue;
+    const parts = line.split(/(?<=[.!?])\s+(?=[A-Z0-9])|(?<=;)\s+(?=(?:[A-Z0-9]|a cell\b|exactly one\b|format\b|append\b|persist\b|missing\b))/g);
+    for (const part of parts) {
+      for (const expanded of expandCoordinatedSurfaceRequirement(normalizeInlineText(part))) {
+        const normalized = normalizeInlineText(expanded);
+        if (isDirectRequirementCandidate(normalized)) candidates.push(normalized);
+      }
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Technical specs are authoritative only when they are explicitly linked to the ticket. We inventory
+ * their concrete, testable rules alongside the Jira and matched PRD wording so synthesis cannot make a
+ * green AC set by paraphrasing away persistence/export/schema obligations.
+ */
+function overlapCoefficient(a: Set<string>, b: Set<string>): number {
+  const min = Math.min(a.size, b.size);
+  if (!min) return 0;
+  let intersection = 0;
+  for (const token of a) if (b.has(token)) intersection += 1;
+  return intersection / min;
+}
+
+// Opposite-polarity requirement pairs (flag on vs off, include vs omit, shown vs hidden…) legitimately
+// share most of their vocabulary but are DISTINCT contracts — they must never be collapsed as restatements.
+const POLARITY_ANTONYMS: Array<[string, string]> = [
+  ['enabled', 'disabled'],
+  ['enable', 'disable'],
+  ['include', 'omit'],
+  ['include', 'exclude'],
+  ['included', 'omitted'],
+  ['add', 'remove'],
+  ['added', 'removed'],
+  ['shown', 'hidden'],
+  ['show', 'hide'],
+  ['present', 'absent'],
+  ['visible', 'hidden'],
+  ['allow', 'reject'],
+  ['allowed', 'rejected'],
+  ['accept', 'reject'],
+  ['on', 'off'],
+  ['true', 'false'],
+];
+
+function differOnPolarity(a: Set<string>, b: Set<string>): boolean {
+  for (const [x, y] of POLARITY_ANTONYMS) {
+    if ((a.has(x) && b.has(y)) || (a.has(y) && b.has(x))) return true;
+  }
+  return false;
+}
+
+function directRequirementContractFamily(text: string): string {
+  const value = text.toLowerCase();
+  // Exclusion wording often repeats the column names. Classify it before the generic "coverage fields"
+  // family so queryable/schema exclusions collapse together instead of looking like column-addition rules.
+  if (
+    /\b(?:queryable fields?|agent schema|dataset schema|builddatasetschema|mcp|qna agent)\b/.test(value) &&
+    /\b(?:exclude|must not|never sees|does not spend|not appear|skip)\b/.test(value)
+  ) {
+    return 'agent_schema_exclusion';
+  }
+  if (/\bagent\b[\s\S]*\bschema\b|\bschema\b[\s\S]*\bagent\b/.test(value) && /\b(?:never sees|does not spend|exclude|not appear)\b/.test(value)) {
+    return 'agent_schema_exclusion';
+  }
+  if (/\b(?:add|adds|include|includes|expose|exposes|gain|gains|return|returns)\b[\s\S]*\badm_area_coverage_[12]\b|\btwo new result columns\b|\badd\b[\s\S]*\bcoverage attribute\b[\s\S]*\bresult dataset\b/.test(value)) return 'coverage_fields';
+  if (/\b(?:exactly|only|touching) one\b|\bonly one administrative area\b/.test(value)) return 'single_area';
+  if (/\b(?:no mapping|no intersection|outside supported|unavailable|not been mapped)\b[\s\S]*\bnull\b|\bnull\b[\s\S]*\b(?:no mapping|no intersection|outside supported|unavailable|not been mapped)\b|\bboth (?:fields|columns|attributes) (?:are|must be|return) null\b/.test(value)) return 'no_area';
+  if (/\b(?:never|does not|should not|must not) block\b|\bwithout (?:blocking|invalidating)\b/.test(value)) return 'null_non_blocking';
+  if (/\b(?:fmt\.sprintf|following format|format each|long_name)\b|\(\s*x\.xx% coverage\s*\)|\bcoverage percentage\b[\s\S]*\bappended\b/.test(value)) return 'coverage_format';
+  if (/\b(?:no mincoveragepercent|no minimum coverage|no coverage threshold|coverage_pct\s*>\s*0|boundary-only|real overlap)\b/.test(value)) return 'coverage_threshold';
+  if (/\b(?:sort(?:ed)?[\s\S]*(?:desc|descending)|coverage desc|ordered[\s\S]*descending|descending order)\b/.test(value)) return 'coverage_ordering';
+  if (/\b(?:top[-\s]?(?:2|two)|index 0[\s\S]*index 1|highest[\s\S]*second-highest|first-highest[\s\S]*second-highest|display all administrative areas)\b/.test(value)) return 'coverage_cardinality';
+  // A persistence sentence may mention downstream table/export consumers only to say no recomputation is
+  // needed. Its governing contract is still persistence; classify explicit export behavior afterwards.
+  if (/\binfo panel\b/.test(value) && /(?:\b(?:consistent|match)\b|\bsame\b[\s\S]*\btable\b)/.test(value)) return 'info_panel_consistency';
+  if (/\b(?:persist\w*|stored|save path|native bson string|result document)\b/.test(value)) return 'result_persistence';
+  if (/\b(?:export|exported|download dataset|data export file)\b/.test(value)) return 'result_export';
+  if (/\b(?:format|full hierarchy|full path|long_name|x\.xx% coverage|\d+(?:\.\d+)?% coverage)\b/.test(value)) return 'coverage_format';
+  if (/\b(?:clamp|contains?\s*(?:⇒|means|implies|returns?)?\s*100)\b/.test(value)) return 'coverage_bounds';
+  if (/\b(?:planar area|numerator|denominator|intersection area relative|relative to (?:the )?(?:grid(?:\/catchment)?|cell|catchment) area|units cancel)\b/.test(value)) return 'coverage_formula';
+  if (/\b(?:compare\b[\s\S]*\blatency|latency\b[\s\S]*\benabled\b[\s\S]*\bdisabled|performance\b[\s\S]*\benabled\b[\s\S]*\bdisabled)\b/.test(value)) {
+    return 'performance';
+  }
+  if (/\b(?:feature flag|adm_area_coverage_enabled|be flag)\b/.test(value)) {
+    return /\b(?:defaults?(?:\s+to)?\s+off|disabled|flag is off|opt-in)\b/.test(value) ? 'feature_flag_off' : 'feature_flag_on';
+  }
+  if (/\b(?:latency|performance)\b/.test(value)) return 'performance';
+  if (/\b(?:request messages?[\s\S]{0,80}(?:remain|remains|are|must remain)?\s*unchanged|request untouched|backward compatib)\b/.test(value)) return 'request_compatibility';
+  if (/\bstream(?:ed|ing)?\b/.test(value)) return 'result_stream';
+  if (/\binfo panel\b/.test(value)) return 'info_panel_display';
+  if (/\b(?:table view|result table|shown in table|displayed in the table)\b/.test(value)) return 'result_table';
+  return '';
+}
+
+function directRequirementCardinality(text: string): 'top_two' | 'all' | '' {
+  if (/\b(?:top[-\s]?(?:2|two)|take the top 2|index 0[\s\S]*index 1)\b/i.test(text)) return 'top_two';
+  if (/\bdisplay all administrative areas\b/i.test(text)) return 'all';
+  return '';
+}
+
+function textContainsContractFamily(text: string, family: string): boolean {
+  const value = text.toLowerCase();
+  if (family === 'coverage_ordering') return /\b(?:sort(?:ed)?[\s\S]*(?:desc|descending)|coverage desc|ordered[\s\S]*descending)\b/.test(value);
+  if (family === 'coverage_cardinality') return /\b(?:top[-\s]?(?:2|two)|index 0[\s\S]*index 1|highest[\s\S]*second-highest)\b/.test(value);
+  if (family === 'coverage_threshold') return /\b(?:no mincoveragepercent|no minimum coverage|no coverage threshold|coverage_pct\s*>\s*0|boundary-only|real overlap)\b/.test(value);
+  if (family === 'result_persistence') return /\b(?:persist\w*|stored|re-read|save path|native bson string|result document)\b/.test(value);
+  if (family === 'result_stream') return /\bstream(?:ed|ing)?\b/.test(value);
+  if (family === 'result_export') return /\b(?:export|exported|download dataset|data export file)\b/.test(value);
+  if (family === 'agent_schema_exclusion') {
+    return /\b(?:queryable|agent|qna|mcp|schema)\b/.test(value) && /\b(?:exclude|must not|never sees|does not spend|not appear|skip)\b/.test(value);
+  }
+  if (family === 'coverage_format') {
+    return /\b(?:format|formatted|long_name)\b|\bx\.xx% coverage\b|\b\d+(?:\.\d+)?% coverage\b|\bcoverage percentage\b[\s\S]*\bappended\b/.test(value);
+  }
+  return false;
+}
+
+function mergeWorkedExamples<T extends { workedExamples?: string[] }>(preferred: T, duplicate: T): T {
+  const workedExamples = [...new Set([...(preferred.workedExamples || []), ...(duplicate.workedExamples || [])])].slice(0, 12);
+  return workedExamples.length ? { ...preferred, workedExamples } : preferred;
+}
+
+// Collapse cross-source restatements of the same contract to one representative. Jira/PRD/spec routinely
+// describe the same rule in different words ("sort by coverage desc" vs "results ordered by coverage_pct
+// descending"); exact-key dedup keeps both and inflates the inventory. Keep the most-specific source
+// (spec > prd > jira), then the longer statement, as the representative. Only collapses when BOTH have
+// enough distinctive tokens to judge (>=3), so terse distinct rules are never over-merged.
+function dedupeDirectRequirements<
+  T extends { text: string; sourceKind: DirectRequirementTrace['sourceKind']; workedExamples?: string[] },
+>(requirements: T[]): T[] {
+  const sourceRank: Record<string, number> = { spec: 0, prd: 1, jira: 2 };
+  const ordered = requirements
+    .map((requirement, index) => ({ requirement, index }))
+    .sort(
+      (a, b) =>
+        (sourceRank[a.requirement.sourceKind] ?? 9) - (sourceRank[b.requirement.sourceKind] ?? 9) ||
+        b.requirement.text.length - a.requirement.text.length ||
+        a.index - b.index
+    );
+  const kept: T[] = [];
+  const keptTokens: Set<string>[] = [];
+  for (const { requirement } of ordered) {
+    const tokens = directRequirementTokens(requirement.text);
+    const family = directRequirementContractFamily(requirement.text);
+    // Collapse only true restatements: strong token overlap AND not an opposite-polarity pair (a flag-on
+    // vs flag-off rule shares most tokens but is a distinct contract that must be kept).
+    const duplicateIndex = keptTokens.findIndex((existing, index) => {
+      if (differOnPolarity(tokens, existing)) return false;
+      const nullBlockingRule = /\bnull\b[\s\S]*\bblocks?\b|\bblocks?\b[\s\S]*\bnull\b/i;
+      if (nullBlockingRule.test(requirement.text) && nullBlockingRule.test(kept[index].text)) return true;
+      const cardinality = directRequirementCardinality(requirement.text);
+      const existingCardinality = directRequirementCardinality(kept[index].text);
+      // A lower-authority PRD's older "display all" wording must not survive beside a linked technical
+      // spec's explicit top-two contract. Same-source contradictions remain separate for clarification.
+      if (
+        cardinality &&
+        existingCardinality &&
+        cardinality !== existingCardinality &&
+        requirement.sourceKind !== kept[index].sourceKind
+      ) {
+        return true;
+      }
+      const existingFamily = directRequirementContractFamily(kept[index].text);
+      if (family && existingFamily === family) return true;
+      // A higher-authority spec may state the full threshold -> ordering -> top-two sequence in one
+      // contract while the PRD repeats only one step. Collapse that cross-source partial restatement;
+      // do not merge independent same-source rules merely because they mention the same sequence.
+      if (
+        requirement.sourceKind !== kept[index].sourceKind &&
+        ((family && textContainsContractFamily(kept[index].text, family)) ||
+          (existingFamily && textContainsContractFamily(requirement.text, existingFamily)))
+      ) {
+        return true;
+      }
+      // Different observable contracts may share all their domain nouns (the same two response fields),
+      // but format, ranking, export, persistence, and null behavior are not duplicates of one another.
+      if (family || existingFamily) return false;
+      return tokens.size >= 3 && existing.size >= 3 && overlapCoefficient(tokens, existing) >= 0.7;
+    });
+    if (duplicateIndex >= 0) {
+      // The authoritative representative stays, but concrete examples from a PRD restatement are carried
+      // forward. Grounding must not disappear merely because its sentence was deduplicated.
+      kept[duplicateIndex] = mergeWorkedExamples(kept[duplicateIndex], requirement);
+      continue;
+    }
+    kept.push(requirement);
+    keptTokens.push(tokens);
+  }
+  return kept;
+}
+
+export function buildDirectRequirementInventory(context: QaContext): DirectRequirementTrace[] {
+  const specPages = (context.confluencePages || []).filter((page) => isTechnicalSpecPage(page, context.scopeConfluenceSection?.pageId));
+  if (!specPages.length) return [];
+
+  const prdBody =
+    context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+      ? context.scopeAuthority.body
+      : context.scopeConfluenceSection?.body || '';
+  const sources: Array<{ kind: DirectRequirementTrace['sourceKind']; location: string; url?: string; text: string }> = [
+    {
+      kind: 'jira',
+      location: `Jira: ${context.ticketKey}`,
+      url: context.mainIssue.webUrl,
+      text: context.mainIssue.description || context.mainIssue.renderedDescription || '',
+    },
+    ...(prdBody
+      ? [{ kind: 'prd' as const, location: `PRD: ${context.scopeAuthority.title || context.scopeConfluenceSection?.title || 'Scoped requirements'}`, url: context.scopeConfluenceSection?.url, text: prdBody }]
+      : []),
+    // Deliberately NOT mining the technical-spec body as a requirement source. A tech spec describes the
+    // "how" (R-Tree reuse, degree-tiling math, SQL, Mongo persistence mechanics); on ORB-2565 ~48 of 51
+    // spec-derived "requirements" mapped to no acceptance criterion — pure implementation noise that regex
+    // filters can't cleanly separate from behavioral rules. Requirements (the "what") come from Jira + the
+    // matched PRD. The spec still (a) gates this inventory (specPages above), (b) supplies worked-example /
+    // format grounding via buildSourceGroundingExamples, and (c) reaches synthesis as context via
+    // technicalSpecExcerpts — so its concrete formats and details are preserved without inflating the count.
+  ];
+
+  const seen = new Set<string>();
+  const collected: Array<Omit<DirectRequirementTrace, 'id'>> = [];
+  for (const source of sources) {
+    for (const text of splitDirectRequirementCandidates(source.text)) {
+      const key = canonicalize(text);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const disposition: DirectRequirementTrace['disposition'] = OUT_OF_SCOPE_REQUIREMENT_RE.test(text)
+        ? 'out_of_scope'
+        : CLARIFICATION_REQUIREMENT_RE.test(text)
+          ? 'needs_clarification'
+          : 'in_scope';
+      collected.push({
+        text,
+        disposition,
+        sourceKind: source.kind,
+        sourceLocation: source.location,
+        ...(source.url ? { sourceUrl: source.url } : {}),
+        acceptanceCriteriaIds: [],
+        workedExamples: requirementWorkedExamples(text),
+        ...(disposition === 'needs_clarification'
+          ? { clarificationReason: 'The source leaves the required behavior undefined or pending clarification.' }
+          : {}),
+      });
+    }
+  }
+  // Semantic dedup across sources, then assign contiguous ids so the inventory reflects distinct contracts
+  // (not raw restatements) — this count feeds the synthesis target below.
+  return dedupeDirectRequirements(collected).map((requirement, index) => ({ ...requirement, id: `REQ-${index + 1}` }));
+}
+
+export function buildSourceGroundingExamples(
+  context: QaContext
+): Array<Pick<DirectRequirementTrace, 'id' | 'text' | 'sourceKind' | 'sourceLocation' | 'workedExamples'>> {
+  const specPages = (context.confluencePages || []).filter((page) => isTechnicalSpecPage(page, context.scopeConfluenceSection?.pageId));
+  const prdBody =
+    context.scopeAuthority.type === 'matched_prd_subsection' || context.scopeAuthority.type === 'broad_prd_section'
+      ? context.scopeAuthority.body
+      : context.scopeConfluenceSection?.body || '';
+  // Grounding is intentionally extracted from the raw source corpus, not from the requirement inventory.
+  // That lets us reject a code/mechanics sentence as a checklist item while retaining a format template or
+  // worked value embedded in it. Prefer the linked technical spec, then its scoped PRD, then Jira.
+  const sources: Array<{ sourceKind: DirectRequirementTrace['sourceKind']; sourceLocation: string; text: string }> = [
+    ...specPages.map((page) => ({ sourceKind: 'spec' as const, sourceLocation: `Spec: ${page.title || page.id}`, text: page.body || '' })),
+    ...(prdBody
+      ? [{ sourceKind: 'prd' as const, sourceLocation: `PRD: ${context.scopeAuthority.title || context.scopeConfluenceSection?.title || 'Scoped requirements'}`, text: prdBody }]
+      : []),
+    {
+      sourceKind: 'jira',
+      sourceLocation: `Jira: ${context.ticketKey}`,
+      text: context.mainIssue.description || context.mainIssue.renderedDescription || '',
+    },
+  ];
+  const seenExamples = new Set<string>();
+  const grounding: Array<Pick<DirectRequirementTrace, 'id' | 'text' | 'sourceKind' | 'sourceLocation' | 'workedExamples'>> = [];
+  for (const source of sources) {
+    for (const rawLine of normalizeMultilineText(source.text).split('\n')) {
+      const text = normalizeInlineText(rawLine).slice(0, 620);
+      if (!text) continue;
+      const workedExamples = requirementWorkedExamples(text).filter((example) => {
+        const key = canonicalize(example);
+        if (!key || seenExamples.has(key)) return false;
+        seenExamples.add(key);
+        return true;
+      });
+      if (!workedExamples.length) continue;
+      grounding.push({
+        id: `GROUND-${grounding.length + 1}`,
+        text,
+        sourceKind: source.sourceKind,
+        sourceLocation: source.sourceLocation,
+        workedExamples,
+      });
+      if (grounding.length >= 24) return grounding;
+    }
+  }
+  return grounding;
+}
+
+const COVERAGE_FORMAT_CRITERION_RE = /\b(?:administrative area|coverage|percentage)\b[\s\S]*\b(?:format|formatted|decimal places?|hierarchy|full path)\b|\b(?:format|formatted)\b[\s\S]*\b(?:coverage|percentage)\b/i;
+const CONCRETE_COVERAGE_FORMAT_RE = /(?:\bName\s*)?\(\s*X(?:\.X+)?%\s*coverage\s*\)|<[^>]+>[\s\S]{0,80}<[^>]+>[\s\S]{0,40}%\s*coverage|[^"“”]{3,120}\(\s*\d+(?:[.,]\d+)?%\s*coverage\s*\)/i;
+
+function formatGroundingScore(example: string): number {
+  let score = 0;
+  if (/\bName\s*\(\s*X(?:\.X+)?%\s*coverage\s*\)/i.test(example)) score += 100;
+  if (/\(\s*X(?:\.X+)?%\s*coverage\s*\)/i.test(example)) score += 60;
+  if (/\(\s*\d+(?:[.,]\d+)?%\s*coverage\s*\)/i.test(example)) score += 40;
+  if (/,/.test(example)) score += 10;
+  return score;
+}
+
+function preferredCoverageFormatExample(requirements: Array<{ workedExamples?: string[] }>): string {
+  return requirements
+    .flatMap((requirement) => requirement.workedExamples || [])
+    .filter((example) => /%\s*coverage/i.test(example))
+    .sort((left, right) => formatGroundingScore(right) - formatGroundingScore(left) || left.length - right.length)[0] || '';
+}
+
+function restoreSourceFormatGrounding(criteria: ScopedItem[], requirements: Array<{ workedExamples?: string[] }>): ScopedItem[] {
+  const sourceFormat = preferredCoverageFormatExample(requirements);
+  if (!sourceFormat) return criteria;
+  return criteria.map((criterion) => {
+    if (!COVERAGE_FORMAT_CRITERION_RE.test(criterion.text) || CONCRETE_COVERAGE_FORMAT_RE.test(criterion.text)) return criterion;
+    const blankQuotedFormat = /(["“])\s*["”]/;
+    const text = blankQuotedFormat.test(criterion.text)
+      ? criterion.text.replace(blankQuotedFormat, `"${sourceFormat}"`)
+      : `${criterion.text.replace(/[.\s]+$/, '')}. Use the source-defined format "${sourceFormat}".`;
+    return { ...criterion, text };
+  });
+}
+
+export function requirementCriterionMatchScore(requirement: DirectRequirementTrace, criterion: ScopedItem): number {
+  const requirementCanonical = canonicalize(requirement.text);
+  const criterionCanonical = canonicalize(criterion.text);
+  if (!requirementCanonical || !criterionCanonical) return 0;
+  if (requirementCanonical.includes(criterionCanonical) || criterionCanonical.includes(requirementCanonical)) {
+    return 10;
+  }
+  const requirementTokens = directRequirementTokens(requirement.text);
+  const criterionTokens = directRequirementTokens(criterion.text);
+  if (!requirementTokens.size || !criterionTokens.size) return 0;
+  const shared = [...requirementTokens].filter((token) => criterionTokens.has(token));
+  const requirementFamily = directRequirementContractFamily(requirement.text);
+  const criterionFamily = directRequirementContractFamily(criterion.text);
+  // Wording changes across source and AC synthesis (top-2 vs highest/second-highest, clamp vs clamped,
+  // coverage_pct vs coverage percentage). A shared semantic family plus one domain token is sufficient
+  // evidence that the criterion covers the requirement and prevents false omission-repair duplicates.
+  if (
+    requirementFamily &&
+    (requirementFamily === criterionFamily || textContainsContractFamily(criterion.text, requirementFamily)) &&
+    shared.length >= 1
+  ) {
+    return 20 + shared.length;
+  }
+  // Shared domain identifiers are not interchangeable behavior. A clamp rule and a threshold rule both
+  // mention coverage_pct; a flag gate and a latency comparison both mention the same flag. When both
+  // sides have known but different contract families, token overlap must not manufacture coverage.
+  if (requirementFamily && criterionFamily && requirementFamily !== criterionFamily) return 0;
+  const sharedExactIdentifier = shared.some((token) => token.includes('_') || /^v\d+$/.test(token));
+  const requiredOverlap = requirementTokens.size <= 3 ? 1 : 2;
+  // A shared field/table identifier alone is not enough: several independent contracts commonly refer
+  // to the same response field. Require at least one additional behavioral token so one generic AC
+  // cannot claim every source rule about that identifier.
+  if (sharedExactIdentifier && shared.length < 2) return 0;
+  if (shared.length < requiredOverlap) return 0;
+  const requirementCoverage = shared.length / requirementTokens.size;
+  const criterionCoverage = shared.length / criterionTokens.size;
+  if (Math.max(requirementCoverage, criterionCoverage) < 0.45) return 0;
+  return shared.length + Math.min(requirementCoverage, criterionCoverage);
+}
+
+function mapDirectRequirementsToCriteria(requirements: DirectRequirementTrace[], criteria: ScopedItem[]): DirectRequirementTrace[] {
+  const mapped = requirements.map((requirement) => ({ ...requirement, acceptanceCriteriaIds: [] as string[] }));
+  const candidates = mapped
+    .flatMap((requirement, requirementIndex) =>
+      requirement.disposition === 'out_of_scope'
+        ? []
+        : criteria.map((criterion, criterionIndex) => ({
+            requirementIndex,
+            criterionIndex,
+            score: requirementCriterionMatchScore(requirement, criterion),
+          }))
+    )
+    .filter((candidate) => candidate.score > 0)
+    .sort((left, right) => right.score - left.score || left.requirementIndex - right.requirementIndex || left.criterionIndex - right.criterionIndex);
+  // Each requirement maps to its single best-matching criterion. A criterion may be shared by several
+  // requirements (many-to-one): equivalent PRD/spec rules describing one contract legitimately map to the
+  // same AC. The previous 1:1 matching left the second equivalent requirement "unmapped", which then drove
+  // omission repair to synthesize a near-duplicate AC — a primary cause of the count explosion.
+  const assignedRequirements = new Set<number>();
+  for (const candidate of candidates) {
+    if (assignedRequirements.has(candidate.requirementIndex)) continue;
+    mapped[candidate.requirementIndex].acceptanceCriteriaIds = [criteria[candidate.criterionIndex].id];
+    assignedRequirements.add(candidate.requirementIndex);
+  }
+  return mapped;
 }
 
 // Even with the scope-boundary directive, the spec's prominent "Login Isolation" capability leaks into
@@ -1032,17 +1627,79 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     const matched = matchedEndpoints.find((endpoint) => matcher.test(`${endpoint.method || ''} ${endpoint.path || ''} ${endpoint.summary || ''}`));
     return matched ? endpointSurface(matched.method || '', matched.path || '') : '';
   };
+  const firstMentionedCriterionEndpoint = (text: string): { method: string; path: string } | null => {
+    const match = text.match(
+      /\b(GET|POST|PUT|PATCH|DELETE)\s+((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+)|(?:(?:[A-Za-z][A-Za-z0-9_-]*\/)?\/?v\d+\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/i
+    );
+    if (!match) return null;
+    const rawPath = match[2].replace(/[.,;:)\]]+$/, '');
+    const versionedPath = rawPath.match(/(?:^|\/)(v\d+\/.*)$/i)?.[1] || rawPath.replace(/^\/+/, '');
+    const normalizedPath = `/${versionedPath}`;
+    return { method: match[1].toUpperCase(), path: normalizedPath };
+  };
   const firstCriterionEndpoint = (text: string): string => {
-    const match = text.match(/\b(GET|POST|PUT|PATCH|DELETE)\s+((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/i);
-    if (!match) return '';
-    return endpointSurface(match[1], match[2].replace(/[.,;:)\]]+$/, ''));
+    const mentioned = firstMentionedCriterionEndpoint(text);
+    if (!mentioned) return '';
+    const documented = matchedEndpoints.find(
+      (endpoint) =>
+        String(endpoint.method || '').toUpperCase() === mentioned.method &&
+        String(endpoint.path || '').replace(/\/+$/, '') === mentioned.path.replace(/\/+$/, '')
+    );
+    return documented ? endpointSurface(documented.method || '', documented.path || '') : '';
+  };
+  const manualIntegrationPlan = (
+    criterionId: string,
+    reason: string,
+    endpointDowngrade?: { method: string; path: string; reason: string }
+  ): AcceptanceCriteriaExecutionPlanItem => ({
+    criterionId,
+    executionType: 'manual_integration',
+    observableSurface: 'Integration behavior requiring reviewer-selected evidence',
+    reason,
+    coveragePolicy: 'integration_verification',
+    ...(endpointDowngrade ? { endpointDowngrade } : {}),
+  });
+  // A Postman case must always be executable. Do not let broad wording such as "response" or
+  // "result stream" manufacture a fictional endpoint when API docs were intentionally skipped or
+  // did not yield a matching operation. The generation validator requires method + path, so this
+  // guard prevents an otherwise unavoidable provider failure before generation starts.
+  const postmanPlan = (
+    criterionId: string,
+    observableSurface: string,
+    reason: string,
+    proposedEndpoint?: { method: string; path: string } | null
+  ): AcceptanceCriteriaExecutionPlanItem => {
+    if (proposedEndpoint && (!matchedEndpoints.length || !endpointIsDocumented(proposedEndpoint.method, proposedEndpoint.path, matchedEndpoints))) {
+      const downgradeReason = `Endpoint ${proposedEndpoint.method} ${proposedEndpoint.path} is not present in the fetched API contract; Postman generation is prohibited until the contract is verified.`;
+      return manualIntegrationPlan(criterionId, downgradeReason, {
+        ...proposedEndpoint,
+        reason: downgradeReason,
+      });
+    }
+    if (!/\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/\S+/i.test(observableSurface)) {
+      return manualIntegrationPlan(
+        criterionId,
+        'Criterion describes runtime behavior but no concrete HTTP method and path were found; verify it through integration/manual evidence rather than inventing a Postman contract.'
+      );
+    }
+    return {
+      criterionId,
+      executionType: 'postman',
+      observableSurface,
+      reason,
+      coveragePolicy: 'api_assertion',
+    };
   };
 
   return (context.acceptanceCriteria || []).map((criterion): AcceptanceCriteriaExecutionPlanItem => {
     const text = normalizeInlineText(criterion.text);
     const postEndpoint = firstEndpoint(/^POST\b.*\/v1\/analysis\b/i);
     const streamEndpoint = firstEndpoint(/^GET\b.*(?:\/stream\b|analysis\/\{?id\}?\/stream)/i);
+    const summaryEndpoint = firstEndpoint(/^GET\b.*\/v1\/analysis\/\{?id\}?\/summary\b/i);
+    const analysisDetailEndpoint = firstEndpoint(/^GET\b.*\/v1\/analysis\/\{?id\}?\/?$/i);
+    const resultEndpoint = streamEndpoint || summaryEndpoint || analysisDetailEndpoint;
     const criterionEndpoint = firstCriterionEndpoint(text);
+    const proposedCriterionEndpoint = firstMentionedCriterionEndpoint(text);
 
     if (scopeType !== 'api') {
       if (/\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|sql|schema)\b/i.test(text)) {
@@ -1067,13 +1724,14 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
 
       if (
         criterionEndpoint ||
+        proposedCriterionEndpoint ||
         /\b(frontend|front-end|web|ui|screen|render|walkthrough|tour|button|click|global state|local state|app load|opened|next|skip|finish|browser|network|local config|local module)\b/i.test(text)
       ) {
         return {
           criterionId: criterion.id,
           executionType: 'manual_integration',
-          observableSurface: criterionEndpoint
-            ? `Web UI / frontend network behavior (${criterionEndpoint})`
+          observableSurface: criterionEndpoint || proposedCriterionEndpoint
+            ? `Web UI / frontend network behavior (${criterionEndpoint || endpointSurface(proposedCriterionEndpoint?.method || '', proposedCriterionEndpoint?.path || '')})`
             : 'Web UI / frontend runtime behavior',
           reason: 'Criterion is web-scope behavior; verify through frontend BDD/browser evidence rather than Postman-only API evidence.',
           coveragePolicy: 'integration_verification',
@@ -1100,33 +1758,79 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     }
 
     if (/\b(get\s+\/|stream|sse|dataset metadata|output row|dasymetric weight|dasymetric proportion|fallback|response)\b/i.test(text)) {
-      return {
-        criterionId: criterion.id,
-        executionType: 'postman',
-        observableSurface: criterionEndpoint || streamEndpoint || 'GET /v1/analysis/{id}/stream',
-        reason: criterionEndpoint
+      return postmanPlan(
+        criterion.id,
+        criterionEndpoint || resultEndpoint || postEndpoint,
+        criterionEndpoint
           ? 'Criterion is observable through its referenced API endpoint.'
-          : 'Criterion is observable in the analysis result stream response.',
-        coveragePolicy: 'api_assertion',
-      };
+          : 'Criterion is observable through the documented analysis result response.',
+        proposedCriterionEndpoint
+      );
     }
 
-    if (/\b(post\s+\/|submit analysis|request body|payload|optional field|proportion_method|enum values?|default)\b/i.test(text)) {
-      return {
-        criterionId: criterion.id,
-        executionType: 'postman',
-        observableSurface: criterionEndpoint || postEndpoint || 'POST /v1/analysis',
-        reason: criterionEndpoint
+    if (/\b(json\s+array|json\s+object|data_label|response body|http status|status code)\b/i.test(text)) {
+      const observableSurfaces = Array.from(new Set([postEndpoint, resultEndpoint].filter(Boolean)));
+      return postmanPlan(
+        criterion.id,
+        criterionEndpoint || observableSurfaces.join(' or '),
+        criterionEndpoint
+          ? 'Criterion defines a response contract on its referenced API endpoint.'
+          : 'Criterion defines an API response or data-shape contract; verify it through the documented submit/result endpoints.',
+        proposedCriterionEndpoint
+      );
+    }
+
+    // Result contracts are API-observable even when synthesized wording does not literally repeat
+    // "response" or "JSON array". Examples include a returned array's entry shape/order and an output
+    // attribute's single-value/null behavior. Without this guard those criteria fall through to
+    // manual_integration, after which a perfectly valid Postman case is relabeled into an impossible
+    // manual/API hybrid (the ORB-2564 OpenAI fallback regression).
+    const returnedCollectionContract =
+      /\b(?:returned?\s+)?array\b/i.test(text) &&
+      /\b(?:contain|contains|contained|entries|entry|items|item|ordered|sorted|descending|ascending|single|multiple|length|count|null|empty)\b/i.test(text);
+    const nullableResultAttribute =
+      /\b(?:result|output|attribute|field|value|array)\b[\s\S]{0,160}\b(?:null|empty|unavailable|not\s+mapped|outside\s+supported)\b/i.test(text);
+    const structuredReturnedValue =
+      /\b(?:return|returns|returned|result|output)\b/i.test(text) &&
+      /\b(?:attribute|field|array|object|entries|entry|hierarchy|percentage|ordered|sorted)\b/i.test(text);
+    // A formatted value is also a response contract even when the synthesized AC calls it an
+    // "attribute" rather than explicitly saying "response". For example, ORB-2565 requires the
+    // returned coverage attribute to contain hierarchy text plus a percentage in one exact format.
+    // Keep implementation/storage wording out so schema and runtime criteria still use manual plans.
+    const formattedResultAttribute =
+      /\b(?:attribute|field|value)\b/i.test(text) &&
+      /\b(?:contains?|includes?|format(?:ted)?|representation)\b/i.test(text) &&
+      /\b(?:hierarchy|coverage|percentage|path|label|text)\b/i.test(text) &&
+      !/\b(?:database|migration|table|column|schema|etl|repository|worker)\b/i.test(text);
+    if (
+      context.constraints?.apiContractRelevant !== false &&
+      (postEndpoint || resultEndpoint) &&
+      (returnedCollectionContract || nullableResultAttribute || structuredReturnedValue || formattedResultAttribute)
+    ) {
+      return postmanPlan(
+        criterion.id,
+        criterionEndpoint || resultEndpoint || postEndpoint,
+        'Criterion defines observable result-field values, format, collection shape/order, or null behavior in the documented API response.',
+        proposedCriterionEndpoint
+      );
+    }
+
+    if (/\b(post\s+(?:[a-z][a-z0-9_-]*\/)?\/?v\d+\/|submit analysis|request body|payload|optional field|proportion_method|enum values?|default)\b/i.test(text)) {
+      return postmanPlan(
+        criterion.id,
+        criterionEndpoint || postEndpoint,
+        criterionEndpoint
           ? 'Criterion is observable through its referenced API endpoint.'
           : 'Criterion is observable through the submit-analysis request contract.',
-        coveragePolicy: 'api_assertion',
-      };
+        proposedCriterionEndpoint
+      );
     }
 
-    if (
-      /\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|dasymetric_h3_level_8)\b/i.test(text) ||
-      (/\b(?:database|db|ddl|migration|table|index|foreign key)\b/i.test(text) && /\b(?:schema|sql)\b/i.test(text))
-    ) {
+    const explicitlyDatabaseScoped =
+      /\b(database migration|migration|create table|alter table|unique index|covering index|foreign key|database|db|ddl|schema|sql|double precision|etl|backfill|dasymetric(?:_id)?_h3_level_8)\b/i.test(text);
+    const structuredTableOrColumnRule =
+      /\b(table|column)\b/i.test(text) && /\b(non[-\s]?null|nullable|precision|index|constraint|primary key|foreign key)\b/i.test(text);
+    if (explicitlyDatabaseScoped || structuredTableOrColumnRule) {
       return {
         criterionId: criterion.id,
         executionType: 'manual_db',
@@ -1147,13 +1851,19 @@ export function classifyAcceptanceCriteriaExecution(context: QaContext): Accepta
     }
 
     if (context.constraints?.scopeType === 'api' && context.constraints.apiContractRelevant !== false) {
-      return {
-        criterionId: criterion.id,
-        executionType: 'manual_integration',
-        observableSurface: 'Integration behavior requiring reviewer-selected evidence',
-        reason: 'Criterion is backend scope but not clearly tied to a single API response.',
-        coveragePolicy: 'integration_verification',
-      };
+      // An API-scope criterion that isn't explicitly DB / proto / internal-plumbing (all handled above) is
+      // most likely observable in the documented analysis result. Default it to a Postman plan against the
+      // result endpoint so generation can actually cover it. postmanPlan still downgrades to manual only
+      // when no documented endpoint exists — it never invents one. Previously this fell to a vague
+      // manual_integration ("reviewer-selected evidence") plan that generation could NOT cover, which left
+      // ACs uncovered, failed the coverage gate, and forced the slow DeepSeek fallback (the ORB-2565
+      // generate timeout).
+      return postmanPlan(
+        criterion.id,
+        criterionEndpoint || resultEndpoint || postEndpoint,
+        'Backend criterion observable in the documented analysis result; verify via the result endpoint.',
+        proposedCriterionEndpoint
+      );
     }
 
     return {
@@ -1175,11 +1885,14 @@ export async function finalizeAcceptanceCriteria(
   const mainIssueBody = context.mainIssue.description || context.mainIssue.renderedDescription || '';
   const parsedSections = parseMainIssueSections(mainIssueBody);
   const specExcerpts = collectTechnicalSpecExcerpts(context);
+  let directRequirements = buildDirectRequirementInventory(context);
+  const sourceGroundingExamples = buildSourceGroundingExamples(context);
   if (specExcerpts.pages.length) {
     options.logger?.info('context.ac_spec_grounding', {
       jiraKey: context.ticketKey,
       specPages: specExcerpts.pages,
       excerptChars: specExcerpts.text.length,
+      directRequirementCount: directRequirements.length,
     });
   }
 
@@ -1188,25 +1901,39 @@ export async function finalizeAcceptanceCriteria(
   // synthesis defaults to "concise" and collapses the spec's distinct rules back into a few clauses.
   // Push toward one criterion per concrete spec rule instead.
   let granularityTarget = determineContextGranularityTarget(context, parsedSections, mainIssueBody);
-  if (!granularityTarget && specExcerpts.pages.length) {
+  const actionableDirectRequirementCount = directRequirements.filter((requirement) => requirement.disposition !== 'out_of_scope').length;
+  // Abnormal-inventory gate (a gate, NOT a fixed cap): a well-scoped ticket rarely has more than a few
+  // dozen distinct direct contracts. If extraction + dedup still yields an implausible count, the inventory
+  // is noise, so we must NOT force the model to emit that many ACs. Leave the synthesis target at the
+  // deterministic baseline (don't inflate), flag the anomaly for the quality gate, and still generate.
+  const ABNORMAL_DIRECT_REQUIREMENT_COUNT = 40;
+  const abnormalRequirementInventory = actionableDirectRequirementCount > ABNORMAL_DIRECT_REQUIREMENT_COUNT;
+  if (abnormalRequirementInventory) {
+    options.logger?.warn('context.ac_abnormal_requirement_inventory', {
+      jiraKey: context.ticketKey,
+      actionableDirectRequirementCount,
+      ceiling: ABNORMAL_DIRECT_REQUIREMENT_COUNT,
+    });
+  } else if (actionableDirectRequirementCount) {
     granularityTarget = {
-      min: 5,
-      max: 9,
+      min: actionableDirectRequirementCount,
+      max: actionableDirectRequirementCount + 2,
       hint:
-        'A technical specification grounds these criteria. Produce one distinct criterion per concrete spec rule for the in-scope endpoints/behaviors — keep point-in-time vs per-call access checks, per-endpoint or per-RPC enforcement, exact filter semantics, backward-compatibility or null-value edges, and transactional email/URL routing as separate criteria. Do not merge distinct rules into one broad clause.',
+        'A linked technical specification provides an atomic direct-requirement inventory. Produce one criterion for every actionable source rule. Do not compress result, feature-flag, persistence, stream, export, schema, compatibility, null-value, or fallback rules into generic clauses. Rules marked needs_clarification must remain visible and traceable instead of being discarded.',
     };
   }
 
   let finalCriteria = dedupeCriteria(quality.kept.map((criterion) => ({ text: criterion.text, source: criterion.source })));
   let synthesisUsed = false;
   let synthesisFailureReason = '';
+  let synthesisInput: AcceptanceCriteriaSynthesisInput | null = null;
   let synthesisReason = quality.quality === 'strong'
     ? 'Deterministic acceptance criteria were preserved after canonical normalization.'
     : 'Deterministic acceptance criteria were weak, so the final set fell back to deterministic quality-gated output.';
 
   if (options.synthesizer && !(options.skipStrongLlmSynthesis && quality.quality === 'strong')) {
     try {
-      const synthesis = await options.synthesizer({
+      synthesisInput = {
         ticketKey: context.ticketKey,
         mainIssueSummary: context.mainIssue.summary || '',
         mainIssueDescription: normalizeMultilineText(context.mainIssue.description || context.mainIssue.renderedDescription || ''),
@@ -1225,15 +1952,33 @@ export async function finalizeAcceptanceCriteria(
         thinTicketFallbackUsed: context.acceptanceCriteriaDiagnostics.thinTicketFallbackUsed || false,
         prdSubsectionMatchQuality: context.acceptanceCriteriaDiagnostics.prdSubsectionMatchQuality || 'none',
         actualDevScopeGuidance: context.actualDevScopeGuidance,
+        figmaReferences: context.figmaReferences || [],
         targetMinCriteria: granularityTarget?.min,
         targetMaxCriteria: granularityTarget?.max,
         granularityHint: granularityTarget?.hint,
         technicalSpecExcerpts: specExcerpts.text,
+        // When the inventory is abnormal (extraction over-counted), do NOT hand the model a 60+-item
+        // "preserve every rule" checklist — that is what forces one near-duplicate criterion per line.
+        // Pass an empty list so synthesis produces a focused set from the raw ACs + spec excerpts instead.
+        directRequirements: abnormalRequirementInventory
+          ? []
+          : directRequirements.map(({ id, text, sourceKind, sourceLocation, workedExamples }) => ({
+              id,
+              text,
+              sourceKind,
+              sourceLocation,
+              workedExamples,
+            })),
+        // Grounding is deliberately independent from the completeness checklist. Even if an abnormal
+        // inventory suppresses directRequirements, exact source formats and worked values still reach
+        // synthesis and cannot collapse into blank placeholders.
+        groundingExamples: sourceGroundingExamples,
         scopeBoundary: (context.apiContract?.matchedEndpoints || [])
           .map((endpoint) => `${String(endpoint.method || '').toUpperCase()} ${endpoint.path || ''}`.trim())
           .filter(Boolean)
           .join(', '),
-      });
+      };
+      const synthesis = await options.synthesizer(synthesisInput);
       const synthesized = dedupeCriteria(
         (synthesis.acceptanceCriteria || []).map((criterion) => ({
           text: criterion.text,
@@ -1263,18 +2008,92 @@ export async function finalizeAcceptanceCriteria(
     }
   }
 
-  // Not-production-ready gate: raw ACs were not strong (weak or none) AND synthesis did not produce a
-  // usable set (it threw, returned empty, or was not configured). The final AC set is a reduced/noisy
-  // fallback, so generating against it is unsafe. This drives the analyze-stage block (overridable) and
-  // the UI/push guards.
-  const acceptanceCriteriaNotProductionReady = quality.quality !== 'strong' && !synthesisUsed;
-  const acceptanceCriteriaNotProductionReadyReason = acceptanceCriteriaNotProductionReady
-    ? synthesisFailureReason
-      ? `Raw acceptance criteria were ${quality.quality} and LLM synthesis failed (${synthesisFailureReason}); the final set is a reduced deterministic fallback.`
-      : `Raw acceptance criteria were ${quality.quality} and LLM synthesis did not produce a usable set; the final set is a reduced deterministic fallback.`
-    : '';
+  // Not-production-ready gate. Two triggers: (a) raw ACs were not strong AND synthesis produced nothing
+  // usable (reduced fallback); or (b) the requirement inventory was abnormal — extraction over-counted, so
+  // the AC set can't be trusted even though generation still produced one. Both block push (overridable)
+  // and surface in the UI, rather than an abnormal run staying silently production-eligible.
+  const acceptanceCriteriaNotProductionReady = (quality.quality !== 'strong' && !synthesisUsed) || abnormalRequirementInventory;
+  const acceptanceCriteriaNotProductionReadyReason = !acceptanceCriteriaNotProductionReady
+    ? ''
+    : abnormalRequirementInventory
+      ? `Source extraction produced an abnormal requirement inventory (${actionableDirectRequirementCount} items); the acceptance criteria are likely over-generated and must be reviewed before use.`
+      : synthesisFailureReason
+        ? `Raw acceptance criteria were ${quality.quality} and LLM synthesis failed (${synthesisFailureReason}); the final set is a reduced deterministic fallback.`
+        : `Raw acceptance criteria were ${quality.quality} and LLM synthesis did not produce a usable set; the final set is a reduced deterministic fallback.`;
 
   finalCriteria = repairOverMergedCriteria(finalCriteria, granularityTarget);
+
+  // Source inventory is a completeness contract, not merely prompt context. Repair omissions with a
+  // focused re-synthesis pass, then retain the source rule verbatim as a last-resort AC so a model can
+  // never make the suite appear complete by silently dropping a direct technical requirement.
+  directRequirements = mapDirectRequirementsToCriteria(directRequirements, finalCriteria);
+  const missingDirectRequirements = directRequirements.filter(
+    (requirement) => requirement.disposition !== 'out_of_scope' && !requirement.acceptanceCriteriaIds.length
+  );
+  // Skip omission repair when the inventory is abnormal: re-synthesizing for 40+ "missing" noisy rules is
+  // exactly what re-inflates the AC count. The run is already flagged not-production-ready for review.
+  if (!abnormalRequirementInventory && missingDirectRequirements.length && options.synthesizer && synthesisInput) {
+    try {
+      const repair = await options.synthesizer({
+        ...synthesisInput,
+        directRequirements: missingDirectRequirements.map(({ id, text, sourceKind, sourceLocation, workedExamples }) => ({
+          id,
+          text,
+          sourceKind,
+          sourceLocation,
+          workedExamples,
+        })),
+        repairOnlyMissingRequirements: true,
+        existingCriteria: finalCriteria.map(({ id, text }) => ({ id, text })),
+        targetMinCriteria: missingDirectRequirements.length,
+        targetMaxCriteria: missingDirectRequirements.length,
+        granularityHint:
+          'Return exactly one focused criterion per omitted direct requirement. State only the missing observable clause and do not repeat behavior already present in existingCriteria.',
+      });
+      const repairedCandidates = dedupeCriteria(
+        (repair.acceptanceCriteria || []).map((criterion) => ({
+          text: criterion.text,
+          source: `${context.ticketKey} direct-requirement repair`,
+        }))
+      );
+      const usedRepairIndexes = new Set<number>();
+      const repaired = missingDirectRequirements.flatMap((requirement) => {
+        const best = repairedCandidates
+          .map((criterion, index) => ({ criterion, index, score: requirementCriterionMatchScore(requirement, criterion) }))
+          .filter((candidate) => !usedRepairIndexes.has(candidate.index) && candidate.score > 0)
+          .sort((left, right) => right.score - left.score || left.criterion.text.length - right.criterion.text.length)[0];
+        if (!best) return [];
+        usedRepairIndexes.add(best.index);
+        return [best.criterion];
+      });
+      if (repaired.length) {
+        finalCriteria = repairOverMergedCriteria(
+          dedupeCriteria([...finalCriteria, ...repaired].map((criterion) => ({ text: criterion.text, source: criterion.source }))),
+          granularityTarget
+        );
+      }
+    } catch (error) {
+      options.logger?.warn('context.ac_direct_requirement_repair_failed', {
+        jiraKey: context.ticketKey,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  directRequirements = mapDirectRequirementsToCriteria(directRequirements, finalCriteria);
+  const remainingDirectRequirements = directRequirements.filter(
+    (requirement) => requirement.disposition !== 'out_of_scope' && !requirement.acceptanceCriteriaIds.length
+  );
+  if (remainingDirectRequirements.length) {
+    // Do NOT append the raw source line as an AC — that fabricated near-duplicate "ACs" and was the final
+    // amplifier of the count explosion. Leave the requirement unmapped: it stays visible in the traceability
+    // diagnostics and reads as a genuine coverage gap, to be closed by sharpening a real AC rather than by
+    // pasting source prose. The focused repair pass above already had its chance to cover true omissions.
+    options.logger?.warn('context.ac_direct_requirements_unmapped', {
+      jiraKey: context.ticketKey,
+      requirementIds: remainingDirectRequirements.map((requirement) => requirement.id),
+    });
+  }
+
   // Spec-grounded tickets can pull the spec's broader capabilities (e.g. login isolation) into the
   // criteria even when out of this ticket's endpoint scope — drop those deterministically.
   if (specExcerpts.pages.length) {
@@ -1285,6 +2104,20 @@ export async function finalizeAcceptanceCriteria(
       context.ticketKey
     );
   }
+  // Output hygiene: strip empty parentheticals ("X ( )") the model emits when it leaves a value slot blank,
+  // and drop any criterion left effectively empty — prevents a malformed " ( )" AC from shipping.
+  finalCriteria = finalCriteria
+    .map((criterion) => ({ ...criterion, text: criterion.text.replace(/\(\s*\)/g, '').replace(/\s{2,}/g, ' ').trim() }))
+    .filter((criterion) => criterion.text.replace(/[^a-z0-9]/gi, '').length >= 5);
+  finalCriteria = restoreSourceFormatGrounding(finalCriteria, sourceGroundingExamples);
+  // The scope-boundary filter can remove an over-broad criterion. Rebuild the inventory mapping from
+  // the final criterion set so diagnostics and later per-case blockers never point to a removed AC.
+  directRequirements = mapDirectRequirementsToCriteria(directRequirements, finalCriteria);
+  // An in-scope requirement that maps to no criterion is a genuine coverage gap the numeric AC count hides.
+  // (needs_clarification requirements are expected to be unmapped — they are handled by the blocker path.)
+  const unmappedRequirementCount = directRequirements.filter(
+    (requirement) => requirement.disposition === 'in_scope' && !requirement.acceptanceCriteriaIds.length
+  ).length;
   finalCriteria = await attachSourceExcerpts(finalCriteria, context, {
     logger: options.logger,
     llm: options.llm,
@@ -1322,11 +2155,14 @@ export async function finalizeAcceptanceCriteria(
       synthesisFailureReason,
       acceptanceCriteriaNotProductionReady,
       acceptanceCriteriaNotProductionReadyReason,
+      abnormalRequirementInventory,
+      unmappedRequirementCount,
       rawAcceptanceCriteriaQuality: quality.quality,
       rawAcceptanceCriteriaWeakSignals: quality.weakSignals,
       discardedFragmentCount: quality.discarded.length,
       discardedFragmentExamples: quality.discarded.slice(0, 5).map((criterion) => criterion.text),
       crossSourceConflicts,
+      directRequirements,
     },
   };
 }

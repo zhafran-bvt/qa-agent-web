@@ -166,6 +166,26 @@ describe('App utility UI', () => {
     expect(jiraInput.value).toBe('ORB-3157');
   });
 
+  it('lets QA add optional Figma references for an FE analysis', async () => {
+    vi.mocked(api.loadConfig).mockResolvedValueOnce({
+      ...configResponse,
+      authenticated: true,
+      user: 'qa.user',
+    } as any);
+
+    render(<App />);
+
+    await userEvent.click(screen.getByRole('tab', { name: 'Generate' }));
+    await waitFor(() => expect(screen.getByLabelText('Figma design references')).toBeTruthy());
+
+    await userEvent.type(screen.getByLabelText('Jira Ticket Key'), 'ORB-3118');
+    const referenceInput = screen.getByLabelText('Figma design references');
+    await userEvent.type(referenceInput, 'https://www.figma.com/design/abc123/QA-Agent');
+
+    expect((referenceInput as HTMLTextAreaElement).value).toBe('https://www.figma.com/design/abc123/QA-Agent');
+    expect(screen.getByRole('button', { name: 'Analyze Jira + Confluence' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('shows sprint burndown on the home page above QA health', async () => {
     vi.mocked(api.loadConfig).mockResolvedValueOnce({
       ...configResponse,

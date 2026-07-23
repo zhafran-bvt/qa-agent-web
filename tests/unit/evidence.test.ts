@@ -85,7 +85,7 @@ const context: QaContext = {
 const testCase: GeneratedTestCase = {
   id: 'TC-01',
   title: '[Web][Spatial Analysis][ORB-3118] Example',
-  type: 'Happy Path',
+    type: 'BDD',
   jiraReference: 'ORB-3118',
   preconditions: 'User is on the dataset screen.',
   bddScenario: 'Feature: Example\nScenario: Example\nGiven x\nWhen y\nThen z',

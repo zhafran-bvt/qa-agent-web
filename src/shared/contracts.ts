@@ -76,6 +76,8 @@ export interface AnalyzeRequest {
   beAlreadyTested: boolean;
   includeComments: boolean;
   apiDocsUrl?: string;
+  /** Optional QA-supplied Figma URLs used as supplemental frontend design context. */
+  figmaReferences?: string[];
 }
 
 export type QaScopeType = 'web' | 'api' | 'auto';
@@ -223,12 +225,44 @@ export interface CrossSourceConflict {
 
 export type TestExecutionType = 'postman' | 'manual_db' | 'manual_code_review' | 'manual_integration' | 'manual_other';
 
+export type DirectRequirementDisposition = 'in_scope' | 'out_of_scope' | 'needs_clarification';
+
+/**
+ * An atomic requirement extracted from the Jira/PRD/spec source chain. It is kept separately from
+ * synthesized AC wording so the review screen can prove that concrete source rules were not silently
+ * compressed away.
+ */
+export interface DirectRequirementTrace {
+  id: string;
+  text: string;
+  disposition: DirectRequirementDisposition;
+  sourceKind: 'jira' | 'prd' | 'spec';
+  sourceLocation: string;
+  sourceUrl?: string;
+  acceptanceCriteriaIds: string[];
+  workedExamples?: string[];
+  clarificationReason?: string;
+}
+
+export interface CaseClarificationBlocker {
+  requirementId: string;
+  reason: string;
+  sourceLocation: string;
+  sourceUrl?: string;
+}
+
 export interface AcceptanceCriteriaExecutionPlanItem {
   criterionId: string;
   executionType: TestExecutionType;
   observableSurface: string;
   reason: string;
   coveragePolicy: 'api_assertion' | 'db_verification' | 'code_review' | 'integration_verification' | 'manual_verification';
+  /** A source-mentioned endpoint was not present in the fetched API contract, so Postman was prohibited. */
+  endpointDowngrade?: {
+    method: string;
+    path: string;
+    reason: string;
+  };
 }
 
 export interface AcceptanceCriteriaDiagnostics {
@@ -257,12 +291,21 @@ export interface AcceptanceCriteriaDiagnostics {
   // analyze-stage block (overridable) and the UI/push guards.
   acceptanceCriteriaNotProductionReady?: boolean;
   acceptanceCriteriaNotProductionReadyReason?: string;
+  // True when the extracted+deduped direct-requirement inventory is implausibly large (noise leaked past
+  // extraction). The synthesis target falls back to the deterministic baseline rather than the inflated
+  // count; surfaced as a warn-level quality signal, not a hard block.
+  abnormalRequirementInventory?: boolean;
+  // Count of in-scope direct requirements that mapped to no acceptance criterion — a coverage gap the raw
+  // AC count hides. Surfaced as a warn-level quality signal (traceability).
+  unmappedRequirementCount?: number;
   rawAcceptanceCriteriaQuality?: 'none' | 'weak' | 'strong';
   rawAcceptanceCriteriaWeakSignals?: string[];
   discardedFragmentCount?: number;
   discardedFragmentExamples?: string[];
   // Opposite-polarity contradictions between the synthesized criteria and their source corpora (F1).
   crossSourceConflicts?: CrossSourceConflict[];
+  /** Source-rule inventory and its AC mapping for technical-spec traceability. */
+  directRequirements?: DirectRequirementTrace[];
   acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
   cache?: {
     analysisSourceHash?: string;
@@ -294,6 +337,8 @@ export interface QaContext {
   confidenceReasons: string[];
   requiresConfidencePermission: boolean;
   acceptanceCriteriaDiagnostics: AcceptanceCriteriaDiagnostics;
+  /** QA-supplied Figma URLs; kept as links because the design source is external to Jira. */
+  figmaReferences?: string[];
   constraints: {
     feOnly: boolean;
     beAlreadyTested: boolean;
@@ -336,11 +381,15 @@ export interface ScopeSnapshotTranslationResponse {
 export interface GeneratedTestCase {
   id: string;
   title: string;
-  type: string;
+  goal?: string;
+  /** All generated cases use the BDD TestRail template; intent is stored separately in caseIntent. */
+  type: 'BDD';
   executionType?: TestExecutionType;
   caseIntent?: 'positive' | 'negative' | 'edge';
   jiraReference: string;
   preconditions: string;
+  inputs?: string;
+  expectedResult?: string;
   bddScenario: string;
   coversAcceptanceCriteria: string[];
   sourceScope: string[];
@@ -356,6 +405,8 @@ export interface GeneratedTestCase {
     steps: string[];
     expectedResult: string;
   };
+  /** Direct source requirements that prevent this case from being pushed until clarified. */
+  clarificationBlockers?: CaseClarificationBlocker[];
   evidence: TestCaseEvidence;
 }
 
@@ -470,7 +521,13 @@ export interface GenerateQualityEvaluation {
   rawAcceptanceCriteriaQuality: string;
   synthesisUsed: boolean;
   noisyRawAcceptanceCriteria: boolean;
+  abnormalRequirementInventory: boolean;
+  unmappedRequirementCount: number;
   falseGreenCoverageRisk: boolean;
+  unresolvedClarificationCount: number;
+  blockedCaseIds: string[];
+  readyCaseIds: string[];
+  endpointDowngradeCount: number;
   stepTimings?: GenerationStepTiming[];
   qualityGate: 'pass' | 'warn' | 'fail';
 }
@@ -514,6 +571,8 @@ export interface PushRequest extends ValidateRequest {
   approved: boolean;
   sectionId: string;
   generatedRunId?: string;
+  /** The full reviewed suite is sent in testCases; this optional list is the subset selected for this push. */
+  selectedCaseIds?: string[];
   // Acknowledge-to-override: weak (claimed-but-unsubstantiated) coverage does not hard-block the push,
   // but the push only proceeds when the reviewer has explicitly acknowledged it.
   weakCoverageAcknowledged?: boolean;

@@ -1,0 +1,711 @@
+[
+  {
+    "text": "Instead we compute coverage in the app layer, in-memory, reusing the exact same R-Tree the scoring stage already uses. processDatasetsStream already (a) materializes every grid/catchment as an in-memory GeometryRows, and (b) builds a simplefeatures R-Tree over them (buildRTreeFromGrids) which is then queried by every streamed source-dataset feature via traverseGridsWithRTree.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-1"
+  },
+  {
+    "text": "Both output types converge on the same scoringRows + R-Tree before save, so the pass is shared (per-type differences below). Memory-wise the cells are already resident from scoring, so enrichment adds only a small per-cell accumulator; adm boundaries are streamed (buffered or server-side cursor), never indexed into a second R-Tree.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-2"
+  },
+  {
+    "text": "We add two new result columns, adm_area_coverage_1 and adm_area_coverage_2, on both grid and site-profiling results. Each holds a plain string naming one of the top-2 administrative areas (by coverage desc) the grid/catchment intersects, with its coverage percentage relative to the cell area appended as (X.XX% coverage):",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [
+      "AC-3"
+    ],
+    "workedExamples": [],
+    "id": "REQ-3"
+  },
+  {
+    "text": "Both columns are nullable — a grid/catchment outside supported adm regions (or a country with no level mapping) yields null on both, and never blocks the run; a cell touching only one area yields a value on column 1 and null on column 2. They appear in the result table, the map info panel, and the dataset export.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [
+      "AC-5"
+    ],
+    "workedExamples": [],
+    "id": "REQ-4"
+  },
+  {
+    "text": "Finalize: per cell/catchment sort desc and take the top 2; format each into \"Name (X.XX% coverage)\" (top-1 → adm_area_coverage_1, top-2 → adm_area_coverage_2; missing ⇒ nil), append the two string columns (reusing addProportionColumn mechanics), and persist through the unchanged save path.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-5"
+  },
+  {
+    "text": "get_spatial_analysis_schema builds fields via BuildDatasetSchema. To keep the agent's context small — the QNA agent can already resolve adm areas via get_adm_areas_by_grid_ids / search_adm_areas — the adm_area_coverage_1 / adm_area_coverage_2 columns must not appear as queryable fields.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-6"
+  },
+  {
+    "text": "Adaptive step: if instead the run had scattered cells into, say, 300 distinct 0.5° tiles (300 > 128), we'd set S = 1.0° and re-floor — neighboring tiles merge, count drops (~toward 75–150), repeat until ≤ 128 or S hits its ceiling. Clustered inputs (the common case) never trigger this.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-7"
+  },
+  {
+    "text": "The scoring dataset flows through the existing save path — saveScoringDatasetBatches → saveBatchRows → ToRawDataset → convertToMongoDBType(value, \"string\"), whose default arm returns the string as-is. So in the UserDataset.data document each column is stored as a native BSON string:",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-8"
+  },
+  {
+    "text": "Pick S so a tile is comfortably larger than a cell/catchment but small enough that its bbox maps to a bounded number of adm areas — roughly the adm-area diameter at the target level (for id/jp/vn a district/city span, order S ≈ 0.25°–0.5° ≈ ~28–55 km).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-9"
+  },
+  {
+    "text": "The value is already a human-readable one-liner, so it needs no container type and no display hint — a plain scalar string routes through the existing string encoders for Mongo, stream, and export with zero new data-type plumbing and no proto change.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-10"
+  },
+  {
+    "text": "Shortcut — per-input-area: when inputs are few and large (e.g. a handful of selected adm areas or one big polygon), you can skip clustering and emit one envelope per input geometry directly. It's the same query; only the envelope source differs.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-11"
+  },
+  {
+    "text": "The robust, input-type-agnostic default is to derive the envelopes from the generated cells (already in scoringRows + the R-Tree), not from the request's input semantics, by snapping each cell's center to a regular S-degree grid and grouping.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-12"
+  },
+  {
+    "text": "key = the tile the cell's center falls in — key = (floor(lon/S), floor(lat/S)). Pure arithmetic on the point's lon/lat, no H3, no distance math; works uniformly for grid cells (any H3/geohash resolution) and catchments (use the centroid).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-13"
+  },
+  {
+    "text": "Doing it here (not at accumulation) skips the redundant Intersection() compute for the duplicate and needs only one global set — both copies are the identical COALESCE(boundary_p0005, boundary) geometry, so first-seen is authoritative.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-14"
+  },
+  {
+    "text": "Each occupied tile → one envelope (its running bbox); filter with a VALUES … JOIN … ON boundary && env — the same construct the existing grid-intersection query uses — batching envelopes (~100 per query) if there are many tiles:",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-15"
+  },
+  {
+    "text": "Planar area for both terms. Use simplefeatures .Area() (deg²) for numerator and denominator — not GetAreaSizeM2 (that's geodesic m², display-only). Same method → units cancel, matching the existing percentage_intersect_grid.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-16"
+  },
+  {
+    "text": "We use a plain degree grid rather than an H3 parent resolution because a fixed H3 res only \"fits\" one cell size — it doesn't adapt to the grid resolution the run chose, and needs a separate rule for geohash/catchments.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-17"
+  },
+  {
+    "text": "One O(n) pass: for each cell/catchment center (lon, lat), compute key = (floor(lon/S), floor(lat/S)); group by key, keeping a running bbox (min/max lon-lat) per occupied tile. Pure arithmetic — no H3, no distance math.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-18"
+  },
+  {
+    "text": "Request untouched. The engine runs the extra enrichment pass (behind the BE flag) and the persisted result dataset gains the adm_area_coverage_1 / adm_area_coverage_2 columns. Site profiling and grid share the pass.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-19"
+  },
+  {
+    "text": "Name = full path. adm_area.long_name already holds \"Village, District, City, Province\" (built by a write trigger) — reuse directly, no parent_id walk. (Backfill needed only if some rows predate the trigger.)",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-20"
+  },
+  {
+    "text": "An adm area whose bbox straddles two envelopes is returned twice by the loader — de-dup as boundaries stream in, via a global seen set on adm_area_id (or SELECT DISTINCT a.id), before the coverage scatter.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "SELECT DISTINCT"
+    ],
+    "id": "REQ-21"
+  },
+  {
+    "text": "Null rows store nothing / null (both columns, or just column 2 when a single area matched). No new collection, no schema migration on the result side — two extra keys in the same result document.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-22"
+  },
+  {
+    "text": "The pass branches on OutputType only to (a) pick the level-resolution rule and (b) know which ID column identifies a row when writing results back; the accumulator is keyed by GeometryRows.ID.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-23"
+  },
+  {
+    "text": "Keep any area with coverage_pct > 0 (real overlap; drops only degenerate boundary-only touches), sort desc, then keep the top 2 — index 0 → adm_area_coverage_1, index 1 → adm_area_coverage_2.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-24"
+  },
+  {
+    "text": "A spatial-analysis result has no administrative-area context today — a user must manually overlay an adm-area layer to know which province/city/district/village a grid or catchment falls in.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-25"
+  },
+  {
+    "text": "Null-safe (US §2 — never blocks the run): no mapping / no intersection ⇒ both columns null; exactly one area ⇒ column 1 set, column 2 null. Clamp coverage_pct to [0,100]; Contains ⇒ 100.0.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-26"
+  },
+  {
+    "text": "Same rule — snap the catchment centroid: key = (floor(centroid.lon/S), floor(centroid.lat/S)) — then group + envelope exactly as grid, collapsing ~20k catchments into a few tile-envelopes.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-27"
+  },
+  {
+    "text": "level is selected too (site profiling buckets candidates by level for the dynamic step). Filter always on base boundary && (indexed); COALESCE picks the simplified geometry when present.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-28"
+  },
+  {
+    "text": "This is the crux of the change — the values live on the result dataset itself, persisted and re-read like any other column, so nothing is recomputed for the table / info panel / export.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-29"
+  },
+  {
+    "text": "The flowchart branches at OutputType — the shared front (gate → cluster → load) and shared tail (finalize → append → persist) are drawn once; only the match step differs.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-30"
+  },
+  {
+    "text": "Instead add a targeted skip in BuildDatasetSchema: exclude the two columns by name (constants AttributeColumnAdmAreaCoverage1 / AttributeColumnAdmAreaCoverage2).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-31"
+  },
+  {
+    "text": "Geometry. c.geom = cell/catchment polygon, already in scoringRows. a.geom = COALESCE(boundary_p0005, boundary) — simplified when present (nullable).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-32"
+  },
+  {
+    "text": "No MinCoveragePercent floor — the top-2 cap is itself the noise bound, so slivers never surface, and a cell whose largest overlaps are small (e.g.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "No MinCoveragePercent"
+    ],
+    "id": "REQ-33"
+  },
+  {
+    "text": "Grid input can be adm area, catchment, or polygon, and the user can scatter them freely — so we must not assume tidy, few, contiguous inputs.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-34"
+  },
+  {
+    "text": "writeExportAnalyticsRows renders each cell via ConvertDefinedTypeToString → for string calls convertString, which returns the text as-is.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-35"
+  },
+  {
+    "text": "Net: the columns are stored, streamed, and exported, but the agent never sees them in the schema and does not spend context on them.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-36"
+  },
+  {
+    "text": "This also resolves the earlier export-format open item (a string exports as its own text — no raw-JSON vs formatted-list decision).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-37"
+  },
+  {
+    "text": "The set must persist across envelope batches (~100/query), since the two matching envelopes can fall in different batches.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-38"
+  },
+  {
+    "text": "Pick a tile size S (degrees) — the one knob (default derived from the adm-area size at the target level; see Choosing S).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-39"
+  },
+  {
+    "text": "Gate on the BE flag (ADM_AREA_COVERAGE_ENABLED, default off — opt-in until latency is measured; see Decisions).",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-40"
+  },
+  {
+    "text": "And they are now plain string columns, so the earlier \"exclude json-typed columns\" shortcut no longer applies.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-41"
+  },
+  {
+    "text": ") AS e(env) ON a.boundary && e.env -- filter on base boundary (GIST index); select simplified",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-42"
+  },
+  {
+    "text": "if len(cand) > AdmLevelStepUpThreshold (20) and level has a coarser level: level++; continue",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-43"
+  },
+  {
+    "text": "Dynamic per catchment — deepest (village) first, step up when intersecting count > 20.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-44"
+  },
+  {
+    "text": "Build one in-memory adm R-Tree per level (rtree.BulkLoad) for that tile's candidates.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-45"
+  },
+  {
+    "text": "If inputs are sparse but spread wide and occupied tiles exceed a target (e.g.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-46"
+  },
+  {
+    "text": "Only three server-side flows change; all request messages are unchanged.",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-47"
+  },
+  {
+    "text": "MCP — exclude these columns from the agent schema",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-48"
+  },
+  {
+    "text": "Approach — compute in-engine, not per-row query",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-49"
+  },
+  {
+    "text": "true (shown in table / info panel / export)",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [
+      "AC-5"
+    ],
+    "workedExamples": [],
+    "id": "REQ-50"
+  },
+  {
+    "text": "How it is persisted (MongoDB)",
+    "disposition": "in_scope",
+    "sourceKind": "spec",
+    "sourceLocation": "Spec: Spatial Analysis - Administrative Area Coverage on Result",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1869414433/Spatial+Analysis+-+Administrative+Area+Coverage+on+Result",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-51"
+  },
+  {
+    "text": "Previous ly the Administrative Area Coverage information is displayed as a single combined value within one column. This makes it difficult for users to filter, sort, or perform further analysis on individual administrative areas, as multiple coverage entries are stored together in the same field.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "Administrative Area Coverage"
+    ],
+    "id": "REQ-52"
+  },
+  {
+    "text": "Users can only identify administrative areas if they explicitly add and visualize administrative area layers on the map. If users do not use these layers, they might don;t know the administrative areas a grid or catchment related to.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-53"
+  },
+  {
+    "text": "Each column should display the administrative area hierarchy together with its coverage percentage using the following format: Cengkareng Timur, Cengkareng, Jakarta Barat, DKI Jakarta (48.84% coverage)",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "Cengkareng Timur",
+      "Jakarta Barat",
+      "DKI Jakarta"
+    ],
+    "id": "REQ-54"
+  },
+  {
+    "text": "Null values should not block the spatial analysis process. Analysis results still valid and accessible even when administrative area data within the grid/catchment is unavailable.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-55"
+  },
+  {
+    "text": "This attribute can be null when the administrative areas have not been mapped yet or grid/catchment is located outside supported administrative regions",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-56"
+  },
+  {
+    "text": "The attribute may contain multiple administrative areas, display all administrative areas that intersect with a grid or catchment.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [
+      "AC-3"
+    ],
+    "workedExamples": [],
+    "id": "REQ-57"
+  },
+  {
+    "text": "The same administrative area information is also displayed in the Info Panel when a user clicks on a grid or catchment on the map.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [
+      "AC-5"
+    ],
+    "workedExamples": [
+      "Info Panel"
+    ],
+    "id": "REQ-58"
+  },
+  {
+    "text": "Apply this change consistently: Table View (in detail container), Save as Dataset, Data Export File",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "Table View",
+      "Data Export File"
+    ],
+    "id": "REQ-59"
+  },
+  {
+    "text": "Currently, the Spatial Analysis Result Table does not display any administrative area information.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "Spatial Analysis Result Table"
+    ],
+    "id": "REQ-60"
+  },
+  {
+    "text": "Sort administrative areas by coverage percentage in descending order before selecting the top two.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [
+      "AC-3"
+    ],
+    "workedExamples": [],
+    "id": "REQ-61"
+  },
+  {
+    "text": "Information shown in the Info Panel must be consistent with the table data.",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [
+      "AC-5"
+    ],
+    "workedExamples": [
+      "Info Panel"
+    ],
+    "id": "REQ-62"
+  },
+  {
+    "text": "This information also include on download dataset",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-63"
+  },
+  {
+    "text": "If only one administrative area exists, populate:",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [
+      "AC-4"
+    ],
+    "workedExamples": [],
+    "id": "REQ-64"
+  },
+  {
+    "text": "Add new attribute “Adminiatstive Area“",
+    "disposition": "in_scope",
+    "sourceKind": "prd",
+    "sourceLocation": "PRD: [BE] Enhance Spatial Analysis - Add administrative area coverage information on spatial analysis result (site profiling)",
+    "sourceUrl": "https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/1228177422/Spatial+Analysis+Functional+Improvement#2.-As-a-User%2C-I-want-to-see-administrative-info-at-spatial-analysis-result-table",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [
+      "Adminiatstive Area"
+    ],
+    "id": "REQ-65"
+  },
+  {
+    "text": "Please also compare spatial analysis performance/latency when the feature is enabled/disabled",
+    "disposition": "in_scope",
+    "sourceKind": "jira",
+    "sourceLocation": "Jira: ORB-2565",
+    "sourceUrl": "https://bvarta-project.atlassian.net/browse/ORB-2565",
+    "acceptanceCriteriaIds": [],
+    "workedExamples": [],
+    "id": "REQ-66"
+  },
+  {
+    "text": "Add adm. area coverage attribute on spatial analysis result dataset (for site profiling)",
+    "disposition": "in_scope",
+    "sourceKind": "jira",
+    "sourceLocation": "Jira: ORB-2565",
+    "sourceUrl": "https://bvarta-project.atlassian.net/browse/ORB-2565",
+    "acceptanceCriteriaIds": [
+      "AC-1"
+    ],
+    "workedExamples": [],
+    "id": "REQ-67"
+  }
+]

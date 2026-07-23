@@ -10,6 +10,7 @@ interface QaContextOptions {
   apiDocsUrl?: string;
   beAlreadyTested?: boolean;
   includeComments?: boolean;
+  figmaReferences?: string[];
   logger?: Logger;
 }
 
@@ -117,6 +118,36 @@ function normalizeMultilineText(value: unknown): string {
     .replace(/<[^>]+>/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+const MAX_FIGMA_REFERENCES = 8;
+
+function isFigmaReferenceUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (parsed.protocol === 'https:' || parsed.protocol === 'http:') &&
+      (parsed.hostname === 'figma.com' || parsed.hostname.endsWith('.figma.com'));
+  } catch {
+    return false;
+  }
+}
+
+/** Keep only explicit Figma links supplied by QA; never infer or fetch design links automatically. */
+export function normalizeFigmaReferences(values: unknown): string[] {
+  const candidates = Array.isArray(values) ? values : [];
+  const references: string[] = [];
+  const seen = new Set<string>();
+  for (const value of candidates) {
+    for (const part of String(value || '').split(/[\r\n,]+/)) {
+      const reference = part.trim();
+      if (!reference || reference.length > 2000 || !isFigmaReferenceUrl(reference)) continue;
+      if (seen.has(reference)) continue;
+      seen.add(reference);
+      references.push(reference);
+      if (references.length >= MAX_FIGMA_REFERENCES) return references;
+    }
+  }
+  return references;
 }
 
 function stripBracketPrefixes(value: string): string {
@@ -1420,6 +1451,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
     text: [mainIssue.description || '', mainIssue.renderedDescription || '', ...(mainIssue.comments || [])].join('\n'),
     labels: scopeResolutionLabels(mainIssue, classifiedLinkedIssues),
   });
+  const figmaReferences = resolvedScopeType === 'web' ? normalizeFigmaReferences(options.figmaReferences) : [];
 
   const pageRefs = new Map<string, PageRef>();
   addIssueTextPageRefs(pageRefs, mainIssue, 'main');
@@ -1475,7 +1507,13 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
   const maxDescendants = Number(process.env.QA_CONFLUENCE_MAX_DESCENDANTS || 6);
   if (maxDescendants > 0 && typeof client.getConfluencePageChildren === 'function') {
     const existingPageIds = new Set(confluencePages.map((page) => page.id));
-    const specParents = confluencePages.filter((page) => !page.fetchError && page.body && SPEC_PAGE_TITLE_RE.test(page.title || ''));
+  const specParents = confluencePages.filter(
+    (page) =>
+      !page.fetchError &&
+      page.body &&
+      (SPEC_PAGE_TITLE_RE.test(page.title || '') ||
+        (page.sourceRefs || []).some((ref) => ref.relationship === 'spec-descendant' || SPEC_PAGE_TITLE_RE.test(ref.relationship || '')))
+  );
     const childRefs: Array<{ parentId: string; id: string }> = [];
     for (const parent of specParents) {
       if (childRefs.length >= maxDescendants) break;
@@ -1793,6 +1831,7 @@ export async function buildQaContext(client: QaClient, jiraKey: string, options:
       scopeCandidatesRanked: rankedScopeCandidates.length ? rankedScopeCandidates : undefined,
       scopeAnchorResolvedFromChain: anchorResolvedFromChain,
     },
+    figmaReferences,
     constraints: {
       feOnly: resolvedScopeType === 'web' ? options.feOnly !== false : false,
       beAlreadyTested: Boolean(options.beAlreadyTested),

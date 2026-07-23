@@ -1,4 +1,4 @@
-import type { AcceptanceCriteriaExecutionPlanItem, TestExecutionType } from '../../shared/contracts';
+import type { AcceptanceCriteriaExecutionPlanItem, DirectRequirementTrace, TestExecutionType } from '../../shared/contracts';
 
 interface ValidationOptions {
   jiraKey?: string;
@@ -8,10 +8,11 @@ interface ValidationOptions {
   allowNonMainRefs?: boolean;
   acceptanceCriteria?: Array<{ id: string; text: string }>;
   enforceAcceptanceCriteria?: boolean;
-  // Endpoints the API contract actually matched. When provided, postman cases are checked so an
-  // apiSpec path that isn't in the contract is flagged as possibly invented (warning, not error).
+  // Endpoints the API contract actually matched. When provided, a Postman case whose method/path
+  // is absent from the contract is rejected; the execution planner should already have downgraded it.
   matchedEndpoints?: Array<{ method?: string; path?: string }>;
   acceptanceCriteriaExecutionPlan?: AcceptanceCriteriaExecutionPlanItem[];
+  directRequirements?: DirectRequirementTrace[];
 }
 
 interface CoverageOptions {
@@ -28,6 +29,7 @@ interface HttpReference {
 interface GeneratedLikeCase {
   id?: string;
   title?: string;
+  goal?: string;
   type?: string;
   executionType?: TestExecutionType;
   caseIntent?: 'positive' | 'negative' | 'edge';
@@ -35,6 +37,8 @@ interface GeneratedLikeCase {
   refs?: string;
   preconditions?: string;
   custom_preconds?: string;
+  inputs?: string;
+  expectedResult?: string;
   bddScenario?: string;
   coversAcceptanceCriteria?: string[] | string;
   sourceScope?: string[] | string;
@@ -127,13 +131,86 @@ function substantiationTokens(value: string): Set<string> {
   );
 }
 
+function bddAssertionText(value: string): string {
+  const raw = String(value || '');
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const thenIndex = lines.findIndex((line) => /^Then\b/i.test(line));
+  if (thenIndex >= 0) return lines.slice(thenIndex).join(' ');
+  const inlineThen = raw.search(/\bThen\b/i);
+  return inlineThen >= 0 ? raw.slice(inlineThen).trim() : '';
+}
+
+/**
+ * Coverage must be proven by observable outcomes, not by a title, goal, Given/precondition, or a
+ * coverage note that merely repeats the AC. This prevents a case from becoming green because it names
+ * the requirement while its Then/assertions verify something else.
+ */
 function caseEvidenceText(testCase: GeneratedLikeCase): string {
-  const parts: Array<string | undefined> = [testCase.title, testCase.bddScenario, testCase.preconditions || testCase.custom_preconds];
+  const parts: Array<string | undefined> = [testCase.expectedResult, bddAssertionText(testCase.bddScenario || '')];
   const api = testCase.apiSpec;
-  if (api) parts.push(api.method, api.path, api.samplePayload, api.expectedResponse, ...(Array.isArray(api.assertions) ? api.assertions : []));
+  if (api) parts.push(api.expectedResponse, ...(Array.isArray(api.assertions) ? api.assertions : []));
   const mv = testCase.manualVerification;
   if (mv) parts.push(mv.target, mv.expectedResult, ...(Array.isArray(mv.steps) ? mv.steps : []));
   return parts.filter(Boolean).join(' ');
+}
+
+const PRESENCE_REQUIREMENT_RE = /\b(?:return|returns|returned|include|includes|included|contain|contains|contained|expose|exposes|provide|provides|populate|populates|present|exists?|represented)\b/i;
+const PRESENCE_ASSERTION_RE = /\b(?:return|returns|returned|include|includes|included|contain|contains|contained|expose|exposes|provide|provides|populate|populates|present|exists?|represented)\b/i;
+
+function exactCriterionIdentifiers(value: string): string[] {
+  return uniqueValues(
+    Array.from(String(value || '').matchAll(/\b[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)+\b/g)).map((match) => match[0].toLowerCase()),
+    (item) => item
+  );
+}
+
+/** Deterministic contract checks for details that token overlap cannot safely approximate. */
+function hasRequiredCriterionSemantics(criterionText: string, assertionText: string): boolean {
+  const criterion = String(criterionText || '').toLowerCase();
+  const assertion = String(assertionText || '').toLowerCase();
+  if (!assertion.trim()) return false;
+
+  // Exact identifiers become mandatory when the AC defines a response/schema contract. Do not apply
+  // this to every conditional identifier: a separate edge case may legitimately prove the "0 when no
+  // match" branch without repeating the happy-path calculation field name.
+  const identifiers = exactCriterionIdentifiers(criterion);
+  const definesExactContract = /\b(?:field|column|attribute|property|key|named|value\s+of|equals?|set\s+to|contains?|includes?|including)\b/i.test(
+    criterion
+  );
+  if (definesExactContract) {
+    for (const identifier of identifiers) {
+      if (!assertion.includes(identifier)) return false;
+    }
+  }
+  if (/\bjson\s+array\b/i.test(criterion)) {
+    // A schema hint such as `data_type: array` does not prove that the returned business value is an
+    // actual JSON array. Remove metadata-only declarations before looking for an observable value
+    // assertion. This prevents a case from claiming array coverage while checking only renderer/schema
+    // metadata (the exact false-green seen on ORB-2564).
+    const valueAssertion = assertion
+      .replace(/\bdata[_\s-]?type\b\s*(?:is|equals?|=|:)\s*["']?(?:json\s+)?array["']?/gi, ' ')
+      .replace(/["']?(?:data[_-]?type|schema[_-]?type)["']?\s*:\s*["']?(?:json\s+)?array["']?/gi, ' ');
+    if (!/\b(?:json\s+)?array\b/i.test(valueAssertion)) return false;
+
+    // When the criterion explicitly exists to support more than one value, require an observable
+    // cardinality assertion. Merely naming an array still does not prove the multi-value behavior.
+    if (/\b(?:multiple|more\s+than\s+one|two\s+or\s+more)\b/i.test(criterion)) {
+      const assertsMultipleValues =
+        /\b(?:multiple|more\s+than\s+one|two\s+or\s+more|at\s+least\s+(?:two|2))\b/i.test(assertion) ||
+        /\b(?:length|count|size)\b[\s\S]{0,30}(?:>=|greater\s+than\s+or\s+equal\s+to|is|equals?)\s*(?:2|two)\b/i.test(assertion);
+      if (!assertsMultipleValues) return false;
+    }
+  }
+  if (/\bjson\s+object\b/i.test(criterion) && !/\b(?:json\s+)?object\b/i.test(assertion)) return false;
+  if (/\bdouble\s+precision\b/i.test(criterion) && !/\bdouble\s+precision\b/i.test(assertion)) return false;
+  if (/\bnon[-\s]?null\b/i.test(criterion) && !/\bnon[-\s]?null\b|\bnot\s+null\b/i.test(assertion)) return false;
+  if (/\bdescending\b/i.test(criterion) && !/\bdescending\b|\bhighest\b[\s\S]{0,80}\bfirst\b/i.test(assertion)) return false;
+  if (/\bascending\b/i.test(criterion) && !/\bascending\b|\blowest\b[\s\S]{0,80}\bfirst\b/i.test(assertion)) return false;
+  if (PRESENCE_REQUIREMENT_RE.test(criterion) && !PRESENCE_ASSERTION_RE.test(assertion)) return false;
+  return true;
 }
 
 function isSmokeOrEndToEndCase(testCase: GeneratedLikeCase): boolean {
@@ -144,7 +221,7 @@ function isSmokeOrEndToEndCase(testCase: GeneratedLikeCase): boolean {
 
 function extractHttpReferences(value: string): HttpReference[] {
   const refs: HttpReference[] = [];
-  const re = /\b(GET|POST|PUT|PATCH|DELETE)\s+["'`]?((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/gi;
+  const re = /\b(GET|POST|PUT|PATCH|DELETE)\s+(?:request\s+to\s+)?["'`]?((?:\/[A-Za-z0-9._~:/?#[\]@!$&()*+,;=%{}-]+))/gi;
   let match: RegExpExecArray | null;
   while ((match = re.exec(value))) {
     refs.push({
@@ -153,6 +230,35 @@ function extractHttpReferences(value: string): HttpReference[] {
     });
   }
   return uniqueValues(refs, (ref) => `${ref.method} ${normalizeEndpointPath(ref.path)}`);
+}
+
+function httpMethodMentions(value: string): string[] {
+  return uniqueValues(
+    Array.from(String(value || '').matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\b/gi)).map((match) => match[1].toUpperCase()),
+    (item) => item
+  );
+}
+
+function bddActionText(value: string): string {
+  const raw = String(value || '');
+  const lines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const whenIndex = lines.findIndex((line) => /^When\b/i.test(line));
+  if (whenIndex >= 0) {
+    const actionLines: string[] = [];
+    for (const line of lines.slice(whenIndex)) {
+      if (/^Then\b/i.test(line)) break;
+      actionLines.push(line);
+    }
+    return actionLines.join(' ');
+  }
+  const inlineWhen = raw.search(/\bWhen\b/i);
+  if (inlineWhen < 0) return '';
+  const action = raw.slice(inlineWhen);
+  const inlineThen = action.search(/\bThen\b/i);
+  return inlineThen >= 0 ? action.slice(0, inlineThen) : action;
 }
 
 function sameHttpReference(a: HttpReference, b: HttpReference): boolean {
@@ -220,12 +326,36 @@ export function casesLookDuplicative(a: GeneratedLikeCase, b: GeneratedLikeCase)
   const bEndpoint = `${b.apiSpec?.method || ''} ${normalizeEndpointPath(b.apiSpec?.path || '')}`.trim();
   if (aEndpoint && bEndpoint && aEndpoint !== bEndpoint) return false;
 
-  const titleOverlap = overlapCoefficient(duplicateTokens(a.title || ''), duplicateTokens(b.title || ''));
-  const bodyOverlap = overlapCoefficient(
-    duplicateTokens([a.title, a.bddScenario].filter(Boolean).join(' ')),
-    duplicateTokens([b.title, b.bddScenario].filter(Boolean).join(' '))
+  // Similar titles are expected when two cases exercise the same AC in different ways. Treat cases as
+  // duplicates only when their executable setup/action AND their observable assertions are materially
+  // the same. This preserves valid variants while still catching reworded copies of the same test.
+  const setupAndAction = (testCase: GeneratedLikeCase): string =>
+    [
+      testCase.preconditions,
+      testCase.custom_preconds,
+      testCase.inputs,
+      testCase.bddScenario,
+      testCase.apiSpec?.samplePayload,
+      ...(testCase.manualVerification?.steps || []),
+    ]
+      .filter(Boolean)
+      .join(' ');
+  const observableAssertions = (testCase: GeneratedLikeCase): string =>
+    [
+      testCase.expectedResult,
+      bddAssertionText(testCase.bddScenario || ''),
+      testCase.apiSpec?.expectedResponse,
+      ...(testCase.apiSpec?.assertions || []),
+      testCase.manualVerification?.expectedResult,
+    ]
+      .filter(Boolean)
+      .join(' ');
+  const setupOverlap = overlapCoefficient(duplicateTokens(setupAndAction(a)), duplicateTokens(setupAndAction(b)));
+  const assertionOverlap = overlapCoefficient(
+    duplicateTokens(observableAssertions(a)),
+    duplicateTokens(observableAssertions(b))
   );
-  return titleOverlap >= 0.7 || bodyOverlap >= 0.82;
+  return setupOverlap >= 0.9 && assertionOverlap >= 0.92;
 }
 
 // Endpoint provenance: a postman case should reference an endpoint that exists in the matched API
@@ -270,13 +400,17 @@ export function endpointIsDocumented(
  * judged, so they are treated as substantiated (no false penalty).
  */
 export function isAcceptanceCriterionSubstantiated(criterionText: string, caseText: string): boolean {
+  if (!hasRequiredCriterionSemantics(criterionText, caseText)) return false;
   const criterionTokens = substantiationTokens(criterionText);
   if (criterionTokens.size === 0) return true;
   const caseTokens = substantiationTokens(caseText);
+  let overlap = 0;
   for (const token of criterionTokens) {
-    if (caseTokens.has(token)) return true;
+    if (caseTokens.has(token)) overlap += 1;
   }
-  return false;
+  // One distinctive assertion token is sufficient for a focused branch case; exact response/schema
+  // obligations above still require every contract detail (for example JSON array and data_label value).
+  return overlap >= 1;
 }
 
 export function validateCase(testCase: GeneratedLikeCase, options: ValidationOptions = {}) {
@@ -310,6 +444,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
   if (!refs) errors.push('Jira reference is required.');
   if (!preconditions) errors.push('Preconditions are required.');
   if (!type) errors.push('Type is required.');
+  if (type && type !== 'BDD') errors.push("Type must be the fixed 'BDD' value; use caseIntent for Positive, Negative, or Edge.");
   if (enforceAcceptanceCriteria && hasDetectedAcceptanceCriteria && !coversAcceptanceCriteria.length) {
     errors.push('Test case must map to at least one acceptance criterion.');
   }
@@ -370,10 +505,51 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
           `Acceptance criterion ${criterionId} is classified as ${plannedExecution.executionType} (${plannedExecution.observableSurface}) but this case is ${executionType}.`
         );
       }
+      if (scopeType === 'api' && plannedExecution?.executionType === 'postman' && executionType === 'postman') {
+        const method = normalizeText(testCase.apiSpec?.method).toUpperCase();
+        const path = normalizeText(testCase.apiSpec?.path);
+        const plannedRefs = extractHttpReferences(plannedExecution.observableSurface || '');
+        if (method && path && plannedRefs.length && !plannedRefs.some((ref) => sameHttpReference(ref, { method, path }))) {
+          errors.push(
+            `Acceptance criterion ${criterionId} must be asserted on ${plannedRefs.map((ref) => `${ref.method} ${ref.path}`).join(' or ')}, but apiSpec uses ${method} ${path}.`
+          );
+        }
+      }
       if (criterionText && !isAcceptanceCriterionSubstantiated(criterionText, evidenceText)) {
         warnings.push(`Acceptance criterion ${criterionId} is claimed but not substantiated by the case steps/assertions.`);
       }
     }
+  }
+
+  const mappedDirectRequirements = (options.directRequirements || []).filter(
+    (requirement) =>
+      requirement.disposition !== 'out_of_scope' &&
+      requirement.acceptanceCriteriaIds.some((criterionId) => coversAcceptanceCriteria.includes(normalizeAcceptanceCriteriaId(criterionId)))
+  );
+  const fixtureAndAssertionText = [
+    testCase.title,
+    testCase.preconditions,
+    testCase.custom_preconds,
+    testCase.inputs,
+    testCase.bddScenario,
+    testCase.apiSpec?.samplePayload,
+    caseEvidenceText(testCase),
+    ...(testCase.manualVerification?.steps || []),
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const workedExamples = mappedDirectRequirements.flatMap((requirement) => requirement.workedExamples || []);
+  if (workedExamples.length) {
+    const caseText = fixtureAndAssertionText.toLowerCase();
+    const reusesSourceExample = workedExamples.some((example) => caseText.includes(String(example || '').trim().toLowerCase()));
+    if (!reusesSourceExample) {
+      errors.push(`Case must reuse an applicable worked example from the mapped source requirement (${workedExamples.slice(0, 3).join(', ')}).`);
+    }
+  }
+  const directSourceText = mappedDirectRequirements.map((requirement) => requirement.text).join(' ');
+  const syntheticBrand = fixtureAndAssertionText.match(/\b(?:Acme|Northwind|Globex|Initech|Umbrella|Contoso|Fabrikam)(?:\s+[A-Z][A-Za-z0-9-]+)?\b/i)?.[0];
+  if (syntheticBrand && !directSourceText.toLowerCase().includes(syntheticBrand.toLowerCase())) {
+    errors.push(`Case uses invented fixture name "${syntheticBrand}"; reuse a source example or a neutral API-contract identifier.`);
   }
 
   if (scopeType === 'api' && executionType === 'postman') {
@@ -389,9 +565,20 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
     if (method && path && !bddLower.includes(method.toLowerCase()) && !bdd.includes(path)) {
       warnings.push('BDD scenario should mention the API method or path from apiSpec.');
     }
-    if (method && path && !endpointIsDocumented(method, path, matchedEndpoints)) {
-      warnings.push(
-        `apiSpec endpoint ${method} ${path} is not in the matched API contract; verify it against the API docs or note it as assumed in preconditions.`
+    if (method) {
+      const titleMethods = httpMethodMentions(title);
+      const contradictoryTitleMethods = titleMethods.filter((titleMethod) => titleMethod !== method);
+      if (contradictoryTitleMethods.length) {
+        errors.push(
+          `Title references ${contradictoryTitleMethods.join(', ')} but apiSpec uses ${method}; use one consistent HTTP method.`
+        );
+      }
+    }
+    // A fetched API contract is authoritative for a Postman case. The execution planner downgrades
+    // these criteria before generation; keep this server-side error as a direct-call safety net.
+    if (method && path && Array.isArray(options.matchedEndpoints) && !endpointIsDocumented(method, path, matchedEndpoints)) {
+      errors.push(
+        `apiSpec endpoint ${method} ${path} is not in the matched API contract; use manual integration until the endpoint is verified.`
       );
     }
     if (method && path) {
@@ -399,7 +586,7 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
       const bddRefs = extractHttpReferences(bdd);
       const unmatchedRefs = bddRefs.filter((ref) => !sameHttpReference(ref, apiSpecRef));
       if (unmatchedRefs.length) {
-        warnings.push(
+        errors.push(
           `BDD scenario exercises additional endpoint(s) ${unmatchedRefs.map((ref) => `${ref.method} ${ref.path}`).join(', ')} not represented by apiSpec; split the case or add multi-step API metadata before push.`
         );
       }
@@ -427,6 +614,20 @@ export function validateCase(testCase: GeneratedLikeCase, options: ValidationOpt
       errors.push(`${label} case must include manualVerification.steps.`);
     }
     if (!expectedResult) errors.push(`${label} case must include manualVerification.expectedResult.`);
+    const titleMethods = httpMethodMentions(title);
+    const actionRefs = extractHttpReferences(bddActionText(bdd));
+    if (titleMethods.length || actionRefs.length) {
+      const mentioned = uniqueValues(
+        [
+          ...titleMethods,
+          ...actionRefs.map((ref) => `${ref.method} ${ref.path}`),
+        ],
+        (item) => item
+      );
+      errors.push(
+        `${label} case explicitly exercises API ${mentioned.join(', ')}; use executionType postman with a matching apiSpec method/path.`
+      );
+    }
   }
 
   // Cross-field integrity: the structured payload should agree with the claimed executionType, so a
@@ -490,16 +691,18 @@ export function trulyUncoveredCriteria(coverage: {
 // valid/invalid, success/failure, fallback/no-data, etc. "When X happens, return Y" is not enough on its
 // own; many ACs are single-direction requirements. Manual DB/code/internal verification items are also not
 // branch matrices, so execution-plan metadata is used to avoid false polarity failures.
-const CONDITIONAL_TRIGGER_RE = /\b(?:when|if|unless|otherwise|else|disabled|enabled|missing|empty|invalid|blank|rejected|allowed|zero|null|none|fallback|fail(?:s|ed)?|error)\b/i;
 const ADVERSE_BRANCH_RE =
   /\b(?:disabled|missing|empty|invalid|blank|reject(?:ed|s)?|fail(?:s|ed|ure)?|error|denied|unauthori[sz]ed|forbidden|not\s+found|not\s+accessible|inaccessible|zero|null|none|fallback|without)\b|\b0\b/i;
 const NO_DATA_BRANCH_RE = /\bno\s+(?:cell|cells|record|records|result|results|data|match|matches|row|rows|item|items|module|modules|access|token|payload|body|value|values|area|artifact|artifacts)\b/i;
 const EXPLICIT_TWO_SIDED_BRANCH_RE =
   /\b(?:otherwise|else)\b|(?:\bvalid\b[\s\S]{0,120}\binvalid\b)|(?:\binvalid\b[\s\S]{0,120}\bvalid\b)|(?:\bsuccess(?:ful)?\b[\s\S]{0,120}\bfail(?:s|ed|ure)?\b)|(?:\bfail(?:s|ed|ure)?\b[\s\S]{0,120}\bsuccess(?:ful)?\b)|(?:\benabled\b[\s\S]{0,120}\bdisabled\b)|(?:\bdisabled\b[\s\S]{0,120}\benabled\b)|(?:\bmatch(?:es|ed)?\b[\s\S]{0,120}\bmismatch(?:es|ed)?\b)|(?:\bmismatch(?:es|ed)?\b[\s\S]{0,120}\bmatch(?:es|ed)?\b)|(?:\bpresent\b[\s\S]{0,120}\babsent\b)|(?:\babsent\b[\s\S]{0,120}\bpresent\b)|(?:\bwith\b[\s\S]{0,120}\bwithout\b)|(?:\bwithout\b[\s\S]{0,120}\bwith\b)/i;
+const EXPLICIT_PAIRED_CONDITION_RE = /\b(?:when|if)\b[\s\S]{0,180}\b(?:when|if)\b/i;
 
 function hasPolaritySensitiveSemantics(text: string): boolean {
-  if (!CONDITIONAL_TRIGGER_RE.test(text)) return false;
-  return ADVERSE_BRANCH_RE.test(text) || NO_DATA_BRANCH_RE.test(text) || EXPLICIT_TWO_SIDED_BRANCH_RE.test(text);
+  // A single branch such as "when there is one area, return the second field empty" is an edge
+  // requirement, not proof that a second polarity belongs to the SAME AC.
+  if (EXPLICIT_TWO_SIDED_BRANCH_RE.test(text)) return true;
+  return EXPLICIT_PAIRED_CONDITION_RE.test(text) && (ADVERSE_BRANCH_RE.test(text) || NO_DATA_BRANCH_RE.test(text));
 }
 
 function requiresSinglePolarityCoverage(entry: { text: string }, plannedExecution?: AcceptanceCriteriaExecutionPlanItem): boolean {

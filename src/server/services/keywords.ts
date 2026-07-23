@@ -51,7 +51,7 @@ export const API_SCOPE_VERB_RE = new RegExp(`(${API_SCOPE_VERB_FRAGMENTS.join('|
 // spec-grounding (acceptance-criteria.ts) and the descendant-page expansion (context-builder.ts) so
 // the two can't drift on what counts as a "spec" page.
 export const SPEC_PAGE_TITLE_RE =
-  /\b(technical spec|tech spec|technical design|tech design|engineering design|solution design|specification|design doc|rfc)\b/i;
+  /\b(technical spec|tech spec|technical design|tech design|technical doc(?:ument)?|tech doc(?:ument)?|engineering design|solution design|specification|design doc|rfc)\b/i;
 
 // Polarity axes for cross-source conflict detection (F1). A conflict is flagged when a synthesized
 // acceptance criterion and a line from a source corpus describe the SAME subject but resolve to

@@ -7,6 +7,7 @@ import {
   extractAcceptanceCriteriaFromText,
   extractConfluencePageRefsFromText,
   isolateStorySection,
+  normalizeFigmaReferences,
   parseConfluenceReference,
 } from '../../src/server/services/context-builder';
 
@@ -27,6 +28,21 @@ test('extracts Confluence page links from Jira text', () => {
       relationship: '',
     },
   ]);
+});
+
+test('keeps only QA-supplied Figma URLs as design references', () => {
+  assert.deepEqual(
+    normalizeFigmaReferences([
+      'https://www.figma.com/design/abc123/QA-Agent?node-id=1-2',
+      'https://example.com/not-figma',
+      'https://www.figma.com/design/abc123/QA-Agent?node-id=1-2',
+      'https://www.figma.com/proto/xyz789/Prototype',
+    ]),
+    [
+      'https://www.figma.com/design/abc123/QA-Agent?node-id=1-2',
+      'https://www.figma.com/proto/xyz789/Prototype',
+    ]
+  );
 });
 
 test('BUG-07: tags a link introduced as the design doc as spec-descendant', () => {
@@ -193,6 +209,35 @@ test('dedupes acceptance criteria between plain text and rendered HTML list mark
       'Adm Area filter follows the existing Global Area Filter sync',
     ]
   );
+});
+
+test('carries QA-supplied Figma references into FE context without auto-discovering links', async () => {
+  const issue = {
+    key: 'ORB-3118',
+    summary: '[FE] Add Admin Area filter',
+    description: 'AC:\n1. The filter is visible in the web flow.',
+    renderedDescription: '',
+    linkedIssues: [],
+    subtasks: [],
+    comments: [],
+    parent: { summary: 'Spatial Analysis', issueType: 'Epic' },
+  };
+  const client = {
+    getIssue: async () => issue as any,
+    getRemoteLinks: async () => [],
+    getConfluencePage: async () => ({ id: '1', title: 'unused', body: '' }),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-3118', {
+    includeComments: true,
+    figmaReferences: [
+      'https://www.figma.com/design/abc123/QA-Agent',
+      'https://example.com/not-figma',
+    ],
+  });
+
+  assert.deepEqual(context.figmaReferences, ['https://www.figma.com/design/abc123/QA-Agent']);
 });
 
 test('isolates only the targeted story section from a multi-story PRD page', () => {
@@ -1413,4 +1458,44 @@ test('BUG-06: expands immediate children of a spec page into context as spec-des
   assert.ok(child, 'spec child page should be added to context');
   assert.equal(child?.sourceRefs?.some((ref) => ref.relationship === 'spec-descendant'), true);
   assert.match(String(child?.body), /each query RPC must validate access/);
+});
+
+test('Tech Doc remote-link label makes a generically titled page and its children technical-spec sources', async () => {
+  const issue = {
+    key: 'ORB-2565',
+    summary: '[BE] Administrative area coverage',
+    description: 'Implement the linked design requirements.',
+    renderedDescription: '',
+    linkedIssues: [],
+    subtasks: [],
+    comments: [],
+    issueType: 'Task',
+  };
+  const client = {
+    getIssue: async () => issue as any,
+    getRemoteLinks: async () => [
+      {
+        relationship: 'Tech Doc',
+        object: {
+          title: 'Administrative Area Coverage Design',
+          url: 'https://bvarta-project.atlassian.net/wiki/spaces/ORB/pages/2565001/Administrative+Area+Coverage',
+        },
+      },
+    ],
+    getConfluencePage: async (pageId: string) => ({
+      id: pageId,
+      title: pageId === '2565001' ? 'Administrative Area Coverage Design' : 'Response Fields',
+      body: pageId === '2565001' ? 'Design overview.' : 'The response must include adm_area_coverage_1.',
+    }),
+    getConfluencePageChildren: async (pageId: string) => (pageId === '2565001' ? [{ id: '2565002', title: 'Response Fields' }] : []),
+    getConfluenceComments: async () => [],
+  };
+
+  const context = await buildQaContext(client as any, 'ORB-2565', { includeComments: false });
+  const parent = context.confluencePages.find((page) => page.id === '2565001');
+  const child = context.confluencePages.find((page) => page.id === '2565002');
+
+  assert.equal(parent?.sourceRefs?.some((ref) => ref.relationship === 'Tech Doc'), true);
+  assert.ok(child, 'Tech Doc children should be expanded even when the parent title has no spec keyword');
+  assert.equal(child?.sourceRefs?.some((ref) => ref.relationship === 'spec-descendant'), true);
 });

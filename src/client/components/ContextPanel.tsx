@@ -44,7 +44,7 @@ function renderKeyValueRows(context: QaContext, translation: ScopeSnapshotTransl
   ];
 }
 
-type SourceIconName = 'issue' | 'linked' | 'parent' | 'docs' | 'comments' | 'prd';
+type SourceIconName = 'issue' | 'linked' | 'parent' | 'docs' | 'comments' | 'prd' | 'figma';
 
 interface ScopeSourceChip {
   key: SourceIconName;
@@ -55,7 +55,7 @@ interface ScopeSourceChip {
 }
 
 function scopeSourceChips(context: QaContext): ScopeSourceChip[] {
-  return [
+  const chips: ScopeSourceChip[] = [
     { key: 'issue', label: 'Issue', count: 1 },
     { key: 'linked', label: 'Linked', count: context.linkedIssues.length },
     { key: 'parent', label: 'Parent', count: context.scopeParentIssue ? 1 : 0, boolean: true },
@@ -63,6 +63,10 @@ function scopeSourceChips(context: QaContext): ScopeSourceChip[] {
     { key: 'comments', label: 'Comments', count: context.mainIssue.comments?.length || 0 },
     { key: 'prd', label: 'PRD', count: context.scopeConfluenceSection ? 1 : 0, boolean: true },
   ];
+  if (context.constraints.scopeType === 'web') {
+    chips.push({ key: 'figma', label: 'Figma', count: context.figmaReferences?.length || 0 });
+  }
+  return chips;
 }
 
 const SOURCE_ICONS: Record<SourceIconName, ReactElement> = {
@@ -87,6 +91,12 @@ const SOURCE_ICONS: Record<SourceIconName, ReactElement> = {
   ),
   comments: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
   prd: <path d="M4 5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z" />,
+  figma: (
+    <>
+      <path d="M4 7h16v10H4z" />
+      <path d="M8 11h8M8 14h5" />
+    </>
+  ),
 };
 
 function SourceChipIcon({ name }: { name: SourceIconName }) {
@@ -233,6 +243,22 @@ export function ContextPanel({
               })}
             </div>
           </div>
+
+          {context.constraints.scopeType === 'web' && context.figmaReferences?.length ? (
+            <div className="scope-design-references">
+              <p className="section-label">{t.figmaReferences}</p>
+              <ul className="design-reference-list">
+                {context.figmaReferences.map((reference) => (
+                  <li key={reference}>
+                    <a href={reference} target="_blank" rel="noreferrer">
+                      {reference}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+              <p className="design-reference-hint">{t.figmaReferencesHint}</p>
+            </div>
+          ) : null}
 
           <div className="scope-stories">
             <p className="section-label">{t.userStories}</p>

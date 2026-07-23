@@ -15,7 +15,6 @@ import {
   translateScopeSnapshot,
   validateCases,
 } from './api';
-import { qualityGateReasons } from './quality';
 import { AnalyzePanel } from './components/AnalyzePanel';
 import { ApprovalPanel } from './components/ApprovalPanel';
 import { AddToRunCard } from './components/AddToRunCard';
@@ -128,6 +127,7 @@ export default function App() {
   const [generatedRunId, setGeneratedRunId] = useState<string>('');
   const [pendingGeneration, setPendingGeneration] = useState<PendingGeneration | null>(null);
   const [qualityEvaluation, setQualityEvaluation] = useState<GenerateQualityEvaluation | null>(null);
+  const [selectedPushCaseIds, setSelectedPushCaseIds] = useState<string[]>([]);
   const [ticketSuggestions, setTicketSuggestions] = useState<SuggestedTicket[]>([]);
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [suggestionsError, setSuggestionsError] = useState('');
@@ -233,7 +233,30 @@ export default function App() {
   const invalidCount = useMemo(() => validation.filter((item) => !item.valid).length, [validation]);
   const t = uiText[lang];
   const toastText = uiText[lang].toast;
+  const reviewMode = view === 'generate' && testCases.length > 0;
   const casesValid = useMemo(() => testCases.length > 0 && validation.every((item) => item.valid), [testCases.length, validation]);
+  const blockedCaseIds = useMemo(() => {
+    const reported = new Set(qualityEvaluation?.blockedCaseIds || []);
+    for (const testCase of testCases) {
+      if (testCase.clarificationBlockers?.length) reported.add(testCase.id);
+    }
+    return testCases.filter((testCase) => reported.has(testCase.id)).map((testCase) => testCase.id);
+  }, [qualityEvaluation?.blockedCaseIds, testCases]);
+  const blockedCaseIdSet = useMemo(() => new Set(blockedCaseIds), [blockedCaseIds]);
+  const readyCases = useMemo(() => testCases.filter((testCase) => !blockedCaseIdSet.has(testCase.id)), [blockedCaseIdSet, testCases]);
+  const selectedPushCases = useMemo(() => {
+    const selected = new Set(selectedPushCaseIds);
+    return readyCases.filter((testCase) => selected.has(testCase.id));
+  }, [readyCases, selectedPushCaseIds]);
+  const selectedPushCasesValid = useMemo(() => {
+    const validById = new Map(validation.map((item) => [item.id, item.valid]));
+    return selectedPushCases.length > 0 && selectedPushCases.every((testCase) => validById.get(testCase.id) === true);
+  }, [selectedPushCases, validation]);
+  const readyCaseIdKey = readyCases.map((testCase) => testCase.id).join('|');
+  useEffect(() => {
+    const readyIds = new Set(readyCases.map((testCase) => testCase.id));
+    setSelectedPushCaseIds((current) => current.filter((caseId) => readyIds.has(caseId)));
+  }, [readyCaseIdKey]);
   const coverageComplete = useMemo(() => {
     if (!coverageEnforced || !coverage) return true;
     // An AC that is uncovered only because its sole claim was flagged weak is overrideable via the
@@ -245,14 +268,14 @@ export default function App() {
   const stepperSteps = useMemo<Array<{ key: WorkflowStepKey; state: WorkflowStepState }>>(() => {
     const analyzeDone = Boolean(context);
     const scopeDone = testCases.length > 0;
-    const reviewReady = casesValid && coverageComplete;
+    const reviewReady = selectedPushCasesValid;
     const order: WorkflowStepKey[] = ['analyze', 'scope', 'review', 'approve'];
     const activeIndex = !analyzeDone ? 0 : !scopeDone ? 1 : !reviewReady ? 2 : 3;
     return order.map((key, index) => ({
       key,
       state: index < activeIndex ? 'done' : index === activeIndex ? 'active' : 'upcoming',
     }));
-  }, [context, testCases.length, casesValid, coverageComplete]);
+  }, [context, testCases.length, selectedPushCasesValid]);
   const activeWorkflowLabel = useMemo(() => {
     const active = stepperSteps.find((step) => step.state === 'active')?.key || 'analyze';
     return uiText[lang].stepper[active];
@@ -272,11 +295,11 @@ export default function App() {
   const pushBlocker = useMemo(() => {
     if (pushing) return t.approval.blockerPushing;
     if (!testCases.length) return t.approval.blockerNoCases;
-    if (!casesValid) return t.approval.blockerCasesInvalid;
-    if (!coverageComplete) return t.approval.blockerCoverage;
+    if (!selectedPushCases.length) return t.approval.blockerNoReadyCases;
+    if (!selectedPushCasesValid) return t.approval.blockerSelectedCasesInvalid;
     if (!approved) return t.approval.blockerApproval;
     return '';
-  }, [approved, casesValid, coverageComplete, pushing, t.approval, testCases.length]);
+  }, [approved, pushing, selectedPushCases.length, selectedPushCasesValid, t.approval, testCases.length]);
 
   function removeToast(id: number) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
@@ -307,12 +330,13 @@ export default function App() {
     weakAckOverride?: boolean,
     singlePolarityAckOverride?: boolean,
     conflictAckOverride?: boolean,
-    qualityGateAckOverride?: boolean
+    qualityGateAckOverride?: boolean,
+    approvedOverride?: boolean
   ): PushRequest | null {
     // Push and preflight must receive identical payloads so the duplicate review reflects the final write.
     if (!context) return null;
     return {
-      approved,
+      approved: approvedOverride ?? approved,
       sectionId,
       generatedRunId,
       jiraKey: context.ticketKey,
@@ -321,7 +345,8 @@ export default function App() {
       scopeType: context.constraints.scopeType,
       acceptanceCriteria: context.acceptanceCriteria,
       enforceAcceptanceCriteria: coverageEnforced,
-      testCases: casesToPush,
+      testCases,
+      selectedCaseIds: casesToPush.map((testCase) => testCase.id),
       // The analyzed context carries the AC diagnostics (raw quality / synthesisUsed) the backup quality
       // gate needs; without it the server guard cannot fire, so send it explicitly.
       context,
@@ -342,14 +367,16 @@ export default function App() {
     weakAckOverride?: boolean,
     singlePolarityAckOverride?: boolean,
     conflictAckOverride?: boolean,
-    qualityGateAckOverride?: boolean
+    qualityGateAckOverride?: boolean,
+    approvedOverride?: boolean
   ) {
     const payload = buildPushPayload(
       casesToPush,
       weakAckOverride,
       singlePolarityAckOverride,
       conflictAckOverride,
-      qualityGateAckOverride
+      qualityGateAckOverride,
+      approvedOverride
     );
     if (!payload) return;
     let response;
@@ -365,7 +392,7 @@ export default function App() {
           pushToast('info', toastText.pushErrorTitle, pushError.message);
           return;
         }
-        await submitPush(casesToPush, weakAckOverride, singlePolarityAckOverride, conflictAckOverride, true);
+        await submitPush(casesToPush, weakAckOverride, singlePolarityAckOverride, conflictAckOverride, true, approvedOverride);
         return;
       }
       throw pushError;
@@ -411,6 +438,7 @@ export default function App() {
       setGeneratedRunId('');
       setPendingGeneration(null);
       setDuplicateReview(null);
+      setSelectedPushCaseIds([]);
       setLang('en');
       setScopeTranslation(null);
       pushToast('success', toastText.analyzeSuccessTitle, toastText.analyzeSuccessMessage(response.context.ticketKey));
@@ -459,6 +487,11 @@ export default function App() {
     setPushResults(t.runStatus.generatedWith(response.provider, response.model));
     setGeneratedRunId(response.runId || '');
     setQualityEvaluation(response.qualityEvaluation || null);
+    const blockedIds = new Set([
+      ...(response.qualityEvaluation?.blockedCaseIds || []),
+      ...response.testCases.filter((testCase) => testCase.clarificationBlockers?.length).map((testCase) => testCase.id),
+    ]);
+    setSelectedPushCaseIds(response.testCases.filter((testCase) => !blockedIds.has(testCase.id)).map((testCase) => testCase.id));
     setDuplicateReview(null);
   }
 
@@ -515,13 +548,18 @@ export default function App() {
     setForm((current) => ({ ...current, jiraKey: ticketKey }));
   }
 
-  async function handlePush() {
+  async function handlePush(approvalOverride?: boolean) {
     // Always run duplicate preflight before the final push; only selected non-duplicates are submitted afterward.
     if (!context) return;
+    if (approvalOverride) setApproved(true);
     setPushing(true);
     setError('');
     try {
-      const payload = buildPushPayload();
+      const casesToPush = selectedPushCases;
+      if (!casesToPush.length) {
+        throw new Error(t.approval.blockerNoReadyCases);
+      }
+      const payload = buildPushPayload(casesToPush, undefined, undefined, undefined, undefined, approvalOverride);
       if (!payload) return;
       const preflight = await preflightPush(payload);
       // Acknowledge-to-override: if coverage is claimed but unsubstantiated, require an explicit
@@ -565,11 +603,11 @@ export default function App() {
       if (preflight.duplicateLookupSkipped) {
         setPushResults(preflight.duplicateLookupSkipped.reason);
         pushToast('info', toastText.duplicateLookupSkippedTitle, preflight.duplicateLookupSkipped.reason);
-        await submitPush(testCases, weakAck, singleAck, conflictAck);
+        await submitPush(casesToPush, weakAck, singleAck, conflictAck, undefined, approvalOverride);
         return;
       }
       if (preflight.duplicatesFound) {
-        const selectedCaseIds = testCases
+        const selectedCaseIds = casesToPush
           .filter((testCase) => preflight.recommendations.find((item) => item.newCaseId === testCase.id)?.recommendation === 'include')
           .map((testCase) => testCase.id);
         setDuplicateReview({
@@ -583,7 +621,7 @@ export default function App() {
         pushToast('info', toastText.duplicateReviewTitle, toastText.duplicateReviewMessage(preflight.summary.existingCount, preflight.summary.jiraKey));
         return;
       }
-      await submitPush(testCases, weakAck, singleAck, conflictAck);
+      await submitPush(casesToPush, weakAck, singleAck, conflictAck, undefined, approvalOverride);
     } catch (pushError) {
       const message = (pushError as Error).message;
       setPushResults(message);
@@ -596,7 +634,7 @@ export default function App() {
   async function handleDuplicatePushConfirm() {
     if (!duplicateReview) return;
     const selected = new Set(duplicateReview.selectedCaseIds);
-    const casesToPush = testCases.filter((testCase) => selected.has(testCase.id));
+    const casesToPush = selectedPushCases.filter((testCase) => selected.has(testCase.id));
     if (!casesToPush.length) {
       pushToast('error', toastText.pushErrorTitle, toastText.duplicateReviewEmptySelection);
       return;
@@ -616,8 +654,21 @@ export default function App() {
 
   function handleCaseChange(index: number, field: keyof GeneratedTestCase, value: string | string[]) {
     setTestCases((current) =>
-      current.map((testCase, caseIndex) => (caseIndex === index ? { ...testCase, [field]: value } : testCase))
+      current.map((testCase, caseIndex) =>
+        caseIndex === index ? { ...testCase, [field]: field === 'type' ? 'BDD' : value } : testCase
+      )
     );
+  }
+
+  function handleCaseRemove(index: number) {
+    const removed = testCases[index];
+    if (!removed) return;
+    setTestCases((current) => current.filter((_, caseIndex) => caseIndex !== index));
+    setSelectedPushCaseIds((current) => current.filter((caseId) => caseId !== removed.id));
+    setApproved(false);
+    setDuplicateReview(null);
+    setPushResults('');
+    pushToast('success', 'Test case removed', `${removed.id} was removed from this draft batch. Nothing was deleted from TestRail.`);
   }
 
   async function handleLogout() {
@@ -725,7 +776,7 @@ export default function App() {
           jiraKey={context.ticketKey}
           sectionId={sectionId}
           existingCases={duplicateReview.existingCases}
-          generatedCases={testCases}
+          generatedCases={selectedPushCases}
           recommendations={duplicateReview.recommendations}
           selectedCaseIds={duplicateReview.selectedCaseIds}
           busy={pushing}
@@ -860,11 +911,11 @@ export default function App() {
         </button>
       </aside>
 
-      <main className="workbench-main">
+      <main className={`workbench-main ${reviewMode ? 'review-mode' : ''}`}>
         <header className="workbench-topbar">
           <div>
-            <h1>{view === 'home' ? t.home.title : view === 'testrail' ? t.dashboard.title : view === 'guide' ? t.guide.navItem : t.heroTitle}</h1>
-            <p>{view === 'home' ? t.home.subtitle : view === 'testrail' ? t.dashboard.subtitle : view === 'guide' ? t.guide.subtitle : activeWorkflowLabel}</p>
+            <h1>{reviewMode ? t.review.title : view === 'home' ? t.home.title : view === 'testrail' ? t.dashboard.title : view === 'guide' ? t.guide.navItem : t.heroTitle}</h1>
+            <p>{reviewMode ? t.review.subtitle : view === 'home' ? t.home.subtitle : view === 'testrail' ? t.dashboard.subtitle : view === 'guide' ? t.guide.subtitle : activeWorkflowLabel}</p>
           </div>
           <div className="workbench-top-actions">
             <button className="button button-secondary button-small" type="button" onClick={() => setShowStatusModal(true)}>
@@ -950,7 +1001,7 @@ export default function App() {
             />
           ) : (
           <>
-          <section ref={analyzeSectionRef} className="workbench-anchor">
+          <section ref={analyzeSectionRef} className="workbench-anchor analyze-anchor">
           <AnalyzePanel
             lang={lang}
             form={form}
@@ -961,6 +1012,7 @@ export default function App() {
             suggestions={ticketSuggestions}
             suggestionsLoading={loadingSuggestions}
             suggestionsError={suggestionsError}
+            resolvedScopeType={context?.constraints.scopeType}
             onLogin={handleLogin}
             onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
             onSuggestionSelect={handleSuggestionSelect}
@@ -969,7 +1021,7 @@ export default function App() {
           </section>
 
           <div className="workbench-primary">
-            <section ref={scopeSectionRef} className="workbench-anchor">
+            <section ref={scopeSectionRef} className="workbench-anchor scope-anchor">
               <ContextPanel
                 lang={lang}
                 context={context}
@@ -988,64 +1040,21 @@ export default function App() {
             </section>
 
             {pendingGeneration ? (
-              <RegenerateDiffPanel
-                lang={lang}
-                currentCases={testCases}
-                candidate={pendingGeneration}
-                onReplace={() => {
-                  applyGeneration(pendingGeneration);
-                  setPendingGeneration(null);
-                }}
-                onCancel={() => setPendingGeneration(null)}
-              />
-            ) : null}
-
-            {qualityEvaluation ? (
-              <section className="workbench-anchor">
-                <div
-                  role="status"
-                  data-testid="quality-gate-banner"
-                  style={{
-                    border: '1px solid',
-                    borderColor:
-                      qualityEvaluation.qualityGate === 'fail'
-                        ? '#dc2626'
-                        : qualityEvaluation.qualityGate === 'warn'
-                        ? '#d97706'
-                        : '#16a34a',
-                    background:
-                      qualityEvaluation.qualityGate === 'fail'
-                        ? '#fef2f2'
-                        : qualityEvaluation.qualityGate === 'warn'
-                        ? '#fffbeb'
-                        : '#f0fdf4',
-                    color: '#1f2937',
-                    borderRadius: 8,
-                    padding: '12px 16px',
-                    marginBottom: 12,
+              <div className="review-setup-anchor">
+                <RegenerateDiffPanel
+                  lang={lang}
+                  currentCases={testCases}
+                  candidate={pendingGeneration}
+                  onReplace={() => {
+                    applyGeneration(pendingGeneration);
+                    setPendingGeneration(null);
                   }}
-                >
-                  <div style={{ fontWeight: 600 }} data-testid="quality-gate-status">
-                    Quality gate: {qualityEvaluation.qualityGate.toUpperCase()} — {qualityEvaluation.provider}/
-                    {qualityEvaluation.model} · {qualityEvaluation.testCaseCount} cases ·{' '}
-                    {qualityEvaluation.coveredCriteria}/{qualityEvaluation.totalCriteria} ACs covered
-                  </div>
-                  {qualityGateReasons(qualityEvaluation).length ? (
-                    <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                      {qualityGateReasons(qualityEvaluation).map((reason, index) => (
-                        <li key={index} style={{ fontSize: 13 }}>
-                          {reason}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : (
-                    <div style={{ fontSize: 13, marginTop: 4 }}>No quality issues detected.</div>
-                  )}
-                </div>
-              </section>
+                  onCancel={() => setPendingGeneration(null)}
+                />
+              </div>
             ) : null}
 
-            <section ref={reviewSectionRef} className="workbench-anchor">
+            <section ref={reviewSectionRef} className="workbench-anchor review-anchor">
               <ReviewPanel
                 lang={lang}
                 context={context}
@@ -1056,16 +1065,32 @@ export default function App() {
                 coverageEnforced={coverageEnforced}
                 manualScopeOverride={manualScopeOverride}
                 onCaseChange={handleCaseChange}
+                onCaseRemove={handleCaseRemove}
+                blockedCaseIds={blockedCaseIds}
+                selectedPushCaseIds={selectedPushCaseIds}
+                onSelectedPushCaseIdsChange={setSelectedPushCaseIds}
+                approved={approved}
+                sectionId={sectionId}
+                casesValid={selectedPushCasesValid}
+                coverageComplete={true}
+                pushBlocker={pushBlocker}
+                onApprovedChange={setApproved}
+                onPush={handlePush}
+                pushing={pushing}
+                qualityEvaluation={qualityEvaluation}
+                onRegenerate={handleGenerate}
               />
             </section>
 
-            <section ref={approveSectionRef} className="workbench-anchor">
+            <section ref={approveSectionRef} className="workbench-anchor approve-anchor">
               <ApprovalPanel
                 lang={lang}
                 approved={approved}
                 sectionId={sectionId}
-                casesValid={casesValid}
-                coverageComplete={coverageComplete}
+                casesValid={selectedPushCasesValid}
+                coverageComplete={true}
+                readyCaseCount={readyCases.length}
+                blockedCaseCount={blockedCaseIds.length}
                 busy={pushing}
                 results={pushResults}
                 pushBlocker={pushBlocker}

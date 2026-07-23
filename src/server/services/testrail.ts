@@ -21,7 +21,9 @@ export function buildGeneratedCaseBody(testCase: GeneratedTestCase): Record<stri
   return {
     title: testCase.title,
     template_id: 4,
-    type_id: mapType(testCase.type),
+    // Generated cases always use the BDD template. TestRail category remains meaningful by deriving it
+    // from the explicit positive/negative/edge intent instead of an unconstrained LLM type string.
+    type_id: mapType(testCase.caseIntent || testCase.type),
     priority_id: 2,
     refs: testCase.jiraReference,
     custom_preconds: testCase.preconditions,
@@ -31,6 +33,9 @@ export function buildGeneratedCaseBody(testCase: GeneratedTestCase): Record<stri
 
 function enrichBddScenario(testCase: GeneratedTestCase): string {
   const sections = [String(testCase.bddScenario || '').trim()];
+  if (testCase.expectedResult && !testCase.manualVerification) {
+    sections.push(`\nExpected Result:\n${testCase.expectedResult}`);
+  }
   if (testCase.apiSpec) {
     const lines = [
       '',

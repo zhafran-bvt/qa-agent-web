@@ -11,13 +11,13 @@ import {
 } from '../../src/server/services/validation';
 
 const acceptanceCriteria = [
-  { id: 'AC-1', text: 'Adm Area filter is required before Add Dataset button enabled' },
+  { id: 'AC-1', text: 'BVT polygon datasets can be saved to a project' },
   { id: 'AC-2', text: 'Adm Area filter follows Global Area Filter sync' },
 ];
 
 const validCase = {
   title: '[FE][Spatial Analysis][ORB-3077] Save project with BVT polygon datasets',
-  type: 'Happy Path',
+  type: 'BDD',
   jiraReference: 'ORB-3077',
   coversAcceptanceCriteria: ['AC-1'],
   preconditions: 'User is logged in and feature flag is enabled.',
@@ -38,6 +38,48 @@ test('validates a correct BDD test case', () => {
   assert.equal(result.valid, true);
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.warnings, []);
+});
+
+test('rejects free-text generated types and keeps intent in caseIntent', () => {
+  const result = validateCase(
+    { ...validCase, type: 'Happy Path', caseIntent: 'positive' },
+    { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria }
+  );
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /fixed 'BDD' value/);
+});
+
+test('requires mapped source worked examples and rejects common invented brand fixtures', () => {
+  const directRequirements = [
+    {
+      id: 'REQ-1',
+      text: 'The polygon dataset result must reuse the Central Jakarta worked example.',
+      disposition: 'in_scope' as const,
+      sourceKind: 'spec' as const,
+      sourceLocation: 'Spec: coverage result',
+      acceptanceCriteriaIds: ['AC-1'],
+      workedExamples: ['Central Jakarta - 61.5%'],
+    },
+  ];
+  const missingExample = validateCase(
+    { ...validCase, inputs: 'dataset_id=polygon-1' },
+    { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria, directRequirements }
+  );
+  assert.equal(missingExample.valid, false);
+  assert.match(missingExample.errors.join('\n'), /reuse an applicable worked example/);
+
+  const reusedExample = validateCase(
+    { ...validCase, inputs: 'coverage_label=Central Jakarta - 61.5%' },
+    { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria, directRequirements }
+  );
+  assert.doesNotMatch(reusedExample.errors.join('\n'), /worked example/);
+
+  const inventedBrand = validateCase(
+    { ...validCase, preconditions: 'Northwind Retail has a polygon dataset.', inputs: 'coverage_label=Central Jakarta - 61.5%' },
+    { jiraKey: 'ORB-3077', epic: 'Spatial Analysis', feOnly: true, acceptanceCriteria, directRequirements }
+  );
+  assert.equal(inventedBrand.valid, false);
+  assert.match(inventedBrand.errors.join('\n'), /invented fixture name/);
 });
 
 test('rejects title/ref Jira mismatch', () => {
@@ -138,6 +180,11 @@ test('builds coverage and flags uncovered criteria', () => {
         id: 'TC-02',
         title: '[FE][Spatial Analysis][ORB-3077] Global filter sync updates Adm Area',
         coversAcceptanceCriteria: ['AC-2'],
+        bddScenario: `Feature: Global Area Filter sync
+Scenario: Update Adm Area filter from the global filter
+Given the Adm Area filter is visible
+When the user changes the Global Area Filter
+Then the Adm Area filter follows the Global Area Filter selection`,
       },
     ],
     acceptanceCriteria
@@ -222,7 +269,7 @@ test('endpointIsDocumented matches structurally and respects method, no-op on em
   assert.equal(endpointIsDocumented('GET', '/v1/partners', matched), false); // path not in contract
 });
 
-test('warns when a postman case targets an endpoint absent from the matched contract', () => {
+test('rejects a postman case that targets an endpoint absent from the matched contract', () => {
   const result = validateCase(
     {
       ...validCase,
@@ -251,8 +298,8 @@ Then the response status should be 200`,
     }
   );
 
-  assert.equal(result.valid, true); // provenance is a warning, not a hard failure
-  assert.match(result.warnings.join('\n'), /not in the matched API contract/);
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /not in the matched API contract/);
 });
 
 test('does not warn on endpoint provenance when no contract was matched', () => {
@@ -316,7 +363,7 @@ Then the dataset rows should not contain a "Dasymetric Weight" column`,
   assert.doesNotMatch(result.warnings.join('\n'), /additional endpoint/);
 });
 
-test('still warns on endpoint alignment when the BDD exercises a genuinely different endpoint', () => {
+test('rejects endpoint alignment when the BDD exercises a genuinely different endpoint', () => {
   const result = validateCase(
     {
       ...validCase,
@@ -345,9 +392,54 @@ Then the response status should be 200`,
     }
   );
 
-  assert.equal(result.valid, true);
-  // A different literal path (datasets vs analysis) is a real second endpoint — must still be flagged.
-  assert.match(result.warnings.join('\n'), /additional endpoint/);
+  assert.equal(result.valid, false);
+  // A different literal path (datasets vs analysis) is a real second endpoint and is not pushable.
+  assert.match(result.errors.join('\n'), /additional endpoint/);
+});
+
+test('ORB-2564: rejects title and apiSpec that contradict the planned observable endpoint', () => {
+  const criteria = [
+    { id: 'AC-3', text: 'The response includes data_label with the value bulleted_list for the coverage array.' },
+  ];
+  const result = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-2564] POST analysis returns bulleted list metadata',
+      jiraReference: 'ORB-2564',
+      executionType: 'postman',
+      coversAcceptanceCriteria: ['AC-3'],
+      apiSpec: {
+        method: 'GET',
+        path: '/v1/analysis/{id}/summary',
+        expectedResponse: '{"data_label":"bulleted_list"}',
+        assertions: ['data_label equals bulleted_list'],
+      },
+      bddScenario: `Feature: Administrative area coverage metadata
+Scenario: Read coverage metadata
+Given a completed grid analysis id is known
+When GET /v1/analysis/{id}/summary is requested
+Then data_label equals bulleted_list`,
+    },
+    {
+      jiraKey: 'ORB-2564',
+      epic: 'Spatial Analysis',
+      scopeType: 'api',
+      acceptanceCriteria: criteria,
+      acceptanceCriteriaExecutionPlan: [
+        {
+          criterionId: 'AC-3',
+          executionType: 'postman',
+          observableSurface: 'GET /v1/analysis/{id}/stream',
+          reason: 'The result stream exposes the dataset metadata.',
+          coveragePolicy: 'api_assertion',
+        },
+      ],
+    }
+  );
+
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /must be asserted on GET \/v1\/analysis\/\{id\}\/stream/);
+  assert.match(result.errors.join('\n'), /Title references POST but apiSpec uses GET/);
 });
 
 test('warns when one case claims too many acceptance criteria without being smoke or e2e', () => {
@@ -395,7 +487,7 @@ test('allows broad acceptance criteria mapping for explicit smoke or e2e cases',
     {
       ...validCase,
       title: '[BE][Spatial Analysis][ORB-3310] Smoke generate dasymetric analysis result',
-      type: 'Smoke',
+      type: 'BDD',
       jiraReference: 'ORB-3310',
       executionType: 'postman',
       coversAcceptanceCriteria: ['AC-1', 'AC-2', 'AC-3'],
@@ -421,7 +513,7 @@ And the score remains unchanged`,
   assert.doesNotMatch(result.warnings.join('\n'), /maps to 3 acceptance criteria/);
 });
 
-test('warns when BDD API flow uses endpoints not represented by apiSpec', () => {
+test('rejects BDD API flows that use endpoints not represented by apiSpec', () => {
   const result = validateCase(
     {
       ...validCase,
@@ -453,8 +545,8 @@ And the stream result includes Dasymetric Weight`,
     }
   );
 
-  assert.equal(result.valid, true);
-  assert.match(result.warnings.join('\n'), /additional endpoint\(s\) GET \/v1\/analysis\/\{id\}\/stream/);
+  assert.equal(result.valid, false);
+  assert.match(result.errors.join('\n'), /additional endpoint\(s\) GET \/v1\/analysis\/\{id\}\/stream/);
 });
 
 test('validateCases warns on likely duplicate generated cases', () => {
@@ -481,6 +573,7 @@ test('validateCases warns on likely duplicate generated cases', () => {
       {
         ...baseApiCase,
         id: 'TC-1',
+        caseIntent: 'positive' as const,
         title: '[BE][Spatial Analysis][ORB-3310] Apply dasymetric weight to stream response',
         bddScenario: `Feature: Spatial analysis API
 Scenario: Apply dasymetric weight to stream response
@@ -492,6 +585,7 @@ And the stream result includes Dasymetric Weight`,
       {
         ...baseApiCase,
         id: 'TC-2',
+        caseIntent: 'negative' as const,
         title: '[BE][Spatial Analysis][ORB-3310] Verify dasymetric weight stream response',
         bddScenario: `Feature: Spatial analysis API
 Scenario: Verify dasymetric weight stream response
@@ -506,6 +600,95 @@ And the stream result includes Dasymetric Weight`,
 
   assert.equal(validation[1].valid, true);
   assert.match(validation[1].warnings.join('\n'), /Potential duplicate of TC-1/);
+});
+
+test('validateCases preserves POST and GET variants even when they cover the same AC', () => {
+  const criteria = [{ id: 'AC-1', text: 'The analysis operation returns the administrative area coverage value.' }];
+  const base = {
+    ...validCase,
+    jiraReference: 'ORB-2565',
+    executionType: 'postman' as const,
+    coversAcceptanceCriteria: ['AC-1'],
+    expectedResult: 'The response contains the administrative area coverage value.',
+  };
+  const validation = validateCases(
+    [
+      {
+        ...base,
+        id: 'TC-1',
+        title: '[BE][Spatial Analysis][ORB-2565] Submit analysis returns coverage',
+        bddScenario: 'Feature: Coverage\nScenario: Submit\nGiven a coverage fixture\nWhen POST /v1/analysis is sent\nThen the response contains administrative area coverage',
+        apiSpec: {
+          method: 'POST',
+          path: '/v1/analysis',
+          samplePayload: '{"geometry":"fixture-1"}',
+          expectedResponse: '{"adm_area_coverage_1":"Central Jakarta - 61.5%"}',
+        },
+      },
+      {
+        ...base,
+        id: 'TC-2',
+        title: '[BE][Spatial Analysis][ORB-2565] Read analysis summary returns coverage',
+        bddScenario: 'Feature: Coverage\nScenario: Read\nGiven a coverage fixture\nWhen GET /v1/analysis/{id}/summary is sent\nThen the response contains administrative area coverage',
+        apiSpec: {
+          method: 'GET',
+          path: '/v1/analysis/{id}/summary',
+          expectedResponse: '{"adm_area_coverage_1":"Central Jakarta - 61.5%"}',
+        },
+      },
+    ],
+    { jiraKey: 'ORB-2565', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria: criteria }
+  );
+
+  assert.doesNotMatch(validation[1].warnings.join('\n'), /Potential duplicate/);
+});
+
+test('validateCases keeps materially different variants for the same AC and endpoint', () => {
+  const criteria = [{ id: 'AC-1', text: 'The coverage array supports multiple administrative areas.' }];
+  const base = {
+    ...validCase,
+    jiraReference: 'ORB-2564',
+    executionType: 'postman' as const,
+    coversAcceptanceCriteria: ['AC-1'],
+    apiSpec: { method: 'POST', path: '/v1/analysis' },
+  };
+  const validation = validateCases(
+    [
+      {
+        ...base,
+        id: 'TC-1',
+        caseIntent: 'positive' as const,
+        title: '[BE][Spatial Analysis][ORB-2564] Return multiple administrative areas',
+        expectedResult: 'The returned value is a JSON array containing at least two distinct administrative areas.',
+        bddScenario: 'Feature: Coverage\nScenario: Multiple areas\nGiven two areas overlap\nWhen POST /v1/analysis is sent\nThen the coverage value is a JSON array with at least two entries',
+        apiSpec: {
+          method: 'POST',
+          path: '/v1/analysis',
+          samplePayload: '{"geometry":"multi-area"}',
+          expectedResponse: '{"administrative_area_coverage":["Area A","Area B"]}',
+          assertions: ['coverage value is a JSON array with at least two distinct entries'],
+        },
+      },
+      {
+        ...base,
+        id: 'TC-2',
+        caseIntent: 'edge' as const,
+        title: '[BE][Spatial Analysis][ORB-2564] Keep analysis valid without mapped areas',
+        expectedResult: 'The coverage value is null and the analysis result remains valid.',
+        bddScenario: 'Feature: Coverage\nScenario: Unmapped area\nGiven no area mapping exists\nWhen POST /v1/analysis is sent\nThen coverage is null\nAnd the result remains valid',
+        apiSpec: {
+          method: 'POST',
+          path: '/v1/analysis',
+          samplePayload: '{"geometry":"unmapped"}',
+          expectedResponse: '{"administrative_area_coverage":null,"status":"completed"}',
+          assertions: ['coverage is null', 'analysis status remains completed'],
+        },
+      },
+    ],
+    { jiraKey: 'ORB-2564', epic: 'Spatial Analysis', scopeType: 'api', acceptanceCriteria: criteria }
+  );
+
+  assert.doesNotMatch(validation[1].warnings.join('\n'), /Potential duplicate/);
 });
 
 test('warns when executionType contradicts a populated apiSpec', () => {
@@ -575,7 +758,95 @@ test('builds coverage that flags unsubstantiated claims without dropping them si
   assert.ok(coverage.uncoveredCriteria.includes('AC-2'));
 });
 
-test('F2: flags a conditional AC covered by only one polarity (negative without positive)', () => {
+test('ORB-2564: coverage requires the JSON array and exact data_label contract in assertions', () => {
+  const criteria = [
+    {
+      id: 'AC-1',
+      text: 'The grid analysis result includes an administrative area coverage attribute.',
+    },
+    {
+      id: 'AC-2',
+      text: 'The administrative area coverage attribute is returned as a JSON array so multiple areas can be represented.',
+    },
+    {
+      id: 'AC-3',
+      text: 'The response includes a data_label value of bulleted_list for the administrative area coverage array.',
+    },
+  ];
+  const weakCoverage = buildCoverage(
+    [
+      {
+        id: 'TC-NULL',
+        coversAcceptanceCriteria: ['AC-1'],
+        expectedResult: 'The analysis completes and remains accessible when administrative area coverage is unavailable.',
+        bddScenario: 'Given coverage is unavailable When the result is read Then the analysis remains accessible',
+      },
+      {
+        id: 'TC-MULTIPLE',
+        coversAcceptanceCriteria: ['AC-2'],
+        expectedResult: 'Multiple administrative area coverage entries are present.',
+        bddScenario: 'Given multiple areas overlap When the result is read Then multiple coverage entries are present',
+      },
+      {
+        id: 'TC-LABEL',
+        coversAcceptanceCriteria: ['AC-3'],
+        expectedResult: 'Coverage metadata is returned for client rendering.',
+        bddScenario: 'Given a completed result When metadata is read Then coverage metadata is returned',
+      },
+    ],
+    criteria
+  );
+
+  assert.deepEqual(weakCoverage.uncoveredCriteria, ['AC-1', 'AC-2', 'AC-3']);
+  assert.equal(weakCoverage.unsubstantiatedClaims.length, 3);
+
+  const strongCoverage = buildCoverage(
+    [
+      {
+        id: 'TC-CONTRACT',
+        coversAcceptanceCriteria: ['AC-1', 'AC-2', 'AC-3'],
+        expectedResult:
+          'The grid result includes the administrative area coverage attribute as a JSON array with at least two distinct area entries and its data_label equals bulleted_list.',
+        bddScenario:
+          'Given a completed grid analysis When the result is read Then the result includes administrative area coverage as a JSON array with at least two distinct entries And data_label equals bulleted_list',
+      },
+    ],
+    criteria
+  );
+
+  assert.deepEqual(strongCoverage.uncoveredCriteria, []);
+  assert.equal(strongCoverage.coveredCriteria, 3);
+});
+
+test('ORB-2564: data_type array metadata alone does not substantiate the JSON array value', () => {
+  const coverage = buildCoverage(
+    [
+      {
+        id: 'TC-METADATA-ONLY',
+        coversAcceptanceCriteria: ['AC-2'],
+        expectedResult: "The administrative_area_coverage attribute has data_type 'array'.",
+        bddScenario: "Given a grid result When metadata is read Then administrative_area_coverage data_type is array",
+        apiSpec: {
+          method: 'POST',
+          path: '/v1/analysis',
+          expectedResponse: '{"key":"administrative_area_coverage","data_type":"array"}',
+          assertions: ["administrative_area_coverage data_type equals array"],
+        },
+      },
+    ],
+    [
+      {
+        id: 'AC-2',
+        text: 'The administrative area coverage attribute is returned as a JSON array so multiple areas can be represented.',
+      },
+    ]
+  );
+
+  assert.deepEqual(coverage.uncoveredCriteria, ['AC-2']);
+  assert.equal(coverage.unsubstantiatedClaims[0]?.criterionId, 'AC-2');
+});
+
+test('F2: flags an explicitly two-branch AC covered by only one polarity (negative without positive)', () => {
   const coverage = buildCoverage(
     [
       {
@@ -586,7 +857,7 @@ test('F2: flags a conditional AC covered by only one polarity (negative without 
         bddScenario: 'Given radius is 0 When the form is checked Then the Generate Results button is disabled',
       },
     ],
-    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' }]
+    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0, and enabled when radius is valid.' }]
   );
   // Covered (green) but only the disabled branch is tested — the enabled-with-valid-radius branch is absent.
   assert.equal(coverage.coveredCriteria, 1);
@@ -614,7 +885,7 @@ test('F2: does not flag a conditional AC tested in both polarities', () => {
         bddScenario: 'Given a valid radius Then the Generate Results button is enabled',
       },
     ],
-    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' }]
+    [{ id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0, and enabled when radius is valid.' }]
   );
   assert.equal(coverage.singlePolarityCriteria.length, 0);
 });
@@ -678,7 +949,7 @@ test('F2: never flags a non-conditional AC even when tested in one polarity', ()
   assert.equal(coverage.singlePolarityCriteria.length, 0);
 });
 
-test('F2: only API-observable execution-plan items require single-polarity coverage', () => {
+test('F2: a one-branch API rejection rule does not fabricate a missing positive case', () => {
   const criteria = [
     { id: 'AC-API', text: 'The API rejects onboarding progress updates when the Authorization Bearer token is missing or invalid.' },
     { id: 'AC-DB', text: 'The database migration creates the dasymetric_output table and required index when the migration is applied.' },
@@ -774,11 +1045,7 @@ test('F2: only API-observable execution-plan items require single-polarity cover
     }
   );
 
-  assert.deepEqual(
-    coverage.singlePolarityCriteria.map((item) => item.criterionId),
-    ['AC-API']
-  );
-  assert.deepEqual(coverage.singlePolarityCriteria[0].missing, ['positive']);
+  assert.deepEqual(coverage.singlePolarityCriteria, []);
 });
 
 test('F2: an uncovered conditional AC is a gap, not a single-polarity warning', () => {
@@ -793,14 +1060,14 @@ test('F2: an uncovered conditional AC is a gap, not a single-polarity warning', 
       },
     ],
     [
-      { id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0' },
+      { id: 'AC-1', text: 'Generate Results button is disabled when radius is missing or 0, and enabled when radius is valid.' },
       { id: 'AC-2', text: 'Save Project button is disabled when the address field is empty' },
     ]
   );
   // AC-2 is conditional but nothing covers it → it's a true uncovered gap, not single-polarity.
   assert.ok(coverage.uncoveredCriteria.includes('AC-2'));
   assert.ok(!coverage.singlePolarityCriteria.some((item) => item.criterionId === 'AC-2'));
-  // AC-1 is covered by only a negative case → single-polarity.
+  // AC-1 explicitly defines both branches and is covered by only a negative case → single-polarity.
   assert.ok(coverage.singlePolarityCriteria.some((item) => item.criterionId === 'AC-1'));
 });
 
@@ -826,6 +1093,64 @@ Then is_dimension and is_measure should match the inference rules`,
   );
 
   assert.equal(result.valid, true);
+});
+
+test('rejects manual cases that claim to execute an HTTP method without apiSpec', () => {
+  const titleResult = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-2564] POST analysis returns coverage array',
+      jiraReference: 'ORB-2564',
+      executionType: 'manual_integration',
+      coversAcceptanceCriteria: ['AC-1'],
+      manualVerification: {
+        target: 'completed analysis output',
+        steps: ['Inspect the completed output.'],
+        expectedResult: 'Coverage is returned.',
+      },
+      bddScenario: `Feature: Coverage API
+Scenario: Return coverage
+Given a completed analysis exists
+When the reviewer inspects its output
+Then coverage is returned`,
+    },
+    {
+      jiraKey: 'ORB-2564',
+      epic: 'Spatial Analysis',
+      scopeType: 'api',
+      acceptanceCriteria: [{ id: 'AC-1', text: 'Coverage is returned.' }],
+    }
+  );
+  const actionResult = validateCase(
+    {
+      ...validCase,
+      title: '[BE][Spatial Analysis][ORB-2564] Read completed coverage result',
+      jiraReference: 'ORB-2564',
+      executionType: 'manual_integration',
+      coversAcceptanceCriteria: ['AC-1'],
+      manualVerification: {
+        target: 'completed analysis output',
+        steps: ['Inspect the completed output.'],
+        expectedResult: 'Coverage is returned.',
+      },
+      bddScenario: `Feature: Coverage API
+Scenario: Read coverage
+Given a completed analysis exists
+When I send a GET request to "/v1/analysis/{id}/summary"
+Then coverage is returned`,
+    },
+    {
+      jiraKey: 'ORB-2564',
+      epic: 'Spatial Analysis',
+      scopeType: 'api',
+      acceptanceCriteria: [{ id: 'AC-1', text: 'Coverage is returned.' }],
+    }
+  );
+
+  assert.equal(titleResult.valid, false);
+  assert.match(titleResult.errors.join('\n'), /use executionType postman with a matching apiSpec/);
+  assert.equal(actionResult.valid, false);
+  assert.match(actionResult.errors.join('\n'), /GET \/v1\/analysis\/\{id\}\/summary/);
 });
 
 test('flags Postman cases that claim manually executable DB acceptance criteria', () => {
