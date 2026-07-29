@@ -1080,6 +1080,20 @@ export default function App() {
                 qualityEvaluation={qualityEvaluation}
                 onRegenerate={handleGenerate}
               />
+              {pushedCases ? (
+                context?.scopeParentIssue ? (
+                  <PlanLinkCard
+                    lang={lang}
+                    caseIds={pushedCases.ids}
+                    taskKey={pushedCases.jiraKey}
+                    taskSummary={context.mainIssue.summary || ''}
+                    storyKey={context.scopeParentIssue.key}
+                    storySummary={context.scopeParentIssue.summary || ''}
+                  />
+                ) : (
+                  <AddToRunCard lang={lang} caseIds={pushedCases.ids} jiraKey={pushedCases.jiraKey} />
+                )
+              ) : null}
             </section>
 
             <section ref={approveSectionRef} className="workbench-anchor approve-anchor">
@@ -1097,20 +1111,6 @@ export default function App() {
                 onApprovedChange={setApproved}
                 onPush={handlePush}
               />
-              {pushedCases ? (
-                context?.scopeParentIssue ? (
-                  <PlanLinkCard
-                    lang={lang}
-                    caseIds={pushedCases.ids}
-                    taskKey={pushedCases.jiraKey}
-                    taskSummary={context.mainIssue.summary || ''}
-                    storyKey={context.scopeParentIssue.key}
-                    storySummary={context.scopeParentIssue.summary || ''}
-                  />
-                ) : (
-                  <AddToRunCard lang={lang} caseIds={pushedCases.ids} jiraKey={pushedCases.jiraKey} />
-                )
-              ) : null}
             </section>
           </div>
           </>
