@@ -525,9 +525,9 @@ function sha256(value: unknown): string {
 
 function analysisSourceFingerprint(context: QaContext): string {
   return sha256({
-    // Bumped to 17: endpoint planning now separates asynchronous submit triggers from result-field
-    // observation and keeps each synthesized criterion on one observable surface.
-    version: 17,
+    // Bumped to 18: invalidate cached analysis contexts created before GPT-5.6
+    // request compatibility and acceptance-criteria cache safety were deployed.
+    version: 18,
     ticketKey: context.ticketKey,
     mainIssue: context.mainIssue,
     linkedIssues: context.linkedIssues,

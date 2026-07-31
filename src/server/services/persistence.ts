@@ -997,6 +997,11 @@ class PostgresPersistence implements Persistence {
          AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,analysisSourceHash}' = $2
          AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,acProvider}' = $3
          AND context_json #>> '{acceptanceCriteriaDiagnostics,cache,acModel}' = $4
+         AND COALESCE(context_json #>> '{acceptanceCriteriaDiagnostics,acceptanceCriteriaNotProductionReady}', 'false') <> 'true'
+         AND (
+           context_json #>> '{acceptanceCriteriaDiagnostics,rawAcceptanceCriteriaQuality}' = 'strong'
+           OR context_json #>> '{acceptanceCriteriaDiagnostics,synthesisUsed}' = 'true'
+         )
        ORDER BY created_at DESC
        LIMIT 1`,
       [input.jiraKey, input.analysisSourceHash, input.acProvider, input.acModel]
