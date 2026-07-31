@@ -27,14 +27,20 @@ function shouldLog(level: LogLevel): boolean {
   return LOG_LEVELS[level] >= LOG_LEVELS[ACTIVE_LEVEL];
 }
 
-function sanitize(value: unknown): unknown {
+export function sanitize(value: unknown): unknown {
   if (value == null) return value;
   if (Array.isArray(value)) return value.map(sanitize);
   if (typeof value === 'object') {
     const input = value as Record<string, unknown>;
     const output: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(input)) {
-      if (/token|secret|password|authorization|cookie|api[_-]?key/i.test(key)) {
+      // Token-COUNT metrics (promptTokens, cachedPromptTokens, cachedPromptTokenPct, completionTokens,
+      // totalTokens) are usage numbers, not credentials. The generic "token" rule below would redact
+      // them as false positives, so exempt clearly count-shaped keys while still redacting real auth
+      // tokens/secrets (accessToken, refresh_token, api_key, ...).
+      const isTokenCountMetric =
+        /tokens?(?:pct|count)?$/i.test(key) && /(?:prompt|completion|total|cached|output|input)/i.test(key);
+      if (!isTokenCountMetric && /token|secret|password|authorization|cookie|api[_-]?key/i.test(key)) {
         output[key] = '[redacted]';
         continue;
       }
