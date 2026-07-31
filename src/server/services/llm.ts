@@ -192,6 +192,10 @@ function providerIntegerEnv(name: string, suffix: string, fallback: number): num
   return Number.isFinite(configured) && configured >= 0 ? configured : fallback;
 }
 
+export function isGpt56Model(model: string): boolean {
+  return /(?:^|\/)gpt-5\.6(?:-|$)/i.test(String(model || '').trim());
+}
+
 export function providerBehavior(provider: { name: string }): ProviderBehavior {
   const name = String(provider.name || '').trim().toLowerCase();
   const isDeepSeek = name === 'deepseek';
@@ -251,10 +255,15 @@ export function buildChatCompletionBody(provider: ProviderConfig, task: LlmTask,
       messages.unshift({ role: 'system', content: contract });
     }
   }
-  const nextBody = {
+  const nextBody: Record<string, unknown> = {
     ...body,
     messages,
   };
+  if (isGpt56Model(provider.model)) {
+    // GPT-5.6 only supports its default temperature; omit the field instead of
+    // sending the non-default values used by the older generation paths.
+    delete nextBody.temperature;
+  }
   delete (nextBody as { max_tokens?: unknown }).max_tokens;
   delete (nextBody as { max_completion_tokens?: unknown }).max_completion_tokens;
   const behavior = providerBehavior(provider);

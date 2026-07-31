@@ -246,8 +246,25 @@ test('DeepSeek request bodies include JSON contract and task max tokens', () => 
   );
 
   assert.equal(body.max_tokens, maxOutputTokensForTask('generation'));
+  assert.equal(body.temperature, 0.2);
   assert.match(String((body.messages as any[])[0].content), /Return exactly one valid JSON object/);
   assert.match(String((body.messages as any[])[0].content), /Return strict JSON only/);
+});
+
+test('GPT-5.6 request bodies omit unsupported temperature', () => {
+  const body = buildChatCompletionBody(
+    { name: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: 'key', model: 'gpt-5.6-luna' },
+    'generation',
+    {
+      model: 'gpt-5.6-luna',
+      temperature: 0.2,
+      response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: 'Generate strict JSON.' }],
+    }
+  );
+
+  assert.equal(body.temperature, undefined);
+  assert.equal(body.max_completion_tokens, maxOutputTokensForTask('generation'));
 });
 
 test('OpenAI request bodies keep prompts unchanged and use max_completion_tokens', () => {
@@ -256,12 +273,14 @@ test('OpenAI request bodies keep prompts unchanged and use max_completion_tokens
     'translation',
     {
       model: 'gpt-5.4-mini',
+      temperature: 0.2,
       messages: [{ role: 'system', content: 'Translate scope.' }],
     }
   );
 
   assert.equal(body.max_completion_tokens, maxOutputTokensForTask('translation'));
   assert.equal(body.max_tokens, undefined);
+  assert.equal(body.temperature, 0.2);
   assert.equal(String((body.messages as any[])[0].content), 'Translate scope.');
 });
 
